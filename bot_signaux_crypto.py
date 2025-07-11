@@ -1,52 +1,45 @@
-import requests
+import os
 import time
+import requests
 import numpy as np
 from telegram import Bot
 
-TELEGRAM_TOKEN = '7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac'
-CHAT_ID = 969925512
+# Récupération des variables d'environnement
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID"))
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
-CRYPTO = "BTCUSDT"
-INTERVAL = "1h"
-LIMIT = 30
+# Liste des cryptos à surveiller
+CRYPTOS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
-def get_klines():
-    url = f"https://api.binance.com/api/v3/klines?symbol={CRYPTO}&interval={INTERVAL}&limit={LIMIT}"
-    response = requests.get(url).json()
-    closes = [float(candle[4]) for candle in response]  # prix de clôture
-    return closes
+def get_prices(symbol, limit=50):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit={limit}"
+    response = requests.get(url)
+    data = response.json()
+    closes = [float(candle[4]) for candle in data]
+    return np.array(closes)
 
-def moving_average(data, period):
-    return np.convolve(data, np.ones(period)/period, mode='valid')
+def moving_average(data, window):
+    return np.convolve(data, np.ones(window)/window, mode='valid')
 
-def send_crypto_alert(last_signal):
-    closes = get_klines()
-    if len(closes) < 25:
-        print("Pas assez de données")
-        return last_signal
+# On garde en mémoire les derniers signaux pour éviter les doublons
+last_signals = {}
 
-    ma_short = moving_average(closes, 7)
-    ma_long = moving_average(closes, 25)
+while True:
+    for crypto in CRYPTOS:
+        prices = get_prices(crypto)
+        ma7 = moving_average(prices, 7)
+        ma25 = moving_average(prices, 25)
 
-    if ma_short[-1] > ma_long[-1] and last_signal != "BUY":
-        bot.send_message(chat_id=CHAT_ID, text=f"📈 Signal ACHAT pour {CRYPTO} (MA7 > MA25)")
-        last_signal = "BUY"
-    elif ma_short[-1] < ma_long[-1] and last_signal != "SELL":
-        bot.send_message(chat_id=CHAT_ID, text=f"📉 Signal VENTE pour {CRYPTO} (MA7 < MA25)")
-        last_signal = "SELL"
-    else:
-        print(f"MA7: {ma_short[-1]:.2f}, MA25: {ma_long[-1]:.2f}, dernier signal: {last_signal}")
+        # On compare les dernières valeurs des moyennes mobiles
+        if ma7[-1] > ma25[-1] and (last_signals.get(crypto) != "BUY"):
+            bot.send_message(chat_id=CHAT_ID, text=f"📈 Signal ACHAT pour {crypto} (MA7 > MA25)")
+            last_signals[crypto] = "BUY"
+        elif ma7[-1] < ma25[-1] and (last_signals.get(crypto) != "SELL"):
+            bot.send_message(chat_id=CHAT_ID, text=f"📉 Signal VENTE pour {crypto} (MA7 < MA25)")
+            last_signals[crypto] = "SELL"
+        else:
+            print(f"{crypto} - Aucun nouveau signal ({last_signals.get(crypto)})")
 
-    return last_signal
-
-def main():
-    last_signal = None
-    while True:
-        last_signal = send_crypto_alert(last_signal)
-        time.sleep(300)  # 5 minutes
-
-if __name__ == "__main__":
-    main()
-
+    time.sleep(60*60)  # Pause 1 heure
