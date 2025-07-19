@@ -1,45 +1,48 @@
 import os
-import time
 import requests
 import numpy as np
+import asyncio
 from telegram import Bot
 
-# Récupération des variables d'environnement
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+# Récupérer les variables d'environnement
+TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID"))
 
-bot = Bot(token=TELEGRAM_TOKEN)
+bot = Bot(token=TOKEN)
 
-# Liste des cryptos à surveiller
-CRYPTOS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+async def send_signal(message):
+    await bot.send_message(chat_id=CHAT_ID, text=message)
 
-def get_prices(symbol, limit=50):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit={limit}"
-    response = requests.get(url)
-    data = response.json()
-    closes = [float(candle[4]) for candle in data]
-    return np.array(closes)
+def get_price_history(crypto):
+    url = f"https://api.binance.com/api/v3/klines?symbol={crypto}USDT&interval=1h&limit=30"
+    try:
+        response = requests.get(url)
+        data = response.json()
+        closes = [float(candle[4]) for candle in data]
+        return closes
+    except Exception as e:
+        print(f"Erreur récupération prix pour {crypto} : {e}")
+        return []
 
-def moving_average(data, window):
-    return np.convolve(data, np.ones(window)/window, mode='valid')
+async def detect_signal(crypto):
+    prices = get_price_history(crypto)
+    if len(prices) < 25:
+        return
+    ma7 = np.mean(prices[-7:])
+    ma25 = np.mean(prices[-25:])
+    if ma7 > ma25:
+        await send_signal(f"📈 Signal ACHAT pour {crypto} (MA7 > MA25)")
+    elif ma7 < ma25:
+        await send_signal(f"📉 Signal VENTE pour {crypto} (MA7 < MA25)")
 
-# On garde en mémoire les derniers signaux pour éviter les doublons
-last_signals = {}
+cryptos = ["BTC", "ETH", "BNB", "SOL", "XRP"]
 
-while True:
-    for crypto in CRYPTOS:
-        prices = get_prices(crypto)
-        ma7 = moving_average(prices, 7)
-        ma25 = moving_average(prices, 25)
+async def main():
+    while True:
+        for crypto in cryptos:
+            await detect_signal(crypto)
+        await asyncio.sleep(300)  # pause 5 minutes
 
-        # On compare les dernières valeurs des moyennes mobiles
-        if ma7[-1] > ma25[-1] and (last_signals.get(crypto) != "BUY"):
-            bot.send_message(chat_id=CHAT_ID, text=f"📈 Signal ACHAT pour {crypto} (MA7 > MA25)")
-            last_signals[crypto] = "BUY"
-        elif ma7[-1] < ma25[-1] and (last_signals.get(crypto) != "SELL"):
-            bot.send_message(chat_id=CHAT_ID, text=f"📉 Signal VENTE pour {crypto} (MA7 < MA25)")
-            last_signals[crypto] = "SELL"
-        else:
-            print(f"{crypto} - Aucun nouveau signal ({last_signals.get(crypto)})")
+if __name__ == "__main__":
+    asyncio.run(main())
 
-    time.sleep(60*60)  # Pause 1 heure
