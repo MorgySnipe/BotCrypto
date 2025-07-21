@@ -50,11 +50,14 @@ def compute_macd(prices, short=12, long=26, signal=9):
 # === TRAITEMENT CRYPTOS ===
 async def process_symbol(symbol):
     try:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}")
         klines = get_klines(symbol)
         closes = [float(k[4]) for k in klines]
         price = closes[-1]
         rsi = compute_rsi(closes)
         macd, signal = compute_macd(closes)
+
+        print(f"{symbol} | Price: {price:.2f} | RSI: {rsi:.2f} | MACD: {macd:.4f} | Signal: {signal:.4f}")
 
         buy = rsi < 30 and macd > signal
         sell = False
@@ -63,16 +66,19 @@ async def process_symbol(symbol):
         if trade:
             entry = trade['entry']
             gain_pct = ((price - entry) / entry) * 100
+            print(f"{symbol} | Position ouverte à {entry:.2f} | PnL: {gain_pct:.2f}%")
             if gain_pct >= 3 or gain_pct <= -1.5:
                 sell = True
 
         now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
 
         if buy and not trade:
+            print(f"✅ Signal d'achat détecté sur {symbol} à {price:.2f}")
             trades_col.insert_one({"symbol": symbol, "entry": price, "time": now})
             await bot.send_message(chat_id=CHAT_ID, text=f"🟢 Achat détecté sur {symbol} à {price:.2f}")
 
         elif sell and trade:
+            print(f"🔴 Vente déclenchée sur {symbol} à {price:.2f}")
             entry = trade['entry']
             gain_pct = ((price - entry) / entry) * 100
             await bot.send_message(
@@ -93,7 +99,7 @@ async def process_symbol(symbol):
             trades_col.delete_one({"symbol": symbol})
 
     except Exception as e:
-        print(f"Erreur {symbol}: {e}")
+        print(f"❌ Erreur {symbol}: {e}")
 
 # === RÉSUMÉ JOURNALIER ===
 async def send_daily_summary():
@@ -101,6 +107,7 @@ async def send_daily_summary():
     logs = list(logs_col.find({"date": today}))
     if logs:
         total = sum(log['gain_pct'] for log in logs)
+        print(f"📊 Résumé du {today} | Trades: {len(logs)} | Gain net: {total:.2f}%")
         await bot.send_message(
             chat_id=CHAT_ID,
             text=(
@@ -109,11 +116,15 @@ async def send_daily_summary():
                 f"Gain net : {total:.2f}%"
             )
         )
+    else:
+        print(f"📊 Aucun trade enregistré aujourd’hui ({today})")
 
 # === BOUCLE PRINCIPALE ===
 async def main_loop():
+    print("🚀 Boucle principale démarrée.")
     last_summary_sent = None
     while True:
+        print(f"🔁 Nouvelle itération à {datetime.now().strftime('%H:%M:%S')}")
         await asyncio.gather(*(process_symbol(sym) for sym in SYMBOLS))
         now = datetime.now(timezone.utc).date()
         if last_summary_sent != now:
@@ -127,3 +138,4 @@ if __name__ == "__main__":
     loop.create_task(main_loop())
     loop.run_until_complete(bot.send_message(chat_id=CHAT_ID, text="✅ Bot Crypto lancé (mode worker sans polling)"))
     loop.run_forever()
+
