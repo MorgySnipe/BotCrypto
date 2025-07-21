@@ -3,16 +3,14 @@ import requests
 import numpy as np
 from datetime import datetime, timezone
 from telegram import Bot
-from telegram.ext import ApplicationBuilder
 from pymongo import MongoClient
 import nest_asyncio
 
 nest_asyncio.apply()
 
 # === CONFIGURATION ===
-TELEGRAM_TOKEN = "7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac"
+TELEGRAM_TOKEN = '7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac'
 CHAT_ID = 969925512
-
 SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT']
 INTERVAL = '1h'
 LIMIT = 100
@@ -123,16 +121,6 @@ async def main_loop():
             last_summary_sent = now
         await asyncio.sleep(SLEEP_SECONDS)
 
-# === LANCEMENT AVEC POLLING ===
+# === LANCEMENT ===
 if __name__ == "__main__":
-    async def main():
-        print("🚀 Lancement du bot Telegram avec polling")
-        app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-        asyncio.create_task(main_loop())
-        await bot.send_message(chat_id=CHAT_ID, text="✅ Bot activé et en attente de signaux...")
-        await app.run_polling()
-
-    asyncio.run(main())
-
-
+    asyncio.run(main_loop())
