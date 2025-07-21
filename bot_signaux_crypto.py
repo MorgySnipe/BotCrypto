@@ -2,8 +2,8 @@ import asyncio
 import requests
 import numpy as np
 from datetime import datetime, timezone
-from telegram import Bot, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import Bot
+from telegram.ext import ApplicationBuilder
 from pymongo import MongoClient
 import nest_asyncio
 
@@ -11,7 +11,7 @@ nest_asyncio.apply()
 
 # === CONFIGURATION ===
 TELEGRAM_TOKEN = "7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac"
-CHAT_ID = 969925512  # Change ça si besoin
+CHAT_ID = 969925512
 
 SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT']
 INTERVAL = '1h'
@@ -123,27 +123,11 @@ async def main_loop():
             last_summary_sent = now
         await asyncio.sleep(SLEEP_SECONDS)
 
-# === COMMANDE /stats ===
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    today = str(datetime.now(timezone.utc).date())
-    logs = list(logs_col.find({"date": today}))
-    if logs:
-        total = sum(log['gain_pct'] for log in logs)
-        msg = (
-            f"📅 Résumé du {today} :\n"
-            f"Trades : {len(logs)}\n"
-            f"Gain net : {total:.2f}%"
-        )
-    else:
-        msg = f"📅 Aucun trade enregistré aujourd’hui ({today})"
-    await update.message.reply_text(msg)
-
 # === LANCEMENT AVEC POLLING ===
 if __name__ == "__main__":
     async def main():
         print("🚀 Lancement du bot Telegram avec polling")
         app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-        app.add_handler(CommandHandler("stats", stats))
 
         asyncio.create_task(main_loop())
         await bot.send_message(chat_id=CHAT_ID, text="✅ Bot activé et en attente de signaux...")
