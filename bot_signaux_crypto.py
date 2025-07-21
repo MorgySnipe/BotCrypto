@@ -112,6 +112,17 @@ async def send_daily_summary():
             )
         )
 
+# === BOUCLE PRINCIPALE ===
+async def main_loop():
+    last_summary_sent = None
+    while True:
+        await asyncio.gather(*(process_symbol(sym) for sym in SYMBOLS))
+        now = datetime.now(timezone.utc).date()
+        if last_summary_sent != now:
+            await send_daily_summary()
+            last_summary_sent = now
+        await asyncio.sleep(SLEEP_SECONDS)
+
 # === COMMANDE /stats ===
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = str(datetime.now(timezone.utc).date())
@@ -148,5 +159,4 @@ if __name__ == "__main__":
         )
 
     asyncio.run(main())
-
 
