@@ -138,16 +138,17 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = f"📅 Aucun trade enregistré aujourd’hui ({today})"
     await update.message.reply_text(msg)
 
-# === LANCEMENT EN POLLING (pour Render Worker) ===
+# === LANCEMENT AVEC POLLING ===
 if __name__ == "__main__":
     async def main():
-        print("🚀 Lancement du bot Telegram en mode polling")
+        print("🚀 Lancement du bot Telegram avec polling")
         app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
         app.add_handler(CommandHandler("stats", stats))
 
-        asyncio.create_task(bot.send_message(chat_id=CHAT_ID, text="✅ Bot activé et en attente de signaux..."))
+        # Démarre la tâche de fond
         asyncio.create_task(main_loop())
 
+        await bot.send_message(chat_id=CHAT_ID, text="✅ Bot activé et en attente de signaux...")
         await app.run_polling()
 
     asyncio.run(main())
