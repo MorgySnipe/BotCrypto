@@ -148,9 +148,8 @@ if __name__ == "__main__":
         asyncio.create_task(bot.send_message(chat_id=CHAT_ID, text="✅ Bot activé et en attente de signaux..."))
         asyncio.create_task(main_loop())
 
-        base_url = os.environ.get("RENDER_EXTERNAL_URL")
-        if not base_url:
-            raise Exception("⚠️ Variable RENDER_EXTERNAL_URL manquante dans Render (vérifie son nom exact et sa présence)")
+        base_url = os.environ.get("RENDER_EXTERNAL_URL") or "https://botcrypto.onrender.com"
+        print("🔍 DEBUG ENV:", dict(os.environ))  # DEBUG: liste les variables d'env
 
         await app.run_webhook(
             listen="0.0.0.0",
@@ -159,4 +158,5 @@ if __name__ == "__main__":
         )
 
     asyncio.run(main())
+
 
