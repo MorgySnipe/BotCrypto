@@ -138,24 +138,17 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = f"📅 Aucun trade enregistré aujourd’hui ({today})"
     await update.message.reply_text(msg)
 
-# === LANCEMENT AVEC WEBHOOK ===
+# === LANCEMENT EN POLLING (pour Render Worker) ===
 if __name__ == "__main__":
     async def main():
-        print("🚀 Lancement du bot Telegram avec Webhook")
+        print("🚀 Lancement du bot Telegram en mode polling")
         app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
         app.add_handler(CommandHandler("stats", stats))
 
         asyncio.create_task(bot.send_message(chat_id=CHAT_ID, text="✅ Bot activé et en attente de signaux..."))
         asyncio.create_task(main_loop())
 
-        base_url = os.environ.get("RENDER_EXTERNAL_URL") or "https://botcrypto.onrender.com"
-        print("🔍 DEBUG ENV:", dict(os.environ))  # DEBUG: liste les variables d'env
-
-        await app.run_webhook(
-            listen="0.0.0.0",
-            port=int(os.environ.get("PORT", 10000)),
-            webhook_url=f"{base_url}/telegram"
-        )
+        await app.run_polling()
 
     asyncio.run(main())
 
