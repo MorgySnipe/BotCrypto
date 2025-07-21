@@ -4,8 +4,8 @@ import numpy as np
 from datetime import datetime, timezone
 from telegram import Bot, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import os
 from pymongo import MongoClient
+import os
 import nest_asyncio
 
 nest_asyncio.apply()
@@ -139,11 +139,30 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = f"📅 Aucun trade enregistré aujourd’hui ({today})"
     await update.message.reply_text(msg)
 
-# === LANCEMENT ===
+# === LANCEMENT AVEC WEBHOOK ===
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("stats", stats))
-    asyncio.get_event_loop().create_task(main_loop())
-    app.run_polling()
+    async def main():
+        print("🚀 Lancement du bot Telegram avec Webhook")
+        app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        app.add_handler(CommandHandler("stats", stats))
+
+        asyncio.create_task(bot.send_message(chat_id=CHAT_ID, text="✅ Bot activé et en attente de signaux..."))
+
+        # Lancement de la boucle de trading
+        asyncio.create_task(main_loop())
+
+        # Webhook URL fourni automatiquement par Render (ex: https://monbot.onrender.com)
+        base_url = os.environ.get("RENDER_EXTERNAL_URL")
+        if not base_url:
+            raise Exception("⚠️ Variable RENDER_EXTERNAL_URL manquante dans Render")
+
+        await app.run_webhook(
+            listen="0.0.0.0",
+            port=int(os.environ.get("PORT", 10000)),
+            webhook_url=f"{base_url}/telegram"
+        )
+
+    asyncio.run(main())
+
 
 
