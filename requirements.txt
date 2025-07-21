@@ -1,5 +1,3 @@
 python-telegram-bot==20.3
-requests
-numpy
-
-
+requests==2.32.4
+numpy==2.3.1
