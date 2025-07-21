@@ -1,7 +1,6 @@
 import asyncio
 import requests
 import numpy as np
-import json
 from datetime import datetime, timezone
 from telegram import Bot, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -9,7 +8,6 @@ import os
 from pymongo import MongoClient
 import nest_asyncio
 
-# Appliquer le patch pour les environnements avec boucle déjà en cours
 nest_asyncio.apply()
 
 # === CONFIGURATION ===
@@ -117,6 +115,7 @@ async def send_daily_summary():
 # === BOUCLE PRINCIPALE ===
 async def main_loop():
     last_summary_sent = None
+    await bot.send_message(chat_id=CHAT_ID, text="✅ Bot activé et en attente de signaux...")
     while True:
         await asyncio.gather(*(process_symbol(sym) for sym in SYMBOLS))
         now = datetime.now(timezone.utc).date()
@@ -141,14 +140,10 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 # === LANCEMENT ===
-async def runner():
+if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("stats", stats))
-    asyncio.create_task(main_loop())
-    await app.run_polling()
-
-if __name__ == "__main__":
-    asyncio.run(runner())
-
+    asyncio.get_event_loop().create_task(main_loop())
+    app.run_polling()
 
 
