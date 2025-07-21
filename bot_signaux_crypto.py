@@ -11,8 +11,8 @@ import nest_asyncio
 nest_asyncio.apply()
 
 # === CONFIGURATION ===
-TELEGRAM_TOKEN = '7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac'
-CHAT_ID = 969925512
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID"))
 SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT']
 INTERVAL = '1h'
 LIMIT = 100
@@ -112,18 +112,6 @@ async def send_daily_summary():
             )
         )
 
-# === BOUCLE PRINCIPALE ===
-async def main_loop():
-    last_summary_sent = None
-    await bot.send_message(chat_id=CHAT_ID, text="✅ Bot activé et en attente de signaux...")
-    while True:
-        await asyncio.gather(*(process_symbol(sym) for sym in SYMBOLS))
-        now = datetime.now(timezone.utc).date()
-        if last_summary_sent != now:
-            await send_daily_summary()
-            last_summary_sent = now
-        await asyncio.sleep(SLEEP_SECONDS)
-
 # === COMMANDE /stats ===
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = str(datetime.now(timezone.utc).date())
@@ -147,14 +135,11 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("stats", stats))
 
         asyncio.create_task(bot.send_message(chat_id=CHAT_ID, text="✅ Bot activé et en attente de signaux..."))
-
-        # Lancement de la boucle de trading
         asyncio.create_task(main_loop())
 
-        # Webhook URL fourni automatiquement par Render (ex: https://monbot.onrender.com)
         base_url = os.environ.get("RENDER_EXTERNAL_URL")
         if not base_url:
-            raise Exception("⚠️ Variable RENDER_EXTERNAL_URL manquante dans Render")
+            raise Exception("⚠️ Variable RENDER_EXTERNAL_URL manquante dans Render (vérifie son nom exact et sa présence)")
 
         await app.run_webhook(
             listen="0.0.0.0",
@@ -163,6 +148,5 @@ if __name__ == "__main__":
         )
 
     asyncio.run(main())
-
 
 
