@@ -121,6 +121,9 @@ async def main_loop():
             last_summary_sent = now
         await asyncio.sleep(SLEEP_SECONDS)
 
-# === LANCEMENT ===
+# === LANCEMENT FINAL POUR RENDER ===
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    loop = asyncio.get_event_loop()
+    loop.create_task(main_loop())
+    loop.run_until_complete(bot.send_message(chat_id=CHAT_ID, text="✅ Bot Crypto lancé (mode worker sans polling)"))
+    loop.run_forever()
