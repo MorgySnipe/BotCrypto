@@ -138,4 +138,3 @@ if __name__ == "__main__":
     loop.create_task(main_loop())
     loop.run_until_complete(bot.send_message(chat_id=CHAT_ID, text="✅ Bot Crypto lancé (mode worker sans polling)"))
     loop.run_forever()
-
