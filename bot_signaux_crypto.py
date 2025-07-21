@@ -130,6 +130,7 @@ async def main_loop():
         if last_summary_sent != now:
             await send_daily_summary()
             last_summary_sent = now
+        print("✔️ itération terminée")
         await asyncio.sleep(SLEEP_SECONDS)
 
 # === LANCEMENT FINAL POUR RENDER ===
