@@ -5,14 +5,14 @@ from datetime import datetime, timezone
 from telegram import Bot, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from pymongo import MongoClient
-import os
 import nest_asyncio
 
 nest_asyncio.apply()
 
 # === CONFIGURATION ===
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID"))
+TELEGRAM_TOKEN = "7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac"
+CHAT_ID = 969925512  # Change ça si besoin
+
 SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT']
 INTERVAL = '1h'
 LIMIT = 100
@@ -145,9 +145,7 @@ if __name__ == "__main__":
         app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
         app.add_handler(CommandHandler("stats", stats))
 
-        # Démarre la tâche de fond
         asyncio.create_task(main_loop())
-
         await bot.send_message(chat_id=CHAT_ID, text="✅ Bot activé et en attente de signaux...")
         await app.run_polling()
 
