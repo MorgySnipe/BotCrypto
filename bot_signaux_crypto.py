@@ -2,11 +2,15 @@ import asyncio
 import requests
 import numpy as np
 import json
-from datetime import datetime
-from telegram import Bot
-from pymongo import MongoClient
+from datetime import datetime, timezone
+from telegram import Bot, Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import os
+from pymongo import MongoClient
 import nest_asyncio
+
+# Appliquer le patch pour les environnements avec boucle déjà en cours
+nest_asyncio.apply()
 
 # === CONFIGURATION ===
 TELEGRAM_TOKEN = '7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac'
@@ -16,17 +20,15 @@ INTERVAL = '1h'
 LIMIT = 100
 SLEEP_SECONDS = 300  # 5 minutes
 
-# === TELEGRAM ===
-bot = Bot(token=TELEGRAM_TOKEN)
-
-# === MONGODB ===
 MONGO_URI = "mongodb+srv://morgysnipe:ZSJ3LI214eyEuyGW@cluster0.e1imbsb.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 client = MongoClient(MONGO_URI)
-db = client["botcrypto"]
-trades_col = db["trades"]
-logs_col = db["logs"]
+db = client['crypto_bot']
+trades_col = db['trades']
+logs_col = db['logs']
 
-# === API BINANCE ===
+bot = Bot(token=TELEGRAM_TOKEN)
+
+# === INDICATEURS TECHNIQUES ===
 def get_klines(symbol):
     url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval={INTERVAL}&limit={LIMIT}'
     response = requests.get(url)
@@ -49,14 +51,7 @@ def compute_macd(prices, short=12, long=26, signal=9):
     signal_line = np.convolve(macd_line, np.ones(signal)/signal, mode='valid')
     return macd_line[-1], signal_line[-1]
 
-# === TELEGRAM MESSAGE ===
-async def send_message(text):
-    try:
-        await bot.send_message(chat_id=CHAT_ID, text=text)
-    except Exception as e:
-        print(f"Erreur Telegram : {e}")
-
-# === TRAITEMENT D'UNE CRYPTO ===
+# === TRAITEMENT CRYPTOS ===
 async def process_symbol(symbol):
     try:
         klines = get_klines(symbol)
@@ -65,77 +60,95 @@ async def process_symbol(symbol):
         rsi = compute_rsi(closes)
         macd, signal = compute_macd(closes)
 
-        now = datetime.utcnow().strftime('%Y-%m-%d %H:%M')
-
-        trade = trades_col.find_one({"symbol": symbol})
         buy = rsi < 30 and macd > signal
         sell = False
 
+        trade = trades_col.find_one({"symbol": symbol})
         if trade:
-            entry = trade["entry"]
+            entry = trade['entry']
             gain_pct = ((price - entry) / entry) * 100
             if gain_pct >= 3 or gain_pct <= -1.5:
                 sell = True
 
+        now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
+
         if buy and not trade:
             trades_col.insert_one({"symbol": symbol, "entry": price, "time": now})
-            await send_message(f"🟢 Achat détecté sur {symbol} à {price:.2f}")
+            await bot.send_message(chat_id=CHAT_ID, text=f"🟢 Achat détecté sur {symbol} à {price:.2f}")
 
         elif sell and trade:
-            entry = trade["entry"]
+            entry = trade['entry']
             gain_pct = ((price - entry) / entry) * 100
-            await send_message(
-                f"🔴 Vente sur {symbol} à {price:.2f}\n"
-                f"📈 Entrée: {entry:.2f}\n"
-                f"📊 Résultat: {'+' if gain_pct >= 0 else ''}{gain_pct:.2f}%"
+            await bot.send_message(
+                chat_id=CHAT_ID,
+                text=(
+                    f"🔴 Vente sur {symbol} à {price:.2f}\n"
+                    f"📈 Entrée: {entry:.2f}\n"
+                    f"📊 Résultat: {'+' if gain_pct >= 0 else ''}{gain_pct:.2f}%"
+                )
             )
             logs_col.insert_one({
                 "symbol": symbol,
                 "entry": entry,
                 "exit": price,
                 "gain_pct": gain_pct,
-                "date": str(datetime.utcnow().date())
+                "date": datetime.now(timezone.utc).date().isoformat()
             })
             trades_col.delete_one({"symbol": symbol})
 
     except Exception as e:
         print(f"Erreur {symbol}: {e}")
 
-# === RÉSUMÉ QUOTIDIEN ===
+# === RÉSUMÉ JOURNALIER ===
 async def send_daily_summary():
-    today = str(datetime.utcnow().date())
-    gains_today = [log["gain_pct"] for log in logs_col.find({"date": today})]
-    if not gains_today:
-        return
-    total = sum(gains_today)
-    await send_message(
-        f"📅 Résumé du {today} :\n"
-        f"Trades : {len(gains_today)}\n"
-        f"Gain net : {total:.2f}%"
-    )
+    today = str(datetime.now(timezone.utc).date())
+    logs = list(logs_col.find({"date": today}))
+    if logs:
+        total = sum(log['gain_pct'] for log in logs)
+        await bot.send_message(
+            chat_id=CHAT_ID,
+            text=(
+                f"📅 Résumé du {today} :\n"
+                f"Trades : {len(logs)}\n"
+                f"Gain net : {total:.2f}%"
+            )
+        )
 
 # === BOUCLE PRINCIPALE ===
 async def main_loop():
-    last_summary = None
+    last_summary_sent = None
     while True:
-        await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
-        now = datetime.utcnow().date()
-        if last_summary != now:
+        await asyncio.gather(*(process_symbol(sym) for sym in SYMBOLS))
+        now = datetime.now(timezone.utc).date()
+        if last_summary_sent != now:
             await send_daily_summary()
-            last_summary = now
+            last_summary_sent = now
         await asyncio.sleep(SLEEP_SECONDS)
+
+# === COMMANDE /stats ===
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    today = str(datetime.now(timezone.utc).date())
+    logs = list(logs_col.find({"date": today}))
+    if logs:
+        total = sum(log['gain_pct'] for log in logs)
+        msg = (
+            f"📅 Résumé du {today} :\n"
+            f"Trades : {len(logs)}\n"
+            f"Gain net : {total:.2f}%"
+        )
+    else:
+        msg = f"📅 Aucun trade enregistré aujourd’hui ({today})"
+    await update.message.reply_text(msg)
 
 # === LANCEMENT ===
 async def runner():
-    await send_message("✅ Bot crypto lancé avec succès.")
-    await main_loop()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("stats", stats))
+    asyncio.create_task(main_loop())
+    await app.run_polling()
 
 if __name__ == "__main__":
-    nest_asyncio.apply()
-    loop = asyncio.get_event_loop()
-    try:
-        loop.run_until_complete(runner())
-    except KeyboardInterrupt:
-        print("Arrêt du bot.")
+    asyncio.run(runner())
+
 
 
