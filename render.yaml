@@ -5,4 +5,5 @@ services:
     region: frankfurt
     buildCommand: pip install -r requirements.txt
     startCommand: python3 bot_signaux_crypto.py
-    plan: free
+    plan: starter
+
