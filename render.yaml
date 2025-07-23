@@ -3,7 +3,8 @@ services:
     name: botcrypto-worker
     env: python
     region: frankfurt
+    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: python3 bot_signaux_crypto.py
-    plan: starter
-
+    autoDeploy: true
+    restartPolicy: always
