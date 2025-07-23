@@ -12,6 +12,7 @@ nest_asyncio.apply()
 # === CONFIGURATION ===
 TELEGRAM_TOKEN = '7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac'
 CHAT_ID = 969925512
+CAPITAL_TOTAL = 1000  # 💰 À modifier selon ton capital réel
 SYMBOLS = [
     'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
     'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT', 'DOTUSDT',
@@ -62,18 +63,19 @@ async def process_symbol(symbol):
         buy = False
         confidence = None
         label = ""
+        position_size = 0
 
-        # Stratégie principale : fiable
         if rsi < 30 and macd > signal:
             buy = True
             confidence = 9
             label = "💎 Signal très fiable – Fiabilité 9/10"
+            position_size = CAPITAL_TOTAL * 0.07  # 7%
 
-        # Stratégie secondaire : plus fréquente
         elif rsi < 40 and macd > signal:
             buy = True
             confidence = 6
             label = "⚠️ Signal modéré – Fiabilité 6/10"
+            position_size = CAPITAL_TOTAL * 0.03  # 3%
 
         sell = False
 
@@ -94,7 +96,8 @@ async def process_symbol(symbol):
                 chat_id=CHAT_ID,
                 text=(
                     f"🟢 Achat détecté sur {symbol} à {price:.2f}\n"
-                    f"{label}"
+                    f"{label}\n"
+                    f"💰 Capital suggéré : {position_size:.2f} €"
                 )
             )
 
@@ -127,7 +130,6 @@ async def main_loop():
             now = datetime.now()
             print(f"🔁 Nouvelle itération à {now.strftime('%H:%M:%S')}", flush=True)
 
-            # Heartbeat Telegram 1x par heure
             if last_heartbeat_hour != now.hour:
                 last_heartbeat_hour = now.hour
                 await bot.send_message(
