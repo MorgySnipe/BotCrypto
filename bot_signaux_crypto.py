@@ -58,7 +58,23 @@ async def process_symbol(symbol):
 
         print(f"{symbol} | Price: {price:.2f} | RSI: {rsi:.2f} | MACD: {macd:.4f} | Signal: {signal:.4f}", flush=True)
 
-        buy = rsi < 30 and macd > signal
+        # === STRATÉGIES ===
+        buy = False
+        confidence = None
+        label = ""
+
+        # Stratégie principale : fiable
+        if rsi < 30 and macd > signal:
+            buy = True
+            confidence = 9
+            label = "💎 Signal très fiable – Fiabilité 9/10"
+
+        # Stratégie secondaire : plus fréquente
+        elif rsi < 40 and macd > signal:
+            buy = True
+            confidence = 6
+            label = "⚠️ Signal modéré – Fiabilité 6/10"
+
         sell = False
 
         if symbol in trades:
@@ -69,18 +85,31 @@ async def process_symbol(symbol):
                 sell = True
 
         if buy and symbol not in trades:
-            trades[symbol] = {"entry": price, "time": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}
-            await bot.send_message(chat_id=CHAT_ID, text=f"🟢 Achat détecté sur {symbol} à {price:.2f}")
+            trades[symbol] = {
+                "entry": price,
+                "time": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M'),
+                "confidence": confidence
+            }
+            await bot.send_message(
+                chat_id=CHAT_ID,
+                text=(
+                    f"🟢 Achat détecté sur {symbol} à {price:.2f}\n"
+                    f"{label}"
+                )
+            )
 
         elif sell and symbol in trades:
             entry = trades[symbol]['entry']
             gain_pct = ((price - entry) / entry) * 100
+            confidence = trades[symbol].get("confidence", "?")
+            emoji = "💎" if confidence >= 8 else "⚠️"
             await bot.send_message(
                 chat_id=CHAT_ID,
                 text=(
                     f"🔴 Vente sur {symbol} à {price:.2f}\n"
                     f"📈 Entrée: {entry:.2f}\n"
-                    f"📊 Résultat: {'+' if gain_pct >= 0 else ''}{gain_pct:.2f}%"
+                    f"📊 Résultat: {'+' if gain_pct >= 0 else ''}{gain_pct:.2f}%\n"
+                    f"{emoji} Fiabilité initiale: {confidence}/10"
                 )
             )
             del trades[symbol]
