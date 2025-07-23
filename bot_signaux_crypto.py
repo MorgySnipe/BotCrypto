@@ -44,14 +44,14 @@ def compute_macd(prices, short=12, long=26, signal=9):
 
 async def process_symbol(symbol):
     try:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
         klines = get_klines(symbol)
         closes = [float(k[4]) for k in klines]
         price = closes[-1]
         rsi = compute_rsi(closes)
         macd, signal = compute_macd(closes)
 
-        print(f"{symbol} | Price: {price:.2f} | RSI: {rsi:.2f} | MACD: {macd:.4f} | Signal: {signal:.4f}")
+        print(f"{symbol} | Price: {price:.2f} | RSI: {rsi:.2f} | MACD: {macd:.4f} | Signal: {signal:.4f}", flush=True)
 
         buy = rsi < 30 and macd > signal
         sell = False
@@ -59,7 +59,7 @@ async def process_symbol(symbol):
         if symbol in trades:
             entry = trades[symbol]['entry']
             gain_pct = ((price - entry) / entry) * 100
-            print(f"{symbol} | Position ouverte à {entry:.2f} | PnL: {gain_pct:.2f}%")
+            print(f"{symbol} | Position ouverte à {entry:.2f} | PnL: {gain_pct:.2f}%", flush=True)
             if gain_pct >= 3 or gain_pct <= -1.5:
                 sell = True
 
@@ -81,7 +81,7 @@ async def process_symbol(symbol):
             del trades[symbol]
 
     except Exception as e:
-        print(f"❌ Erreur {symbol}: {e}")
+        print(f"❌ Erreur {symbol}: {e}", flush=True)
         traceback.print_exc()
 
 async def main_loop():
@@ -91,7 +91,7 @@ async def main_loop():
     while True:
         try:
             now = datetime.now()
-            print(f"🔁 Nouvelle itération à {now.strftime('%H:%M:%S')}")
+            print(f"🔁 Nouvelle itération à {now.strftime('%H:%M:%S')}", flush=True)
 
             # Heartbeat Telegram 1x par heure
             if last_heartbeat_hour != now.hour:
@@ -102,11 +102,11 @@ async def main_loop():
                 )
 
             await asyncio.gather(*(process_symbol(sym) for sym in SYMBOLS))
-            print("✔️ itération terminée")
+            print("✔️ itération terminée", flush=True)
 
         except Exception as loop_error:
             err_trace = traceback.format_exc()
-            print(f"⚠️ Erreur dans main_loop : {loop_error}")
+            print(f"⚠️ Erreur dans main_loop : {loop_error}", flush=True)
             await bot.send_message(
                 chat_id=CHAT_ID,
                 text=f"⚠️ Erreur dans main_loop : {loop_error}\n\n{err_trace}"
@@ -120,7 +120,7 @@ if __name__ == "__main__":
         loop.run_until_complete(main_loop())
     except Exception as e:
         err = traceback.format_exc()
-        print(f"❌ Crash fatal : {e}")
+        print(f"❌ Crash fatal : {e}", flush=True)
         loop.run_until_complete(bot.send_message(
             chat_id=CHAT_ID,
             text=f"❌ Le bot a crashé avec l'erreur suivante :\n{e}\n\nTraceback:\n{err}"
