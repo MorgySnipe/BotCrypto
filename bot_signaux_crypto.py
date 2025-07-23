@@ -16,14 +16,14 @@ CHAT_ID = 969925512
 SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT']
 INTERVAL = '1h'
 LIMIT = 100
-SLEEP_SECONDS = 300
+SLEEP_SECONDS = 300  # 5 minutes
 
 MONGO_URI = "mongodb+srv://morgysnipe:ZSJ3LI214eyEuyGW@cluster0.e1imbsb.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 client = MongoClient(MONGO_URI)
 db = client['crypto_bot']
 trades_col = db['trades']
 logs_col = db['logs']
-sys_logs_col = db['system_logs']  # 🔥 Nouveau
+sys_logs_col = db['system_logs']
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
@@ -118,7 +118,11 @@ async def process_symbol(symbol):
             })
 
     except Exception as e:
-        log_system("error_process_symbol", "ERROR", {"symbol": symbol, "error": str(e), "trace": traceback.format_exc()})
+        log_system("error_process_symbol", "ERROR", {
+            "symbol": symbol,
+            "error": str(e),
+            "trace": traceback.format_exc()
+        })
         print(f"❌ Erreur {symbol}: {e}")
 
 async def send_daily_summary():
@@ -146,12 +150,16 @@ async def main_loop():
     last_summary_sent = None
     while True:
         try:
-            log_system("iteration_start", "DEBUG", {"time": datetime.now().isoformat()})
+            now = datetime.now()
+            if now.minute == 0:  # Log de vie toutes les heures
+                print(f"🟢 Bot actif à {now.strftime('%H:%M:%S')}")
+                log_system("heartbeat", "INFO", {"time": now.isoformat()})
+
+            log_system("iteration_start", "DEBUG", {"time": now.isoformat()})
             await asyncio.gather(*(process_symbol(sym) for sym in SYMBOLS))
-            now = datetime.now(timezone.utc).date()
-            if last_summary_sent != now:
+            if last_summary_sent != now.date():
                 await send_daily_summary()
-                last_summary_sent = now
+                last_summary_sent = now.date()
             log_system("iteration_complete", "DEBUG", {"status": "OK"})
         except Exception as loop_error:
             err_trace = traceback.format_exc()
@@ -180,4 +188,5 @@ if __name__ == "__main__":
             chat_id=CHAT_ID,
             text="⚠️ Le bot s’est arrêté."
         ))
+
 
