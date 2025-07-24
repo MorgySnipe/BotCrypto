@@ -12,7 +12,7 @@ nest_asyncio.apply()
 # === CONFIGURATION ===
 TELEGRAM_TOKEN = '7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac'
 CHAT_ID = 969925512
-CAPITAL_TOTAL = 1000  # 💰 À modifier selon ton capital réel
+CAPITAL_TOTAL = 1000  # 💰 Capital de départ (modifiable)
 SYMBOLS = [
     'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
     'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT', 'DOTUSDT',
@@ -24,7 +24,7 @@ LIMIT = 100
 SLEEP_SECONDS = 300  # 5 minutes
 
 bot = Bot(token=TELEGRAM_TOKEN)
-trades = {}  # Position mémoire temporaire
+trades = {}  # Position en mémoire
 
 def get_klines(symbol):
     url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval={INTERVAL}&limit={LIMIT}'
@@ -48,6 +48,10 @@ def compute_macd(prices, short=12, long=26, signal=9):
     signal_line = np.convolve(macd_line, np.ones(signal)/signal, mode='valid')
     return macd_line[-1], signal_line[-1]
 
+def is_uptrend(prices, period=50):
+    ma = np.mean(prices[-period:])
+    return prices[-1] > ma  # prix au-dessus de la MA50
+
 async def process_symbol(symbol):
     try:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
@@ -59,23 +63,22 @@ async def process_symbol(symbol):
 
         print(f"{symbol} | Price: {price:.2f} | RSI: {rsi:.2f} | MACD: {macd:.4f} | Signal: {signal:.4f}", flush=True)
 
-        # === STRATÉGIES ===
         buy = False
         confidence = None
         label = ""
         position_size = 0
 
-        if rsi < 30 and macd > signal:
+        # === NOUVELLE STRATÉGIE TRÈS FIABLE ===
+        # 1. RSI vient de croiser 30 à la hausse (signal de reprise)
+        # 2. MACD > Signal (momentum haussier)
+        # 3. Tendance globale haussière (MA50)
+
+        if (rsi > 30 and compute_rsi(closes[:-1]) < 30 and
+                macd > signal and is_uptrend(closes)):
             buy = True
             confidence = 9
             label = "💎 Signal très fiable – Fiabilité 9/10"
-            position_size = CAPITAL_TOTAL * 0.07  # 7%
-
-        elif rsi < 40 and macd > signal:
-            buy = True
-            confidence = 6
-            label = "⚠️ Signal modéré – Fiabilité 6/10"
-            position_size = CAPITAL_TOTAL * 0.03  # 3%
+            position_size = CAPITAL_TOTAL * 0.07
 
         sell = False
 
