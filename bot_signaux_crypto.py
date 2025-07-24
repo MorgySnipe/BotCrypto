@@ -11,7 +11,6 @@ nest_asyncio.apply()
 # === CONFIGURATION ===
 TELEGRAM_TOKEN = '7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac'
 CHAT_ID = 969925512
-CAPITAL_TOTAL = 1000
 SYMBOLS = [
     'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
     'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT', 'DOTUSDT',
@@ -65,37 +64,35 @@ async def process_symbol(symbol):
         price = closes[-1]
         rsi = compute_rsi(closes)
         macd, signal = compute_macd(closes)
-        print(f"{symbol} | Price: {price:.2f} | RSI: {rsi:.2f} | MACD: {macd:.4f} | Signal: {signal:.4f}", flush=True)
 
         buy = False
         confidence = None
         label = ""
-        position_size = 0
+        position_pct = 0
 
-        # === STRATEGIES COMBINEES ===
         if (rsi > 30 and compute_rsi(closes[:-1]) < 30 and macd > signal and is_uptrend(closes)):
             buy = True
             confidence = 9
             label = "💎 RSI rebond + MACD + Uptrend"
-            position_size = CAPITAL_TOTAL * 0.07
+            position_pct = 7
 
         elif rsi < 25 and macd > signal:
             buy = True
             confidence = 8
-            label = "🔥 RSI bas + MACD croisé positif"
-            position_size = CAPITAL_TOTAL * 0.05
+            label = "🔥 RSI < 25 + MACD positif"
+            position_pct = 5
 
         elif 45 < rsi < 55 and macd > signal and is_uptrend(closes):
             buy = True
             confidence = 7
-            label = "📊 Range Breakout en tendance"
-            position_size = CAPITAL_TOTAL * 0.05
+            label = "📊 RSI neutre + Uptrend + MACD"
+            position_pct = 5
 
         elif rsi > 70 and macd > signal:
             buy = True
             confidence = 6
-            label = "⚠️ Surachat mais momentum haussier"
-            position_size = CAPITAL_TOTAL * 0.03
+            label = "⚠️ RSI > 70 mais MACD positif"
+            position_pct = 3
 
         sell = False
         if symbol in trades:
@@ -113,7 +110,7 @@ async def process_symbol(symbol):
             }
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=safe_message(f"🟢 Achat {symbol} à {price:.2f}\n{label}\n💰 Suggéré: {position_size:.2f} €")
+                text=safe_message(f"🟢 Achat {symbol} à {price:.2f}\n{label}\n💰 Suggéré : {position_pct}% du capital")
             )
 
         elif sell and symbol in trades:
