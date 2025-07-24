@@ -22,7 +22,7 @@ SYMBOLS = [
 ]
 INTERVAL = '1h'
 LIMIT = 100
-SLEEP_SECONDS = 300  # ⏱️ tu peux passer à 600 pour 10 minutes
+SLEEP_SECONDS = 300
 bot = Bot(token=TELEGRAM_TOKEN)
 
 trades = {}
@@ -72,12 +72,30 @@ async def process_symbol(symbol):
         label = ""
         position_size = 0
 
-        # ✅ SEULE stratégie activée : Fiabilité 9/10
+        # === STRATEGIES COMBINEES ===
         if (rsi > 30 and compute_rsi(closes[:-1]) < 30 and macd > signal and is_uptrend(closes)):
             buy = True
             confidence = 9
-            label = "💎 Signal très fiable – Fiabilité 9/10"
+            label = "💎 RSI rebond + MACD + Uptrend"
             position_size = CAPITAL_TOTAL * 0.07
+
+        elif rsi < 25 and macd > signal:
+            buy = True
+            confidence = 8
+            label = "🔥 RSI bas + MACD croisé positif"
+            position_size = CAPITAL_TOTAL * 0.05
+
+        elif 45 < rsi < 55 and macd > signal and is_uptrend(closes):
+            buy = True
+            confidence = 7
+            label = "📊 Range Breakout en tendance"
+            position_size = CAPITAL_TOTAL * 0.05
+
+        elif rsi > 70 and macd > signal:
+            buy = True
+            confidence = 6
+            label = "⚠️ Surachat mais momentum haussier"
+            position_size = CAPITAL_TOTAL * 0.03
 
         sell = False
         if symbol in trades:
@@ -95,7 +113,7 @@ async def process_symbol(symbol):
             }
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=safe_message(f"🟢 Achat détecté sur {symbol} à {price:.2f}\n{label}\n💰 Capital suggéré : {position_size:.2f} €")
+                text=safe_message(f"🟢 Achat {symbol} à {price:.2f}\n{label}\n💰 Suggéré: {position_size:.2f} €")
             )
 
         elif sell and symbol in trades:
@@ -103,17 +121,11 @@ async def process_symbol(symbol):
             gain_pct = ((price - entry) / entry) * 100
             confidence = trades[symbol].get("confidence", "?")
             emoji = "💎" if confidence >= 8 else "⚠️"
-            history.append({
-                "symbol": symbol,
-                "entry": entry,
-                "exit": price,
-                "result": gain_pct,
-                "confidence": confidence
-            })
+            history.append({"symbol": symbol, "entry": entry, "exit": price, "result": gain_pct, "confidence": confidence})
             await bot.send_message(
                 chat_id=CHAT_ID,
                 text=safe_message(
-                    f"🔴 Vente sur {symbol} à {price:.2f}\n📈 Entrée: {entry:.2f}\n📊 Résultat: {'+' if gain_pct >= 0 else ''}{gain_pct:.2f}%\n{emoji} Fiabilité: {confidence}/10"
+                    f"🔴 Vente {symbol} à {price:.2f}\n📈 Entrée: {entry:.2f}\n📊 Gain: {'+' if gain_pct >= 0 else ''}{gain_pct:.2f}%\n{emoji} Fiabilité: {confidence}/10"
                 )
             )
             del trades[symbol]
@@ -177,3 +189,4 @@ if __name__ == "__main__":
             chat_id=CHAT_ID,
             text="⚠️ Le bot s’est arrêté."
         ))
+
