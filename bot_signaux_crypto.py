@@ -1,7 +1,7 @@
 import asyncio
 import requests
 import numpy as np
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dtime
 from telegram import Bot
 import nest_asyncio
 import traceback
@@ -12,7 +12,7 @@ nest_asyncio.apply()
 # === CONFIGURATION ===
 TELEGRAM_TOKEN = '7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac'
 CHAT_ID = 969925512
-CAPITAL_TOTAL = 1000  # 💰 Capital de départ (modifiable)
+CAPITAL_TOTAL = 1000
 SYMBOLS = [
     'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
     'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT', 'DOTUSDT',
@@ -21,10 +21,10 @@ SYMBOLS = [
 ]
 INTERVAL = '1h'
 LIMIT = 100
-SLEEP_SECONDS = 300  # 5 minutes
-
+SLEEP_SECONDS = 300
 bot = Bot(token=TELEGRAM_TOKEN)
-trades = {}  # Position en mémoire
+trades = {}
+history = []
 
 def get_klines(symbol):
     url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval={INTERVAL}&limit={LIMIT}'
@@ -50,42 +50,30 @@ def compute_macd(prices, short=12, long=26, signal=9):
 
 def is_uptrend(prices, period=50):
     ma = np.mean(prices[-period:])
-    return prices[-1] > ma  # prix au-dessus de la MA50
+    return prices[-1] > ma
 
 async def process_symbol(symbol):
     try:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
         klines = get_klines(symbol)
         closes = [float(k[4]) for k in klines]
         price = closes[-1]
         rsi = compute_rsi(closes)
         macd, signal = compute_macd(closes)
-
-        print(f"{symbol} | Price: {price:.2f} | RSI: {rsi:.2f} | MACD: {macd:.4f} | Signal: {signal:.4f}", flush=True)
-
         buy = False
         confidence = None
         label = ""
         position_size = 0
 
-        # === NOUVELLE STRATÉGIE TRÈS FIABLE ===
-        # 1. RSI vient de croiser 30 à la hausse (signal de reprise)
-        # 2. MACD > Signal (momentum haussier)
-        # 3. Tendance globale haussière (MA50)
-
-        if (rsi > 30 and compute_rsi(closes[:-1]) < 30 and
-                macd > signal and is_uptrend(closes)):
+        if (rsi > 30 and compute_rsi(closes[:-1]) < 30 and macd > signal and is_uptrend(closes)):
             buy = True
             confidence = 9
-            label = "💎 Signal très fiable – Fiabilité 9/10"
+            label = "\ud83d\udc8e Signal tr\u00e8s fiable \u2013 Fiabilit\u00e9 9/10"
             position_size = CAPITAL_TOTAL * 0.07
 
         sell = False
-
         if symbol in trades:
             entry = trades[symbol]['entry']
             gain_pct = ((price - entry) / entry) * 100
-            print(f"{symbol} | Position ouverte à {entry:.2f} | PnL: {gain_pct:.2f}%", flush=True)
             if gain_pct >= 3 or gain_pct <= -1.5:
                 sell = True
 
@@ -97,75 +85,73 @@ async def process_symbol(symbol):
             }
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=(
-                    f"🟢 Achat détecté sur {symbol} à {price:.2f}\n"
-                    f"{label}\n"
-                    f"💰 Capital suggéré : {position_size:.2f} €"
-                )
+                text=f"\ud83d\udfe2 Achat sur {symbol} \u00e0 {price:.2f}\n{label}\n\ud83d\udcb0 Capital sugg\u00e9r\u00e9 : {position_size:.2f} €"
             )
 
         elif sell and symbol in trades:
             entry = trades[symbol]['entry']
             gain_pct = ((price - entry) / entry) * 100
             confidence = trades[symbol].get("confidence", "?")
-            emoji = "💎" if confidence >= 8 else "⚠️"
+            emoji = "\ud83d\udc8e" if confidence >= 8 else "\u26a0\ufe0f"
+            history.append({"symbol": symbol, "entry": entry, "exit": price, "result": gain_pct, "confidence": confidence})
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=(
-                    f"🔴 Vente sur {symbol} à {price:.2f}\n"
-                    f"📈 Entrée: {entry:.2f}\n"
-                    f"📊 Résultat: {'+' if gain_pct >= 0 else ''}{gain_pct:.2f}%\n"
-                    f"{emoji} Fiabilité initiale: {confidence}/10"
-                )
+                text=f"\ud83d\udd34 Vente {symbol} \u00e0 {price:.2f}\nEntr\u00e9e: {entry:.2f}\nR\u00e9sultat: {'+' if gain_pct >= 0 else ''}{gain_pct:.2f}%\n{emoji} Fiabilit\u00e9: {confidence}/10"
             )
             del trades[symbol]
 
     except Exception as e:
-        print(f"❌ Erreur {symbol}: {e}", flush=True)
         traceback.print_exc()
 
+async def send_daily_summary():
+    if not history:
+        return
+    lines = ["\ud83c\udf1f R\u00e9capitulatif des trades (24h) :"]
+    for h in history[-50:]:
+        emoji = "\ud83d\udcc8" if h["result"] > 0 else "\ud83d\udcc9"
+        lines.append(f"{emoji} {h['symbol']} | Entr\u00e9e: {h['entry']:.2f} | Sortie: {h['exit']:.2f} | Gain: {h['result']:.2f}%")
+    await bot.send_message(chat_id=CHAT_ID, text="\n".join(lines))
+
 async def main_loop():
-    await bot.send_message(chat_id=CHAT_ID, text=f"🚀 Bot démarré à {datetime.now().strftime('%H:%M:%S')}")
+    await bot.send_message(chat_id=CHAT_ID, text=f"\ud83d\ude80 Bot d\u00e9marr\u00e9 \u00e0 {datetime.now().strftime('%H:%M:%S')}")
     last_heartbeat_hour = None
+    last_daily_summary_sent = False
 
     while True:
         try:
             now = datetime.now()
-            print(f"🔁 Nouvelle itération à {now.strftime('%H:%M:%S')}", flush=True)
-
             if last_heartbeat_hour != now.hour:
                 last_heartbeat_hour = now.hour
-                await bot.send_message(
-                    chat_id=CHAT_ID,
-                    text=f"✅ Bot actif à {now.strftime('%H:%M')} (heartbeat automatique)"
-                )
+                await bot.send_message(chat_id=CHAT_ID, text=f"\u2705 Bot actif \u00e0 {now.strftime('%H:%M')} (heartbeat)")
+
+            # Résumé quotidien à 10h00
+            if now.hour == 10 and not last_daily_summary_sent:
+                await send_daily_summary()
+                last_daily_summary_sent = True
+            elif now.hour != 10:
+                last_daily_summary_sent = False
 
             await asyncio.gather(*(process_symbol(sym) for sym in SYMBOLS))
-            print("✔️ itération terminée", flush=True)
 
-        except Exception as loop_error:
-            err_trace = traceback.format_exc()
-            print(f"⚠️ Erreur dans main_loop : {loop_error}", flush=True)
-            await bot.send_message(
-                chat_id=CHAT_ID,
-                text=f"⚠️ Erreur dans main_loop : {loop_error}\n\n{err_trace}"
-            )
+        except Exception as e:
+            err = traceback.format_exc()
+            await bot.send_message(chat_id=CHAT_ID, text=f"\u26a0\ufe0f Erreur :\n{err}")
+
         await asyncio.sleep(SLEEP_SECONDS)
 
-# === EXECUTION ===
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     try:
         loop.run_until_complete(main_loop())
     except Exception as e:
         err = traceback.format_exc()
-        print(f"❌ Crash fatal : {e}", flush=True)
+        print(f"\u274c Crash : {e}", flush=True)
         loop.run_until_complete(bot.send_message(
             chat_id=CHAT_ID,
-            text=f"❌ Le bot a crashé avec l'erreur suivante :\n{e}\n\nTraceback:\n{err}"
+            text=f"\u274c Le bot a crash\u00e9 :\n{err}"
         ))
     finally:
         loop.run_until_complete(bot.send_message(
             chat_id=CHAT_ID,
-            text="⚠️ Le bot s’est arrêté."
+            text="\u26a0\ufe0f Le bot s'est arr\u00eat\u00e9."
         ))
