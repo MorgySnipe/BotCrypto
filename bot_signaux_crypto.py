@@ -1,11 +1,10 @@
 import asyncio
 import requests
 import numpy as np
-from datetime import datetime, timezone, time as dtime
+from datetime import datetime, timezone
 from telegram import Bot
 import nest_asyncio
 import traceback
-import sys
 
 nest_asyncio.apply()
 
@@ -23,8 +22,12 @@ INTERVAL = '1h'
 LIMIT = 100
 SLEEP_SECONDS = 300
 bot = Bot(token=TELEGRAM_TOKEN)
+
 trades = {}
 history = []
+
+def safe_message(text):
+    return text if len(text) < 4000 else text[:3900] + "\n... (tronqué)"
 
 def get_klines(symbol):
     url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval={INTERVAL}&limit={LIMIT}'
@@ -67,7 +70,7 @@ async def process_symbol(symbol):
         if (rsi > 30 and compute_rsi(closes[:-1]) < 30 and macd > signal and is_uptrend(closes)):
             buy = True
             confidence = 9
-            label = "\ud83d\udc8e Signal tr\u00e8s fiable \u2013 Fiabilit\u00e9 9/10"
+            label = "💎 Signal très fiable – Fiabilité 9/10"
             position_size = CAPITAL_TOTAL * 0.07
 
         sell = False
@@ -85,18 +88,22 @@ async def process_symbol(symbol):
             }
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=f"\ud83d\udfe2 Achat sur {symbol} \u00e0 {price:.2f}\n{label}\n\ud83d\udcb0 Capital sugg\u00e9r\u00e9 : {position_size:.2f} €"
+                text=safe_message(
+                    f"🟢 Achat sur {symbol} à {price:.2f}\n{label}\n💰 Capital suggéré : {position_size:.2f} €"
+                )
             )
 
         elif sell and symbol in trades:
             entry = trades[symbol]['entry']
             gain_pct = ((price - entry) / entry) * 100
             confidence = trades[symbol].get("confidence", "?")
-            emoji = "\ud83d\udc8e" if confidence >= 8 else "\u26a0\ufe0f"
+            emoji = "💎" if confidence >= 8 else "⚠️"
             history.append({"symbol": symbol, "entry": entry, "exit": price, "result": gain_pct, "confidence": confidence})
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=f"\ud83d\udd34 Vente {symbol} \u00e0 {price:.2f}\nEntr\u00e9e: {entry:.2f}\nR\u00e9sultat: {'+' if gain_pct >= 0 else ''}{gain_pct:.2f}%\n{emoji} Fiabilit\u00e9: {confidence}/10"
+                text=safe_message(
+                    f"🔴 Vente {symbol} à {price:.2f}\nEntrée: {entry:.2f}\nRésultat: {'+' if gain_pct >= 0 else ''}{gain_pct:.2f}%\n{emoji} Fiabilité: {confidence}/10"
+                )
             )
             del trades[symbol]
 
@@ -106,25 +113,25 @@ async def process_symbol(symbol):
 async def send_daily_summary():
     if not history:
         return
-    lines = ["\ud83c\udf1f R\u00e9capitulatif des trades (24h) :"]
+    lines = ["🌟 Récapitulatif des trades (24h) :"]
     for h in history[-50:]:
-        emoji = "\ud83d\udcc8" if h["result"] > 0 else "\ud83d\udcc9"
-        lines.append(f"{emoji} {h['symbol']} | Entr\u00e9e: {h['entry']:.2f} | Sortie: {h['exit']:.2f} | Gain: {h['result']:.2f}%")
-    await bot.send_message(chat_id=CHAT_ID, text="\n".join(lines))
+        emoji = "📈" if h["result"] > 0 else "📉"
+        lines.append(f"{emoji} {h['symbol']} | Entrée: {h['entry']:.2f} | Sortie: {h['exit']:.2f} | Gain: {h['result']:.2f}%")
+    await bot.send_message(chat_id=CHAT_ID, text=safe_message("\n".join(lines)))
 
 async def main_loop():
-    await bot.send_message(chat_id=CHAT_ID, text=f"\ud83d\ude80 Bot d\u00e9marr\u00e9 \u00e0 {datetime.now().strftime('%H:%M:%S')}")
+    await bot.send_message(chat_id=CHAT_ID, text=safe_message(f"🚀 Bot démarré à {datetime.now().strftime('%H:%M:%S')}"))
     last_heartbeat_hour = None
     last_daily_summary_sent = False
 
     while True:
         try:
             now = datetime.now()
+
             if last_heartbeat_hour != now.hour:
                 last_heartbeat_hour = now.hour
-                await bot.send_message(chat_id=CHAT_ID, text=f"\u2705 Bot actif \u00e0 {now.strftime('%H:%M')} (heartbeat)")
+                await bot.send_message(chat_id=CHAT_ID, text=f"✅ Bot actif à {now.strftime('%H:%M')} (heartbeat)")
 
-            # Résumé quotidien à 10h00
             if now.hour == 10 and not last_daily_summary_sent:
                 await send_daily_summary()
                 last_daily_summary_sent = True
@@ -135,7 +142,7 @@ async def main_loop():
 
         except Exception as e:
             err = traceback.format_exc()
-            await bot.send_message(chat_id=CHAT_ID, text=f"\u26a0\ufe0f Erreur :\n{err}")
+            await bot.send_message(chat_id=CHAT_ID, text=safe_message(f"⚠️ Erreur :\n{err}"))
 
         await asyncio.sleep(SLEEP_SECONDS)
 
@@ -145,13 +152,13 @@ if __name__ == "__main__":
         loop.run_until_complete(main_loop())
     except Exception as e:
         err = traceback.format_exc()
-        print(f"\u274c Crash : {e}", flush=True)
+        print(f"❌ Crash : {e}", flush=True)
         loop.run_until_complete(bot.send_message(
             chat_id=CHAT_ID,
-            text=f"\u274c Le bot a crash\u00e9 :\n{err}"
+            text=safe_message(f"❌ Le bot a crashé :\n{err}")
         ))
     finally:
         loop.run_until_complete(bot.send_message(
             chat_id=CHAT_ID,
-            text="\u26a0\ufe0f Le bot s'est arr\u00eat\u00e9."
+            text="⚠️ Le bot s’est arrêté."
         ))
