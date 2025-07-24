@@ -16,7 +16,9 @@ SYMBOLS = [
     'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
     'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT', 'DOTUSDT',
     'ARBUSDT', 'OPUSDT', 'SHIBUSDT', 'LTCUSDT', 'LINKUSDT',
-    'PEPEUSDT', 'INJUSDT', 'WLDUSDT', 'RUNEUSDT', 'APTUSDT'
+    'PEPEUSDT', 'INJUSDT', 'WLDUSDT', 'RUNEUSDT', 'APTUSDT',
+    'SEIUSDT', 'SUIUSDT', 'TIAUSDT', 'PYTHUSDT', 'JASMYUSDT',
+    '1000PEPEUSDT', 'FETUSDT', 'RNDRUSDT', 'GALAUSDT', 'COTIUSDT'
 ]
 INTERVAL = '1h'
 LIMIT = 100
@@ -175,3 +177,4 @@ if __name__ == "__main__":
             chat_id=CHAT_ID,
             text="⚠️ Le bot s’est arrêté."
         ))
+
