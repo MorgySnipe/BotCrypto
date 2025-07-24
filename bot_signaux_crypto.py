@@ -57,11 +57,14 @@ def is_uptrend(prices, period=50):
 
 async def process_symbol(symbol):
     try:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
         klines = get_klines(symbol)
         closes = [float(k[4]) for k in klines]
         price = closes[-1]
         rsi = compute_rsi(closes)
         macd, signal = compute_macd(closes)
+        print(f"{symbol} | Price: {price:.2f} | RSI: {rsi:.2f} | MACD: {macd:.4f} | Signal: {signal:.4f}", flush=True)
+
         buy = False
         confidence = None
         label = ""
@@ -77,6 +80,7 @@ async def process_symbol(symbol):
         if symbol in trades:
             entry = trades[symbol]['entry']
             gain_pct = ((price - entry) / entry) * 100
+            print(f"{symbol} | Position ouverte à {entry:.2f} | PnL: {gain_pct:.2f}%", flush=True)
             if gain_pct >= 3 or gain_pct <= -1.5:
                 sell = True
 
@@ -88,9 +92,7 @@ async def process_symbol(symbol):
             }
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=safe_message(
-                    f"🟢 Achat sur {symbol} à {price:.2f}\n{label}\n💰 Capital suggéré : {position_size:.2f} €"
-                )
+                text=safe_message(f"🟢 Achat détecté sur {symbol} à {price:.2f}\n{label}\n💰 Capital suggéré : {position_size:.2f} €")
             )
 
         elif sell and symbol in trades:
@@ -98,16 +100,23 @@ async def process_symbol(symbol):
             gain_pct = ((price - entry) / entry) * 100
             confidence = trades[symbol].get("confidence", "?")
             emoji = "💎" if confidence >= 8 else "⚠️"
-            history.append({"symbol": symbol, "entry": entry, "exit": price, "result": gain_pct, "confidence": confidence})
+            history.append({
+                "symbol": symbol,
+                "entry": entry,
+                "exit": price,
+                "result": gain_pct,
+                "confidence": confidence
+            })
             await bot.send_message(
                 chat_id=CHAT_ID,
                 text=safe_message(
-                    f"🔴 Vente {symbol} à {price:.2f}\nEntrée: {entry:.2f}\nRésultat: {'+' if gain_pct >= 0 else ''}{gain_pct:.2f}%\n{emoji} Fiabilité: {confidence}/10"
+                    f"🔴 Vente sur {symbol} à {price:.2f}\n📈 Entrée: {entry:.2f}\n📊 Résultat: {'+' if gain_pct >= 0 else ''}{gain_pct:.2f}%\n{emoji} Fiabilité: {confidence}/10"
                 )
             )
             del trades[symbol]
 
     except Exception as e:
+        print(f"❌ Erreur {symbol}: {e}", flush=True)
         traceback.print_exc()
 
 async def send_daily_summary():
@@ -127,6 +136,7 @@ async def main_loop():
     while True:
         try:
             now = datetime.now()
+            print(f"🔁 Nouvelle itération à {now.strftime('%H:%M:%S')}", flush=True)
 
             if last_heartbeat_hour != now.hour:
                 last_heartbeat_hour = now.hour
@@ -139,9 +149,11 @@ async def main_loop():
                 last_daily_summary_sent = False
 
             await asyncio.gather(*(process_symbol(sym) for sym in SYMBOLS))
+            print("✔️ Itération terminée", flush=True)
 
         except Exception as e:
             err = traceback.format_exc()
+            print(f"⚠️ Erreur dans main_loop : {e}", flush=True)
             await bot.send_message(chat_id=CHAT_ID, text=safe_message(f"⚠️ Erreur :\n{err}"))
 
         await asyncio.sleep(SLEEP_SECONDS)
@@ -152,7 +164,7 @@ if __name__ == "__main__":
         loop.run_until_complete(main_loop())
     except Exception as e:
         err = traceback.format_exc()
-        print(f"❌ Crash : {e}", flush=True)
+        print(f"❌ Crash fatal : {e}", flush=True)
         loop.run_until_complete(bot.send_message(
             chat_id=CHAT_ID,
             text=safe_message(f"❌ Le bot a crashé :\n{err}")
@@ -162,3 +174,4 @@ if __name__ == "__main__":
             chat_id=CHAT_ID,
             text="⚠️ Le bot s’est arrêté."
         ))
+
