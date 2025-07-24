@@ -70,6 +70,7 @@ async def process_symbol(symbol):
         label = ""
         position_size = 0
 
+        # ✅ SEULE stratégie activée : Fiabilité 9/10
         if (rsi > 30 and compute_rsi(closes[:-1]) < 30 and macd > signal and is_uptrend(closes)):
             buy = True
             confidence = 9
@@ -174,4 +175,3 @@ if __name__ == "__main__":
             chat_id=CHAT_ID,
             text="⚠️ Le bot s’est arrêté."
         ))
-
