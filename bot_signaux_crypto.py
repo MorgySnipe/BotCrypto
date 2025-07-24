@@ -18,11 +18,11 @@ SYMBOLS = [
     'ARBUSDT', 'OPUSDT', 'SHIBUSDT', 'LTCUSDT', 'LINKUSDT',
     'PEPEUSDT', 'INJUSDT', 'WLDUSDT', 'RUNEUSDT', 'APTUSDT',
     'SEIUSDT', 'SUIUSDT', 'TIAUSDT', 'PYTHUSDT', 'JASMYUSDT',
-    '1000PEPEUSDT', 'FETUSDT', 'RNDRUSDT', 'GALAUSDT', 'COTIUSDT'
+    'FETUSDT', 'RNDRUSDT', 'GALAUSDT', 'COTIUSDT'
 ]
 INTERVAL = '1h'
 LIMIT = 100
-SLEEP_SECONDS = 300
+SLEEP_SECONDS = 300  # ⏱️ tu peux passer à 600 pour 10 minutes
 bot = Bot(token=TELEGRAM_TOKEN)
 
 trades = {}
@@ -177,4 +177,3 @@ if __name__ == "__main__":
             chat_id=CHAT_ID,
             text="⚠️ Le bot s’est arrêté."
         ))
-
