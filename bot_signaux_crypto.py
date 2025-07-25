@@ -27,14 +27,17 @@ bot = Bot(token=TELEGRAM_TOKEN)
 trades = {}
 history = []
 
+
 def safe_message(text):
     return text if len(text) < 4000 else text[:3900] + "\n... (tronqué)"
+
 
 def get_klines(symbol):
     url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval={INTERVAL}&limit={LIMIT}'
     response = requests.get(url)
     response.raise_for_status()
     return response.json()
+
 
 def compute_rsi(prices, period=14):
     deltas = np.diff(prices)
@@ -45,6 +48,7 @@ def compute_rsi(prices, period=14):
     rs = avg_gain / avg_loss if avg_loss != 0 else 0
     return 100 - (100 / (1 + rs))
 
+
 def compute_macd(prices, short=12, long=26, signal=9):
     ema_short = np.convolve(prices, np.ones(short)/short, mode='valid')
     ema_long = np.convolve(prices, np.ones(long)/long, mode='valid')
@@ -52,9 +56,22 @@ def compute_macd(prices, short=12, long=26, signal=9):
     signal_line = np.convolve(macd_line, np.ones(signal)/signal, mode='valid')
     return macd_line[-1], signal_line[-1]
 
+
 def is_uptrend(prices, period=50):
     ma = np.mean(prices[-period:])
     return prices[-1] > ma
+
+
+def is_market_bullish():
+    try:
+        btc_klines = get_klines('BTCUSDT')
+        eth_klines = get_klines('ETHUSDT')
+        btc_prices = [float(k[4]) for k in btc_klines]
+        eth_prices = [float(k[4]) for k in eth_klines]
+        return is_uptrend(btc_prices) and is_uptrend(eth_prices)
+    except:
+        return False
+
 
 async def process_symbol(symbol):
     try:
@@ -70,13 +87,16 @@ async def process_symbol(symbol):
         label = ""
         position_pct = 0
 
+        if not is_market_bullish():
+            return
+
         if (rsi > 30 and compute_rsi(closes[:-1]) < 30 and macd > signal and is_uptrend(closes)):
             buy = True
             confidence = 9
             label = "💎 RSI rebond + MACD + Uptrend"
             position_pct = 7
 
-        elif rsi < 25 and macd > signal:
+        elif rsi < 25 and macd > signal and is_uptrend(closes):
             buy = True
             confidence = 8
             label = "🔥 RSI < 25 + MACD positif"
@@ -88,7 +108,7 @@ async def process_symbol(symbol):
             label = "📊 RSI neutre + Uptrend + MACD"
             position_pct = 5
 
-        elif rsi > 70 and macd > signal:
+        elif rsi > 70 and macd > signal and is_uptrend(closes):
             buy = True
             confidence = 6
             label = "⚠️ RSI > 70 mais MACD positif"
@@ -131,6 +151,7 @@ async def process_symbol(symbol):
         print(f"❌ Erreur {symbol}: {e}", flush=True)
         traceback.print_exc()
 
+
 async def send_daily_summary():
     if not history:
         return
@@ -139,6 +160,7 @@ async def send_daily_summary():
         emoji = "📈" if h["result"] > 0 else "📉"
         lines.append(f"{emoji} {h['symbol']} | Entrée: {h['entry']:.2f} | Sortie: {h['exit']:.2f} | Gain: {h['result']:.2f}%")
     await bot.send_message(chat_id=CHAT_ID, text=safe_message("\n".join(lines)))
+
 
 async def main_loop():
     await bot.send_message(chat_id=CHAT_ID, text=safe_message(f"🚀 Bot démarré à {datetime.now().strftime('%H:%M:%S')}"))
@@ -170,6 +192,7 @@ async def main_loop():
 
         await asyncio.sleep(SLEEP_SECONDS)
 
+
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     try:
@@ -186,4 +209,5 @@ if __name__ == "__main__":
             chat_id=CHAT_ID,
             text="⚠️ Le bot s’est arrêté."
         ))
+
 
