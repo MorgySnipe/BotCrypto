@@ -108,6 +108,11 @@ async def process_symbol(symbol):
         if not is_market_bullish():
             return
 
+        # 🔒 Blocage RSI extrême (anti-pump FOMO)
+        if rsi > 75 and rsi_15m > 80:
+            print(f"{symbol} ❌ Achat bloqué : RSI1h={rsi:.2f}, RSI15m={rsi_15m:.2f} (surachat extrême)")
+            return
+
         # === CONDITIONS D'ACHAT ===
         if (rsi > 30 and compute_rsi(closes[:-1]) < 30 and macd > signal and is_uptrend(closes)) and (rsi_15m > 50 and macd_15m > signal_15m):
             buy = True; confidence = 9; label = "💎 RSI rebond + MACD + Uptrend (1h & 15m confirmés)"; position_pct = 7
@@ -168,7 +173,7 @@ async def process_symbol(symbol):
             del trades[symbol]
 
     except Exception as e:
-        print(f"❌ Erreur {symbol}: {e}", flush=True)
+        print(f"❌ Erreur {symbol}: {e}")
         traceback.print_exc()
 
 # === DAILY SUMMARY ===
@@ -221,4 +226,5 @@ if __name__ == "__main__":
         loop.run_until_complete(bot.send_message(chat_id=CHAT_ID, text=safe_message(f"❌ Le bot a crashé :\n{err}")))
     finally:
         loop.run_until_complete(bot.send_message(chat_id=CHAT_ID, text="⚠️ Le bot s’est arrêté."))
+
 
