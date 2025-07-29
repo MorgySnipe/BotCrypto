@@ -1,7 +1,7 @@
 import asyncio
 import requests
 import numpy as np
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, UTC
 from telegram import Bot
 import nest_asyncio
 import traceback
@@ -88,7 +88,7 @@ def is_market_bullish():
         return False
 
 def in_active_session():
-    hour = datetime.utcnow().hour
+    hour = datetime.now(UTC).hour
     return not (0 <= hour < 6)  # Pas de trade entre 00h et 06h UTC
 
 # === STRATEGIE ===
@@ -254,6 +254,7 @@ async def main_loop():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main_loop())
+
 
 
 
