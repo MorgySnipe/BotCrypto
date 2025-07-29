@@ -135,23 +135,18 @@ async def process_symbol(symbol):
         if not is_market_bullish():
             print(f"{symbol} ❌ Marché global baissier", flush=True)
             return
-
         if price < ema200:
             print(f"{symbol} ❌ Sous EMA200 (trend long terme baissier)", flush=True)
             return
-
         if detect_rsi_divergence(closes, rsis):
             print(f"{symbol} ❌ Divergence RSI détectée", flush=True)
             return
-
         if (highs[-1] - lows[-1]) / lows[-1] > 0.05:
             print(f"{symbol} ❌ Bougie >5% range, achat bloqué", flush=True)
             return
-
         if price > min(lows[-5:]) * 1.03:
             print(f"{symbol} ❌ Prix > +3% du plus bas récent, anti-pump", flush=True)
             return
-
         if np.mean(volumes[-5:]) < 0.8 * np.mean(volumes[-20:]):
             print(f"{symbol} ❌ Volume trop faible (<80% moyenne)", flush=True)
             return
@@ -161,7 +156,6 @@ async def process_symbol(symbol):
         confidence = 0
         label = ""
         position_pct = 5
-
         if is_uptrend(closes) and macd > signal and rsi_15m > 50:
             buy = True
             confidence = 9
@@ -174,50 +168,62 @@ async def process_symbol(symbol):
             entry = trades[symbol]['entry']
             gain = ((price - entry) / entry) * 100
             stop = trades[symbol].get("stop", entry - atr)
-
             if gain > 1.5: stop = max(stop, entry)
             if gain > 3: stop = max(stop, entry * 1.01)
             if gain > 5: stop = max(stop, entry * 1.03)
-
             trades[symbol]["stop"] = stop
 
             if gain >= 1.5 and not trades[symbol].get("tp1", False):
                 trades[symbol]["tp1"] = True
-                print(f"{symbol} ✅ TP1 atteint +1.5% | Stop {stop:.4f}", flush=True)
                 await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 +1.5% atteint sur {symbol} | Stop {stop:.4f}")
-
             if gain >= 3 and not trades[symbol].get("tp2", False):
                 trades[symbol]["tp2"] = True
-                print(f"{symbol} ✅ TP2 atteint +3% | Stop {stop:.4f}", flush=True)
                 await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP2 +3% atteint sur {symbol} | Stop {stop:.4f}")
-
             if gain >= 5:
-                print(f"{symbol} ✅ TP3 +5% atteint, clôture", flush=True)
                 await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP3 +5% atteint sur {symbol} | Clôture finale")
                 sell = True
-
             if trades[symbol].get("tp1", False) and gain < 1:
-                print(f"{symbol} 🔴 Mode anti-drawdown déclenché", flush=True)
                 sell = True
-
             if price < stop or gain <= -1.5:
-                print(f"{symbol} 🔴 Stop Loss déclenché", flush=True)
                 sell = True
 
         # === ENTREE ===
         if buy and symbol not in trades:
-            trades[symbol] = {"entry": price, "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-                              "confidence": confidence, "stop": price - atr}
+            trades[symbol] = {
+                "entry": price,
+                "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                "confidence": confidence,
+                "stop": price - atr,
+                "position_pct": position_pct
+            }
             last_trade_time[symbol] = datetime.now()
-            print(f"{symbol} ✅ Achat exécuté à {price:.4f}", flush=True)
-            await bot.send_message(chat_id=CHAT_ID, text=f"🟢 Achat {symbol} à {price:.4f}\n{label}\n📈 SL ATR: {price - atr:.4f}")
+            await bot.send_message(chat_id=CHAT_ID, text=(
+                f"🟢 Achat {symbol} à {price:.4f}\n"
+                f"{label}\n"
+                f"📊 RSI1h: {rsi:.2f} | RSI15m: {rsi_15m:.2f}\n"
+                f"📈 MACD: {macd:.4f} / Signal: {signal:.4f}\n"
+                f"📦 Volume: {np.mean(volumes[-5:]):.0f} vs {np.mean(volumes[-20:]):.0f}\n"
+                f"📉 SL ATR: {price - atr:.4f}\n"
+                f"💰 Capital conseillé : {position_pct}%"
+            ))
 
         # === SORTIE ===
         elif sell and symbol in trades:
             entry = trades[symbol]['entry']
             gain = ((price - entry) / entry) * 100
-            print(f"{symbol} 🔴 Vente exécutée à {price:.4f} | Gain {gain:.2f}%", flush=True)
-            await bot.send_message(chat_id=CHAT_ID, text=f"🔴 Vente {symbol} à {price:.4f} | Gain {gain:.2f}% ✅")
+            stop_used = trades[symbol].get("stop", entry - atr)
+            tp_status = []
+            if trades[symbol].get("tp1", False): tp_status.append("TP1 ✅")
+            if trades[symbol].get("tp2", False): tp_status.append("TP2 ✅")
+            if gain >= 5: tp_status.append("TP3 ✅")
+            tp_info = " | ".join(tp_status) if tp_status else "Aucun TP atteint"
+            await bot.send_message(chat_id=CHAT_ID, text=(
+                f"🔴 Vente {symbol} à {price:.4f}\n"
+                f"📈 Entrée: {entry:.4f}\n"
+                f"📊 Gain: {gain:.2f}%\n"
+                f"🛑 Stop final: {stop_used:.4f}\n"
+                f"🎯 {tp_info}"
+            ))
             del trades[symbol]
 
     except Exception as e:
@@ -240,13 +246,11 @@ async def main_loop():
         try:
             now = datetime.now()
             if last_heartbeat != now.hour:
-                print(f"✅ Heartbeat : Bot actif {now.strftime('%H:%M')}", flush=True)
                 await bot.send_message(chat_id=CHAT_ID, text=f"✅ Bot actif {now.strftime('%H:%M')}")
                 last_heartbeat = now.hour
             await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
             print("✔️ Itération terminée", flush=True)
         except Exception as e:
-            print(f"⚠️ Erreur dans main_loop : {e}", flush=True)
             await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Erreur : {e}")
         await asyncio.sleep(SLEEP_SECONDS)
 
