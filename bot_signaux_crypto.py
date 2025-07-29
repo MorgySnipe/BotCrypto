@@ -22,8 +22,8 @@ INTERVAL = '1h'
 LIMIT = 100
 SLEEP_SECONDS = 300
 MAX_TRADES = 7
-MIN_VOLUME = 1000000  # volume minimum
-COOLDOWN_HOURS = 4    # 4h avant de retrader le même coin
+MIN_VOLUME = 1000000
+COOLDOWN_HOURS = 4
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
@@ -80,8 +80,6 @@ async def process_symbol(symbol):
             if cooldown_left > 0:
                 print(f"{symbol} ⏳ Cooldown restant: {cooldown_left:.1f}h")
                 return
-        else:
-            cooldown_left = 0
 
         if len(trades) >= MAX_TRADES:
             return
@@ -94,7 +92,6 @@ async def process_symbol(symbol):
         rsi = compute_rsi(closes)
         macd, signal = compute_macd(closes)
 
-        # 15m confirmation
         klines_15m = get_klines(symbol, interval='15m', limit=50)
         closes_15m = [float(k[4]) for k in klines_15m]
         rsi_15m = compute_rsi(closes_15m)
@@ -108,24 +105,19 @@ async def process_symbol(symbol):
         if not is_market_bullish():
             return
 
-        # 🔒 Blocage RSI extrême (anti-pump FOMO)
         if rsi > 75 and rsi_15m > 80:
-            print(f"{symbol} ❌ Achat bloqué : RSI1h={rsi:.2f}, RSI15m={rsi_15m:.2f} (surachat extrême)")
+            print(f"{symbol} ❌ Achat bloqué : RSI1h={rsi:.2f}, RSI15m={rsi_15m:.2f}")
             return
 
         # === CONDITIONS D'ACHAT ===
         if (rsi > 30 and compute_rsi(closes[:-1]) < 30 and macd > signal and is_uptrend(closes)) and (rsi_15m > 50 and macd_15m > signal_15m):
             buy = True; confidence = 9; label = "💎 RSI rebond + MACD + Uptrend (1h & 15m confirmés)"; position_pct = 7
-
         elif rsi < 25 and macd > signal and is_uptrend(closes) and rsi_15m > 50:
             buy = True; confidence = 8; label = "🔥 RSI <25 + MACD + 15m OK"; position_pct = 5
-
         elif 45 < rsi < 55 and macd > signal and is_uptrend(closes) and rsi_15m > 50:
             buy = True; confidence = 7; label = "📊 RSI neutre + MACD + Uptrend + 15m OK"; position_pct = 5
-
         elif rsi > 70 and rsi_15m < 65 and macd > signal and is_uptrend(closes):
             buy = True; confidence = 6; label = "⚠️ RSI >70 mais 15m <65 (confirmation)"; position_pct = 3
-
         elif is_volume_increasing(klines) and macd > signal and is_uptrend(closes):
             buy = True; confidence = 6; label = "📈 Volume fort + MACD + Uptrend"; position_pct = 4
 
@@ -133,13 +125,26 @@ async def process_symbol(symbol):
         sell = False
         if symbol in trades:
             entry = trades[symbol]['entry']
+            entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M")
             gain_pct = ((price - entry) / entry) * 100
             print(f"{symbol} | Position ouverte à {entry:.2f} | PnL: {gain_pct:.2f}%", flush=True)
 
+            # ✅ Fermeture forcée après 24h si trade positif
+            if (datetime.now(timezone.utc) - entry_time.replace(tzinfo=timezone.utc)) > timedelta(hours=24) and gain_pct > 0:
+                print(f"{symbol} ⏳ Fermeture forcée après 24h avec gain {gain_pct:.2f}%")
+                sell = True
+
+            # ✅ TP partiel à +2%
             if gain_pct >= 2 and not trades[symbol].get("partial", False):
                 trades[symbol]["partial"] = True
                 await bot.send_message(chat_id=CHAT_ID, text=safe_message(f"🔵 TP partiel sur {symbol} à {price:.2f} (+2%)"))
 
+            # ✅ Stop si après TP partiel gain < +1%
+            if trades[symbol].get("partial", False) and gain_pct < 1:
+                print(f"{symbol} 🔴 Stop après TP partiel (retour sous +1%)")
+                sell = True
+
+            # ✅ TP total à +3% ou SL à -1.5%
             if gain_pct >= 3 or gain_pct <= -1.5:
                 sell = True
 
@@ -226,5 +231,6 @@ if __name__ == "__main__":
         loop.run_until_complete(bot.send_message(chat_id=CHAT_ID, text=safe_message(f"❌ Le bot a crashé :\n{err}")))
     finally:
         loop.run_until_complete(bot.send_message(chat_id=CHAT_ID, text="⚠️ Le bot s’est arrêté."))
+
 
 
