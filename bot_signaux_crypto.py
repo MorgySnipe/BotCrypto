@@ -12,11 +12,11 @@ nest_asyncio.apply()
 TELEGRAM_TOKEN = '7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac'
 CHAT_ID = 969925512
 SYMBOLS = [
-    'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
-    'ADAUSDT', 'DOGEUSDT', 'AVAXUSDT', 'MATICUSDT', 'DOTUSDT',
-    'ARBUSDT', 'OPUSDT', 'LTCUSDT', 'LINKUSDT', 'INJUSDT',
-    'WLDUSDT', 'RUNEUSDT', 'APTUSDT', 'SEIUSDT', 'SUIUSDT',
-    'TIAUSDT', 'PYTHUSDT', 'FETUSDT', 'RNDRUSDT', 'GALAUSDT'
+    'BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT',
+    'ADAUSDT','DOGEUSDT','AVAXUSDT','MATICUSDT','DOTUSDT',
+    'ARBUSDT','OPUSDT','LTCUSDT','LINKUSDT','INJUSDT',
+    'WLDUSDT','RUNEUSDT','APTUSDT','SEIUSDT','SUIUSDT',
+    'TIAUSDT','PYTHUSDT','FETUSDT','RNDRUSDT','GALAUSDT'
 ]
 INTERVAL = '1h'
 LIMIT = 100
@@ -26,11 +26,11 @@ MIN_VOLUME = 1000000
 COOLDOWN_HOURS = 4
 
 bot = Bot(token=TELEGRAM_TOKEN)
-
 trades = {}
 history = []
 last_trade_time = {}
 
+# === UTILITAIRES ===
 def safe_message(text):
     return text if len(text) < 4000 else text[:3900] + "\n... (tronqué)"
 
@@ -56,9 +56,24 @@ def compute_macd(prices, short=12, long=26, signal=9):
     signal_line = np.convolve(macd_line, np.ones(signal)/signal, mode='valid')
     return macd_line[-1], signal_line[-1]
 
+def compute_ema(prices, period=200):
+    weights = np.exp(np.linspace(-1., 0., period))
+    weights /= weights.sum()
+    ema = np.convolve(prices, weights, mode='full')[:len(prices)]
+    return ema[-1]
+
+def compute_atr(klines, period=14):
+    highs = np.array([float(k[2]) for k in klines])
+    lows = np.array([float(k[3]) for k in klines])
+    closes = np.array([float(k[4]) for k in klines])
+    tr = np.maximum(highs[1:], closes[:-1]) - np.minimum(lows[1:], closes[:-1])
+    return np.mean(tr[-period:])
+
+def detect_rsi_divergence(prices, rsis):
+    return prices[-1] > prices[-2] and rsis[-1] < rsis[-2]
+
 def is_uptrend(prices, period=50):
-    ma = np.mean(prices[-period:])
-    return prices[-1] > ma
+    return prices[-1] > np.mean(prices[-period:])
 
 def is_volume_increasing(klines):
     volumes = [float(k[5]) for k in klines]
@@ -72,109 +87,140 @@ def is_market_bullish():
     except:
         return False
 
+def in_active_session():
+    hour = datetime.utcnow().hour
+    return not (0 <= hour < 6)  # Pas de trade entre 00h et 06h UTC
+
+# === STRATEGIE ===
 async def process_symbol(symbol):
     try:
-        # COOLDOWN
+        # === COOLDOWN ===
         if symbol in last_trade_time:
             cooldown_left = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds()/3600
             if cooldown_left > 0:
-                print(f"{symbol} ⏳ Cooldown restant: {cooldown_left:.1f}h")
+                print(f"{symbol} ⏳ Cooldown actif: {cooldown_left:.1f}h")
                 return
 
         if len(trades) >= MAX_TRADES:
             return
 
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
+        if not in_active_session():
+            print(f"{symbol} 🛑 Hors session active (UTC 00-06)")
+            return
+
+        # === RECUPERATION DONNEES ===
         klines = get_klines(symbol)
         closes = [float(k[4]) for k in klines]
+        highs = [float(k[2]) for k in klines]
+        lows = [float(k[3]) for k in klines]
         volumes = [float(k[5]) for k in klines]
+
         price = closes[-1]
         rsi = compute_rsi(closes)
         macd, signal = compute_macd(closes)
+        ema200 = compute_ema(closes, 200)
+        atr = compute_atr(klines)
+        rsis = [compute_rsi(closes[i-14:i]) for i in range(14, len(closes))]
 
+        # === CONFIRMATION 15m ===
         klines_15m = get_klines(symbol, interval='15m', limit=50)
         closes_15m = [float(k[4]) for k in klines_15m]
         rsi_15m = compute_rsi(closes_15m)
         macd_15m, signal_15m = compute_macd(closes_15m)
 
-        buy = False
-        confidence = None
-        label = ""
-        position_pct = 0
-
+        # === FILTRES AVANCES ===
         if not is_market_bullish():
+            print(f"{symbol} ❌ Marché global baissier")
             return
 
-        if rsi > 75 and rsi_15m > 80:
-            print(f"{symbol} ❌ Achat bloqué : RSI1h={rsi:.2f}, RSI15m={rsi_15m:.2f}")
+        if price < ema200:
+            print(f"{symbol} ❌ Sous EMA200 (tendance long terme baissière)")
             return
 
-        # === CONDITIONS D'ACHAT ===
-        if (rsi > 30 and compute_rsi(closes[:-1]) < 30 and macd > signal and is_uptrend(closes)) and (rsi_15m > 50 and macd_15m > signal_15m):
-            buy = True; confidence = 9; label = "💎 RSI rebond + MACD + Uptrend (1h & 15m confirmés)"; position_pct = 7
-        elif rsi < 25 and macd > signal and is_uptrend(closes) and rsi_15m > 50:
-            buy = True; confidence = 8; label = "🔥 RSI <25 + MACD + 15m OK"; position_pct = 5
-        elif 45 < rsi < 55 and macd > signal and is_uptrend(closes) and rsi_15m > 50:
-            buy = True; confidence = 7; label = "📊 RSI neutre + MACD + Uptrend + 15m OK"; position_pct = 5
-        elif rsi > 70 and rsi_15m < 65 and macd > signal and is_uptrend(closes):
-            buy = True; confidence = 6; label = "⚠️ RSI >70 mais 15m <65 (confirmation)"; position_pct = 3
-        elif is_volume_increasing(klines) and macd > signal and is_uptrend(closes):
-            buy = True; confidence = 6; label = "📈 Volume fort + MACD + Uptrend"; position_pct = 4
+        if detect_rsi_divergence(closes, rsis):
+            print(f"{symbol} ❌ Divergence RSI détectée, achat bloqué")
+            return
 
-        # === CONDITIONS DE SORTIE ===
+        if (highs[-1] - lows[-1]) / lows[-1] > 0.05:
+            print(f"{symbol} ❌ Bougie >5% range, achat bloqué")
+            return
+
+        if price > min(lows[-5:]) * 1.03:
+            print(f"{symbol} ❌ Prix > +3% du plus bas récent, anti-pump")
+            return
+
+        if np.mean(volumes[-5:]) < 0.8 * np.mean(volumes[-20:]):
+            print(f"{symbol} ❌ Volume trop faible (<80% moyenne)")
+            return
+
+        # === SIGNAL ACHAT ===
+        buy = False
+        confidence = 0
+        label = ""
+        position_pct = 5
+
+        if is_uptrend(closes) and macd > signal and rsi_15m > 50:
+            buy = True
+            confidence = 9
+            label = "💎 Trend EMA200 + MACD + RSI confirmé"
+            position_pct = 7
+
+        # === POSITION OUVERTE ===
         sell = False
         if symbol in trades:
             entry = trades[symbol]['entry']
-            entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M")
-            gain_pct = ((price - entry) / entry) * 100
-            print(f"{symbol} | Position ouverte à {entry:.2f} | PnL: {gain_pct:.2f}%", flush=True)
+            gain = ((price - entry) / entry) * 100
+            stop = trades[symbol].get("stop", entry - atr)
 
-            # ✅ Fermeture forcée après 24h si trade positif
-            if (datetime.now(timezone.utc) - entry_time.replace(tzinfo=timezone.utc)) > timedelta(hours=24) and gain_pct > 0:
-                print(f"{symbol} ⏳ Fermeture forcée après 24h avec gain {gain_pct:.2f}%")
+            # === TRAILING STOP DYNAMIQUE ===
+            if gain > 1.5:
+                stop = max(stop, entry)
+            if gain > 3:
+                stop = max(stop, entry * 1.01)
+            if gain > 5:
+                stop = max(stop, entry * 1.03)
+
+            trades[symbol]["stop"] = stop
+
+            # === PRISE PARTIELLE MULTI-NIVEAUX ===
+            if gain >= 1.5 and not trades[symbol].get("tp1", False):
+                trades[symbol]["tp1"] = True
+                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 +1.5% atteint sur {symbol} | Stop {stop:.4f}")
+
+            if gain >= 3 and not trades[symbol].get("tp2", False):
+                trades[symbol]["tp2"] = True
+                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP2 +3% atteint sur {symbol} | Stop {stop:.4f}")
+
+            if gain >= 5:
+                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP3 +5% atteint sur {symbol} | Clôture finale")
                 sell = True
 
-            # ✅ TP partiel à +2%
-            if gain_pct >= 2 and not trades[symbol].get("partial", False):
-                trades[symbol]["partial"] = True
-                await bot.send_message(chat_id=CHAT_ID, text=safe_message(f"🔵 TP partiel sur {symbol} à {price:.2f} (+2%)"))
-
-            # ✅ Stop si après TP partiel gain < +1%
-            if trades[symbol].get("partial", False) and gain_pct < 1:
-                print(f"{symbol} 🔴 Stop après TP partiel (retour sous +1%)")
+            # === MODE ANTI-DRAWDOWN ===
+            if trades[symbol].get("tp1", False) and gain < 1:
+                print(f"{symbol} 🔴 Mode anti-drawdown déclenché")
                 sell = True
 
-            # ✅ TP total à +3% ou SL à -1.5%
-            if gain_pct >= 3 or gain_pct <= -1.5:
+            # === STOP-LOSS ATR ===
+            if price < stop or gain <= -1.5:
+                print(f"{symbol} 🔴 Stop Loss déclenché")
                 sell = True
 
-        # === ENTRÉE ===
+        # === ENTREE ===
         if buy and symbol not in trades:
-            trades[symbol] = {"entry": price, "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"), "confidence": confidence, "partial": False}
+            trades[symbol] = {
+                "entry": price,
+                "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                "confidence": confidence,
+                "stop": price - atr
+            }
             last_trade_time[symbol] = datetime.now()
-            vol_now = np.mean(volumes[-5:])
-            vol_avg = np.mean(volumes[-10:-5])
-            await bot.send_message(chat_id=CHAT_ID, text=safe_message(
-                f"🟢 Achat {symbol} à {price:.2f}\n{label}\n"
-                f"📊 RSI1h: {rsi:.2f} | RSI15m: {rsi_15m:.2f}\n"
-                f"📈 MACD: {macd:.4f} / Signal: {signal:.4f}\n"
-                f"📦 Volume: {vol_now:.0f} vs {vol_avg:.0f}\n"
-                f"⏳ Cooldown restant après trade: {COOLDOWN_HOURS}h\n"
-                f"💰 Suggéré : {position_pct}% du capital"
-            ))
+            await bot.send_message(chat_id=CHAT_ID, text=f"🟢 Achat {symbol} à {price:.4f}\n{label}\n📈 SL ATR: {price - atr:.4f}")
 
         # === SORTIE ===
         elif sell and symbol in trades:
             entry = trades[symbol]['entry']
-            gain_pct = ((price - entry) / entry) * 100
-            confidence = trades[symbol].get("confidence", "?")
-            emoji = "💎" if confidence >= 8 else "⚠️"
-            history.append({"symbol": symbol, "entry": entry, "exit": price, "result": gain_pct, "confidence": confidence})
-            await bot.send_message(chat_id=CHAT_ID, text=safe_message(
-                f"🔴 Vente {symbol} à {price:.2f}\n📈 Entrée: {entry:.2f}\n"
-                f"📊 Gain: {'+' if gain_pct>=0 else ''}{gain_pct:.2f}%\n"
-                f"{emoji} Fiabilité: {confidence}/10"
-            ))
+            gain = ((price - entry) / entry) * 100
+            await bot.send_message(chat_id=CHAT_ID, text=f"🔴 Vente {symbol} à {price:.4f} | Gain {gain:.2f}% ✅")
             del trades[symbol]
 
     except Exception as e:
@@ -185,52 +231,29 @@ async def process_symbol(symbol):
 async def send_daily_summary():
     if not history:
         return
-    lines = ["🌟 Récapitulatif des trades (24h) :"]
+    msg = "🌟 Récapitulatif des trades (24h) :\n"
     for h in history[-50:]:
-        emoji = "📈" if h["result"] > 0 else "📉"
-        lines.append(f"{emoji} {h['symbol']} | Entrée: {h['entry']:.2f} | Sortie: {h['exit']:.2f} | Gain: {h['result']:.2f}%")
-    await bot.send_message(chat_id=CHAT_ID, text=safe_message("\n".join(lines)))
+        msg += f"📈 {h['symbol']} | Entrée {h['entry']:.2f} | Sortie {h['exit']:.2f} | {h['result']:.2f}%\n"
+    await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
 
 # === MAIN LOOP ===
 async def main_loop():
-    await bot.send_message(chat_id=CHAT_ID, text=safe_message(f"🚀 Bot démarré à {datetime.now().strftime('%H:%M:%S')}"))
-    last_heartbeat_hour = None
-    last_daily_summary_sent = False
+    await bot.send_message(chat_id=CHAT_ID, text=f"🚀 Bot démarré {datetime.now().strftime('%H:%M:%S')}")
+    last_heartbeat = None
     while True:
         try:
             now = datetime.now()
-            print(f"🔁 Nouvelle itération à {now.strftime('%H:%M:%S')}", flush=True)
-
-            if last_heartbeat_hour != now.hour:
-                last_heartbeat_hour = now.hour
-                await bot.send_message(chat_id=CHAT_ID, text=f"✅ Bot actif à {now.strftime('%H:%M')} (heartbeat)")
-
-            if now.hour == 10 and not last_daily_summary_sent:
-                await send_daily_summary()
-                last_daily_summary_sent = True
-            elif now.hour != 10:
-                last_daily_summary_sent = False
-
-            await asyncio.gather(*(process_symbol(sym) for sym in SYMBOLS))
-            print("✔️ Itération terminée", flush=True)
-
+            if last_heartbeat != now.hour:
+                await bot.send_message(chat_id=CHAT_ID, text=f"✅ Bot actif {now.strftime('%H:%M')}")
+                last_heartbeat = now.hour
+            await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
         except Exception as e:
-            err = traceback.format_exc()
-            print(f"⚠️ Erreur dans main_loop : {e}", flush=True)
-            await bot.send_message(chat_id=CHAT_ID, text=safe_message(f"⚠️ Erreur :\n{err}"))
-
+            await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Erreur : {e}")
         await asyncio.sleep(SLEEP_SECONDS)
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
-    try:
-        loop.run_until_complete(main_loop())
-    except Exception as e:
-        err = traceback.format_exc()
-        print(f"❌ Crash fatal : {e}", flush=True)
-        loop.run_until_complete(bot.send_message(chat_id=CHAT_ID, text=safe_message(f"❌ Le bot a crashé :\n{err}")))
-    finally:
-        loop.run_until_complete(bot.send_message(chat_id=CHAT_ID, text="⚠️ Le bot s’est arrêté."))
+    loop.run_until_complete(main_loop())
 
 
 
