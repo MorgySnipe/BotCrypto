@@ -88,7 +88,7 @@ def is_market_bullish():
         return False
 
 def in_active_session():
-    hour = datetime.utcnow().hour
+    hour = datetime.now(timezone.utc).hour
     return not (0 <= hour < 6)  # Pas de trade entre 00h et 06h UTC
 
 # === STRATEGIE ===
@@ -253,7 +253,6 @@ async def main_loop():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main_loop())
-
 
 
 
