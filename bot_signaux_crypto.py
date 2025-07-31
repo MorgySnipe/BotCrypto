@@ -89,35 +89,41 @@ def is_market_bullish():
 
 def in_active_session():
     hour = datetime.now(timezone.utc).hour
-    return not (0 <= hour < 6)  # Pas de trade entre 00h et 06h UTC
+    return not (0 <= hour < 6)
+
+# === NOUVELLES FONCTIONS AJOUTÉES ===
+def get_klines_4h(symbol, limit=100):
+    return get_klines(symbol, interval='4h', limit=limit)
+
+def is_market_range(prices, threshold=0.01):
+    return (max(prices[-20:]) - min(prices[-20:])) / min(prices[-20:]) < threshold
+
+def get_volatility(atr, price):
+    return atr / price
 
 # === STRATEGIE ===
 async def process_symbol(symbol):
     try:
-        # === COOLDOWN ===
         if symbol in last_trade_time:
             cooldown_left = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds()/3600
             if cooldown_left > 0:
                 print(f"{symbol} ⏳ Cooldown actif: {cooldown_left:.1f}h", flush=True)
                 return
-
         if len(trades) >= MAX_TRADES:
             print(f"🚫 Trop de trades ouverts ({MAX_TRADES}), {symbol} ignoré", flush=True)
             return
-
         if not in_active_session():
             print(f"{symbol} 🛑 Hors session active (UTC 00-06)", flush=True)
             return
 
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
 
-        # === RECUPERATION DONNEES ===
+        # === Données 1h ===
         klines = get_klines(symbol)
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
         lows = [float(k[3]) for k in klines]
         volumes = [float(k[5]) for k in klines]
-
         price = closes[-1]
         rsi = compute_rsi(closes)
         macd, signal = compute_macd(closes)
@@ -125,18 +131,26 @@ async def process_symbol(symbol):
         atr = compute_atr(klines)
         rsis = [compute_rsi(closes[i-14:i]) for i in range(14, len(closes))]
 
-        # === CONFIRMATION 15m ===
-        klines_15m = get_klines(symbol, interval='15m', limit=50)
-        closes_15m = [float(k[4]) for k in klines_15m]
-        rsi_15m = compute_rsi(closes_15m)
-        macd_15m, signal_15m = compute_macd(closes_15m)
+        # === Données 4h ===
+        klines_4h = get_klines_4h(symbol)
+        closes_4h = [float(k[4]) for k in klines_4h]
+        ema200_4h = compute_ema(closes_4h, 200)
+        ema50_4h = compute_ema(closes_4h, 50)
+        rsi_4h = compute_rsi(closes_4h)
 
-        # === FILTRES AVANCES ===
+        # === Filtres ajoutés ===
         if not is_market_bullish():
             print(f"{symbol} ❌ Marché global baissier", flush=True)
             return
-        if price < ema200:
-            print(f"{symbol} ❌ Sous EMA200 (trend long terme baissier)", flush=True)
+        if price < ema200 or closes_4h[-1] < ema200_4h or closes_4h[-1] < ema50_4h:
+            print(f"{symbol} ❌ Sous EMA50/EMA200 (4h ou 1h)", flush=True)
+            return
+        if rsi_4h < 50:
+            print(f"{symbol} ❌ RSI 4H < 50 (faible momentum)", flush=True)
+            return
+        if is_market_range(closes_4h):
+            print(f"{symbol} ⚠️ Marché en range détecté, trade bloqué", flush=True)
+            await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Marché en range sur {symbol} → Trade bloqué")
             return
         if detect_rsi_divergence(closes, rsis):
             print(f"{symbol} ❌ Divergence RSI détectée", flush=True)
@@ -151,28 +165,35 @@ async def process_symbol(symbol):
             print(f"{symbol} ❌ Volume trop faible (<80% moyenne)", flush=True)
             return
 
-        # === SIGNAL ACHAT ===
+        # Filtre ATR volatilité
+        volatility = get_volatility(atr, price)
+        if volatility < 0.005:
+            print(f"{symbol} ❌ Volatilité trop faible, blocage", flush=True)
+            return
+
+        # === Signal Achat ===
         buy = False
         confidence = 0
         label = ""
         position_pct = 5
-        if is_uptrend(closes) and macd > signal and rsi_15m > 50:
+        if is_uptrend(closes) and macd > signal and rsi > 50:
             buy = True
             confidence = 9
-            label = "💎 Trend EMA200 + MACD + RSI confirmé"
+            label = "💎 Trend EMA200/50 + MACD + RSI confirmé (1h/4h)"
             position_pct = 7
 
-        # === POSITION OUVERTE ===
+        # === Gestion position ===
         sell = False
         if symbol in trades:
             entry = trades[symbol]['entry']
             gain = ((price - entry) / entry) * 100
             stop = trades[symbol].get("stop", entry - atr)
+            if volatility < 0.008:  # Stop ATR serré
+                stop = max(stop, price - atr * 0.5)
             if gain > 1.5: stop = max(stop, entry)
             if gain > 3: stop = max(stop, entry * 1.01)
             if gain > 5: stop = max(stop, entry * 1.03)
             trades[symbol]["stop"] = stop
-
             if gain >= 1.5 and not trades[symbol].get("tp1", False):
                 trades[symbol]["tp1"] = True
                 await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 +1.5% atteint sur {symbol} | Stop {stop:.4f}")
@@ -187,42 +208,23 @@ async def process_symbol(symbol):
             if price < stop or gain <= -1.5:
                 sell = True
 
-        # === ENTREE ===
+        # === Entrée ===
         if buy and symbol not in trades:
-            trades[symbol] = {
-                "entry": price,
-                "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-                "confidence": confidence,
-                "stop": price - atr,
-                "position_pct": position_pct
-            }
+            trades[symbol] = {"entry": price, "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                              "confidence": confidence, "stop": price - atr, "position_pct": position_pct}
             last_trade_time[symbol] = datetime.now()
             await bot.send_message(chat_id=CHAT_ID, text=(
-                f"🟢 Achat {symbol} à {price:.4f}\n"
-                f"{label}\n"
-                f"📊 RSI1h: {rsi:.2f} | RSI15m: {rsi_15m:.2f}\n"
-                f"📈 MACD: {macd:.4f} / Signal: {signal:.4f}\n"
-                f"📦 Volume: {np.mean(volumes[-5:]):.0f} vs {np.mean(volumes[-20:]):.0f}\n"
-                f"📉 SL ATR: {price - atr:.4f}\n"
-                f"💰 Capital conseillé : {position_pct}%"
+                f"🟢 Achat {symbol} à {price:.4f}\n{label}\n📊 RSI1h: {rsi:.2f} | RSI4h: {rsi_4h:.2f}\n"
+                f"📈 MACD: {macd:.4f} / Signal: {signal:.4f}\n📦 Volatilité ATR: {volatility:.4%}\n📉 SL ATR: {price - atr:.4f}"
             ))
 
-        # === SORTIE ===
+        # === Sortie ===
         elif sell and symbol in trades:
             entry = trades[symbol]['entry']
             gain = ((price - entry) / entry) * 100
             stop_used = trades[symbol].get("stop", entry - atr)
-            tp_status = []
-            if trades[symbol].get("tp1", False): tp_status.append("TP1 ✅")
-            if trades[symbol].get("tp2", False): tp_status.append("TP2 ✅")
-            if gain >= 5: tp_status.append("TP3 ✅")
-            tp_info = " | ".join(tp_status) if tp_status else "Aucun TP atteint"
             await bot.send_message(chat_id=CHAT_ID, text=(
-                f"🔴 Vente {symbol} à {price:.4f}\n"
-                f"📈 Entrée: {entry:.4f}\n"
-                f"📊 Gain: {gain:.2f}%\n"
-                f"🛑 Stop final: {stop_used:.4f}\n"
-                f"🎯 {tp_info}"
+                f"🔴 Vente {symbol} à {price:.4f} | Gain {gain:.2f}% | Stop final: {stop_used:.4f}"
             ))
             del trades[symbol]
 
@@ -257,7 +259,6 @@ async def main_loop():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main_loop())
-
 
 
 
