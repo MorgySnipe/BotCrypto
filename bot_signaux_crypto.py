@@ -130,6 +130,7 @@ async def process_symbol(symbol):
         ema200 = compute_ema(closes, 200)
         atr = compute_atr(klines)
         rsis = [compute_rsi(closes[i-14:i]) for i in range(14, len(closes))]
+        ema25 = compute_ema(closes, 25)  # ✅ EMA25 pour anti-pump
 
         # === Données 4h ===
         klines_4h = get_klines_4h(symbol)
@@ -164,6 +165,14 @@ async def process_symbol(symbol):
         if np.mean(volumes[-5:]) < 0.8 * np.mean(volumes[-20:]):
             print(f"{symbol} ❌ Volume trop faible (<80% moyenne)", flush=True)
             return
+        # ✅ Filtre RSI anti-surachat
+        if rsi > 80 or rsi_4h > 75:
+            print(f"{symbol} ❌ RSI trop élevé (surachat), pas d'achat", flush=True)
+            return
+        # ✅ Filtre anti-pump EMA25 (>3%)
+        if price > ema25 * 1.03:
+            print(f"{symbol} ❌ Prix trop éloigné de l'EMA25 (>3%), pump suspect", flush=True)
+            return
 
         # Filtre ATR volatilité
         volatility = get_volatility(atr, price)
@@ -188,21 +197,28 @@ async def process_symbol(symbol):
             entry = trades[symbol]['entry']
             gain = ((price - entry) / entry) * 100
             stop = trades[symbol].get("stop", entry - atr)
-            if volatility < 0.008:  # Stop ATR serré
+            if volatility < 0.008:
                 stop = max(stop, price - atr * 0.5)
             if gain > 1.5: stop = max(stop, entry)
             if gain > 3: stop = max(stop, entry * 1.01)
             if gain > 5: stop = max(stop, entry * 1.03)
             trades[symbol]["stop"] = stop
-            if gain >= 1.5 and not trades[symbol].get("tp1", False):
+
+            # ✅ TP chronologique
+            if gain >= 5 and not trades[symbol].get("tp3", False):
+                trades[symbol]["tp3"] = True
                 trades[symbol]["tp1"] = True
-                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 +1.5% atteint sur {symbol} | Stop {stop:.4f}")
-            if gain >= 3 and not trades[symbol].get("tp2", False):
                 trades[symbol]["tp2"] = True
-                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP2 +3% atteint sur {symbol} | Stop {stop:.4f}")
-            if gain >= 5:
                 await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP3 +5% atteint sur {symbol} | Clôture finale")
                 sell = True
+            elif gain >= 3 and not trades[symbol].get("tp2", False):
+                trades[symbol]["tp2"] = True
+                trades[symbol]["tp1"] = True
+                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP2 +3% atteint sur {symbol} | Stop {stop:.4f}")
+            elif gain >= 1.5 and not trades[symbol].get("tp1", False):
+                trades[symbol]["tp1"] = True
+                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 +1.5% atteint sur {symbol} | Stop {stop:.4f}")
+
             if trades[symbol].get("tp1", False) and gain < 1:
                 sell = True
             if price < stop or gain <= -1.5:
@@ -259,6 +275,4 @@ async def main_loop():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main_loop())
-
-
 
