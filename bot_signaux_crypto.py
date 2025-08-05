@@ -5,10 +5,10 @@ from datetime import datetime, timezone, timedelta
 from telegram import Bot
 import nest_asyncio
 import traceback
+import csv
 
 nest_asyncio.apply()
 
-# === CONFIGURATION ===
 TELEGRAM_TOKEN = '7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac'
 CHAT_ID = 969925512
 SYMBOLS = [
@@ -29,8 +29,8 @@ bot = Bot(token=TELEGRAM_TOKEN)
 trades = {}
 history = []
 last_trade_time = {}
+LOG_FILE = "trade_log.csv"
 
-# === UTILITAIRES ===
 def safe_message(text):
     return text if len(text) < 4000 else text[:3900] + "\n... (tronqué)"
 
@@ -91,7 +91,6 @@ def in_active_session():
     hour = datetime.now(timezone.utc).hour
     return not (0 <= hour < 6)
 
-# === NOUVELLES FONCTIONS AJOUTÉES ===
 def get_klines_4h(symbol, limit=100):
     return get_klines(symbol, interval='4h', limit=limit)
 
@@ -101,9 +100,63 @@ def is_market_range(prices, threshold=0.01):
 def get_volatility(atr, price):
     return atr / price
 
-# === STRATEGIE ===
+def compute_adx(klines, period=14):
+    highs = np.array([float(k[2]) for k in klines])
+    lows = np.array([float(k[3]) for k in klines])
+    closes = np.array([float(k[4]) for k in klines])
+    plus_dm = highs[1:] - highs[:-1]
+    minus_dm = lows[:-1] - lows[1:]
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+    tr = np.maximum(highs[1:], closes[:-1]) - np.minimum(lows[1:], closes[:-1])
+    atr = np.convolve(tr, np.ones(period)/period, mode='valid')
+    plus_di = 100 * np.convolve(plus_dm, np.ones(period)/period, mode='valid') / atr
+    minus_di = 100 * np.convolve(minus_dm, np.ones(period)/period, mode='valid') / atr
+    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = np.convolve(dx, np.ones(period)/period, mode='valid')
+    return adx[-1] if len(adx) > 0 else 0
+
+def compute_supertrend(klines, period=10, multiplier=3):
+    atr = compute_atr(klines, period)
+    highs = np.array([float(k[2]) for k in klines])
+    lows = np.array([float(k[3]) for k in klines])
+    closes = np.array([float(k[4]) for k in klines])
+    hl2 = (highs + lows) / 2
+    lowerband = hl2[-1] - multiplier * atr
+    return closes[-1] > lowerband
+
+def log_trade(symbol, side, price, gain=0):
+    with open(LOG_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), symbol, side, price, gain])
+
+def trailing_stop_advanced(symbol, current_price):
+    if symbol in trades:
+        entry = trades[symbol]['entry']
+        gain = ((current_price - entry) / entry) * 100
+        atr_val = compute_atr(get_klines(symbol))
+        if gain > 2:
+            trades[symbol]["stop"] = max(trades[symbol]["stop"], current_price - 0.7 * atr_val)
+        if gain > 4:
+            trades[symbol]["stop"] = max(trades[symbol]["stop"], current_price - 0.5 * atr_val)
+        if gain > 7:
+            trades[symbol]["stop"] = max(trades[symbol]["stop"], current_price - 0.3 * atr_val)
+
 async def process_symbol(symbol):
     try:
+        adx_value = compute_adx(get_klines(symbol))
+        supertrend_signal = compute_supertrend(get_klines(symbol))
+        if adx_value < 20:
+            print(f"{symbol} ❌ ADX < 20 → marché plat", flush=True)
+            return
+        if not supertrend_signal:
+            print(f"{symbol} ❌ SuperTrend non haussier", flush=True)
+            return
+
+        if symbol in trades:
+            trailing_stop_advanced(symbol, trades[symbol].get("last_price", trades[symbol]["entry"]))
+            log_trade(symbol, "HOLD", trades[symbol]["entry"])
+
         if symbol in last_trade_time:
             cooldown_left = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds()/3600
             if cooldown_left > 0:
@@ -118,7 +171,6 @@ async def process_symbol(symbol):
 
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
 
-        # === Données 1h ===
         klines = get_klines(symbol)
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
@@ -130,16 +182,14 @@ async def process_symbol(symbol):
         ema200 = compute_ema(closes, 200)
         atr = compute_atr(klines)
         rsis = [compute_rsi(closes[i-14:i]) for i in range(14, len(closes))]
-        ema25 = compute_ema(closes, 25)  # ✅ EMA25 pour anti-pump
+        ema25 = compute_ema(closes, 25)
 
-        # === Données 4h ===
         klines_4h = get_klines_4h(symbol)
         closes_4h = [float(k[4]) for k in klines_4h]
         ema200_4h = compute_ema(closes_4h, 200)
         ema50_4h = compute_ema(closes_4h, 50)
         rsi_4h = compute_rsi(closes_4h)
 
-        # === Filtres ajoutés ===
         if not is_market_bullish():
             print(f"{symbol} ❌ Marché global baissier", flush=True)
             return
@@ -165,22 +215,18 @@ async def process_symbol(symbol):
         if np.mean(volumes[-5:]) < 0.8 * np.mean(volumes[-20:]):
             print(f"{symbol} ❌ Volume trop faible (<80% moyenne)", flush=True)
             return
-        # ✅ Filtre RSI anti-surachat
         if rsi > 80 or rsi_4h > 75:
             print(f"{symbol} ❌ RSI trop élevé (surachat), pas d'achat", flush=True)
             return
-        # ✅ Filtre anti-pump EMA25 (>3%)
         if price > ema25 * 1.03:
             print(f"{symbol} ❌ Prix trop éloigné de l'EMA25 (>3%), pump suspect", flush=True)
             return
 
-        # Filtre ATR volatilité
         volatility = get_volatility(atr, price)
         if volatility < 0.005:
             print(f"{symbol} ❌ Volatilité trop faible, blocage", flush=True)
             return
 
-        # === Signal Achat ===
         buy = False
         confidence = 0
         label = ""
@@ -191,7 +237,6 @@ async def process_symbol(symbol):
             label = "💎 Trend EMA200/50 + MACD + RSI confirmé (1h/4h)"
             position_pct = 7
 
-        # === Gestion position ===
         sell = False
         if symbol in trades:
             entry = trades[symbol]['entry']
@@ -203,8 +248,6 @@ async def process_symbol(symbol):
             if gain > 3: stop = max(stop, entry * 1.01)
             if gain > 5: stop = max(stop, entry * 1.03)
             trades[symbol]["stop"] = stop
-
-            # ✅ TP chronologique
             if gain >= 5 and not trades[symbol].get("tp3", False):
                 trades[symbol]["tp3"] = True
                 trades[symbol]["tp1"] = True
@@ -218,13 +261,11 @@ async def process_symbol(symbol):
             elif gain >= 1.5 and not trades[symbol].get("tp1", False):
                 trades[symbol]["tp1"] = True
                 await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 +1.5% atteint sur {symbol} | Stop {stop:.4f}")
-
             if trades[symbol].get("tp1", False) and gain < 1:
                 sell = True
             if price < stop or gain <= -1.5:
                 sell = True
 
-        # === Entrée ===
         if buy and symbol not in trades:
             trades[symbol] = {"entry": price, "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
                               "confidence": confidence, "stop": price - atr, "position_pct": position_pct}
@@ -233,8 +274,8 @@ async def process_symbol(symbol):
                 f"🟢 Achat {symbol} à {price:.4f}\n{label}\n📊 RSI1h: {rsi:.2f} | RSI4h: {rsi_4h:.2f}\n"
                 f"📈 MACD: {macd:.4f} / Signal: {signal:.4f}\n📦 Volatilité ATR: {volatility:.4%}\n📉 SL ATR: {price - atr:.4f}"
             ))
+            log_trade(symbol, "BUY", price)
 
-        # === Sortie ===
         elif sell and symbol in trades:
             entry = trades[symbol]['entry']
             gain = ((price - entry) / entry) * 100
@@ -242,13 +283,13 @@ async def process_symbol(symbol):
             await bot.send_message(chat_id=CHAT_ID, text=(
                 f"🔴 Vente {symbol} à {price:.4f} | Gain {gain:.2f}% | Stop final: {stop_used:.4f}"
             ))
+            log_trade(symbol, "SELL", price, gain)
             del trades[symbol]
 
     except Exception as e:
         print(f"❌ Erreur {symbol}: {e}", flush=True)
         traceback.print_exc()
 
-# === DAILY SUMMARY ===
 async def send_daily_summary():
     if not history: return
     msg = "🌟 Récapitulatif des trades (24h) :\n"
@@ -256,7 +297,6 @@ async def send_daily_summary():
         msg += f"📈 {h['symbol']} | Entrée {h['entry']:.2f} | Sortie {h['exit']:.2f} | {h['result']:.2f}%\n"
     await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
 
-# === MAIN LOOP ===
 async def main_loop():
     await bot.send_message(chat_id=CHAT_ID, text=f"🚀 Bot démarré {datetime.now().strftime('%H:%M:%S')}")
     last_heartbeat = None
@@ -275,4 +315,5 @@ async def main_loop():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main_loop())
+
 
