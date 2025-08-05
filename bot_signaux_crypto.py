@@ -184,7 +184,8 @@ async def process_symbol_aggressive(symbol):
                 ))
     except Exception as e:
         print(f"❌ Erreur stratégie agressive {symbol}: {e}")
-        async def process_symbol(symbol):
+        traceback.print_exc()
+async def process_symbol(symbol):
     try:
         adx_value = compute_adx(get_klines(symbol))
         supertrend_signal = compute_supertrend(get_klines(symbol))
@@ -270,7 +271,6 @@ async def process_symbol_aggressive(symbol):
             return
 
         buy = False
-        confidence = 0
         label = ""
         position_pct = 5
         indicators = {
