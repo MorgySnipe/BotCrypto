@@ -164,7 +164,7 @@ async def process_symbol_aggressive(symbol):
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
         price = closes[-1]
-        breakout = price > max(highs[-10:]) * 1.01
+        breakout = price > max(highs[-10:]) * 1.005  # 🔥 Seuil breakout abaissé
         if breakout:
             indicators = {
                 "rsi": compute_rsi(closes),
@@ -176,11 +176,20 @@ async def process_symbol_aggressive(symbol):
                 "above_ema200": price > compute_ema(closes, 200)
             }
             score = compute_confidence_score(indicators)
-            if score >= 4:
+            rsi_now = indicators["rsi"]
+            atr_val = compute_atr(klines)
+            if score >= 3 and rsi_now < 85:  # ✅ Seuil score abaissé + tolérance RSI augmentée
+                trades[symbol] = {
+                    "entry": price,
+                    "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                    "confidence": score,
+                    "stop": price - 0.8 * atr_val,  # ✅ Stop loss dynamique ajouté
+                    "position_pct": 5
+                }
                 await bot.send_message(chat_id=CHAT_ID, text=(
-                    f"⚡ Achat agressif {symbol} à {price:.4f}\n🔍 Stratégie : Breakout + Retest\n{label_confidence(score)}\n"
-                    f"RSI: {indicators['rsi']:.2f} | MACD: {indicators['macd']:.2f} / Signal: {indicators['signal']:.2f}\n"
-                    f"ADX: {indicators['adx']:.2f} | SuperTrend: {'✅' if indicators['supertrend'] else '❌'}"
+                    f"⚡ **Signal AGRESSIF** {symbol} à {price:.4f}\n🔍 Stratégie : Breakout anticipé + Retest\n{label_confidence(score)}\n"
+                    f"RSI: {rsi_now:.2f} | MACD: {indicators['macd']:.2f} / Signal: {indicators['signal']:.2f}\n"
+                    f"ADX: {indicators['adx']:.2f} | SL initial: {price - 0.8 * atr_val:.4f}\n⚠️ **Risque accru, entrée anticipée**"
                 ))
     except Exception as e:
         print(f"❌ Erreur stratégie agressive {symbol}: {e}")
@@ -377,4 +386,6 @@ async def main_loop():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main_loop())
+
+
 
