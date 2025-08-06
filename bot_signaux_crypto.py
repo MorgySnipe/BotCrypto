@@ -185,6 +185,7 @@ async def process_symbol_aggressive(symbol):
     except Exception as e:
         print(f"❌ Erreur stratégie agressive {symbol}: {e}")
         traceback.print_exc()
+        return
 async def process_symbol(symbol):
     try:
         adx_value = compute_adx(get_klines(symbol))
@@ -320,8 +321,13 @@ async def process_symbol(symbol):
                 sell = True
 
         if buy and symbol not in trades:
-            trades[symbol] = {"entry": price, "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-                              "confidence": confidence, "stop": price - atr, "position_pct": position_pct}
+            trades[symbol] = {
+                "entry": price,
+                "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                "confidence": confidence,
+                "stop": price - atr,
+                "position_pct": position_pct
+            }
             last_trade_time[symbol] = datetime.now()
             await bot.send_message(chat_id=CHAT_ID, text=(
                 f"🟢 Achat {symbol} à {price:.4f}\n{label}\n{label_conf}\n"
@@ -371,5 +377,4 @@ async def main_loop():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(main_loop())
-
 
