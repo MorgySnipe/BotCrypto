@@ -293,11 +293,11 @@ async def process_symbol(symbol):
     "above_ema200": price > ema200
 }
 
-confidence = compute_confidence_score(indicators)
-label_conf = label_confidence(confidence)
+    confidence = compute_confidence_score(indicators)
+    label_conf = label_confidence(confidence)
 
 
-        if is_uptrend(closes) and macd > signal and rsi > 50:
+    if is_uptrend(closes) and macd > signal and rsi > 50:
             buy = True
             label = "💎 Trend EMA200/50 + MACD + RSI confirmé (1h/4h)"
             position_pct = 7
