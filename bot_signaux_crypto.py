@@ -158,43 +158,6 @@ def label_confidence(score):
     elif score >= 3: return f"📊 Fiabilité : {score}/10 (Risque)"
     else: return f"📊 Fiabilité : {score}/10 (Très Risqué)"
 
-async def process_symbol_aggressive(symbol):
-    try:
-        klines = get_klines(symbol)
-        closes = [float(k[4]) for k in klines]
-        highs = [float(k[2]) for k in klines]
-        price = closes[-1]
-        breakout = price > max(highs[-10:]) * 1.005  # 🔥 Seuil breakout abaissé
-        if breakout:
-            indicators = {
-                "rsi": compute_rsi(closes),
-                "macd": compute_macd(closes)[0],
-                "signal": compute_macd(closes)[1],
-                "supertrend": compute_supertrend(klines),
-                "adx": compute_adx(klines),
-                "volume_ok": np.mean([float(k[5]) for k in klines][-5:]) > np.mean([float(k[5]) for k in klines][-20:]),
-                "above_ema200": price > compute_ema(closes, 200)
-            }
-            score = compute_confidence_score(indicators)
-            rsi_now = indicators["rsi"]
-            atr_val = compute_atr(klines)
-            if score >= 3 and rsi_now < 85:  # ✅ Seuil score abaissé + tolérance RSI augmentée
-                trades[symbol] = {
-                    "entry": price,
-                    "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-                    "confidence": score,
-                    "stop": price - 0.8 * atr_val,  # ✅ Stop loss dynamique ajouté
-                    "position_pct": 5
-                }
-                await bot.send_message(chat_id=CHAT_ID, text=(
-                    f"⚡ **Signal AGRESSIF** {symbol} à {price:.4f}\n🔍 Stratégie : Breakout anticipé + Retest\n{label_confidence(score)}\n"
-                    f"RSI: {rsi_now:.2f} | MACD: {indicators['macd']:.2f} / Signal: {indicators['signal']:.2f}\n"
-                    f"ADX: {indicators['adx']:.2f} | SL initial: {price - 0.8 * atr_val:.4f}\n⚠️ **Risque accru, entrée anticipée**"
-                ))
-    except Exception as e:
-        print(f"❌ Erreur stratégie agressive {symbol}: {e}")
-        traceback.print_exc()
-        return
 async def process_symbol(symbol):
     try:
         adx_value = compute_adx(get_klines(symbol))
@@ -211,7 +174,7 @@ async def process_symbol(symbol):
             log_trade(symbol, "HOLD", trades[symbol]["entry"])
 
         if symbol in last_trade_time:
-            cooldown_left = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds()/3600
+            cooldown_left = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds() / 3600
             if cooldown_left > 0:
                 print(f"{symbol} ⏳ Cooldown actif: {cooldown_left:.1f}h", flush=True)
                 return
@@ -284,20 +247,18 @@ async def process_symbol(symbol):
         label = ""
         position_pct = 5
         indicators = {
-    "rsi": rsi,
-    "macd": macd,
-    "signal": signal,
-    "supertrend": supertrend_signal,
-    "adx": adx_value,
-    "volume_ok": np.mean(volumes[-5:]) > np.mean(volumes[-20:]),
-    "above_ema200": price > ema200
-}
+            "rsi": rsi,
+            "macd": macd,
+            "signal": signal,
+            "supertrend": supertrend_signal,
+            "adx": adx_value,
+            "volume_ok": np.mean(volumes[-5:]) > np.mean(volumes[-20:]),
+            "above_ema200": price > ema200
+        }
+        confidence = compute_confidence_score(indicators)
+        label_conf = label_confidence(confidence)
 
-    confidence = compute_confidence_score(indicators)
-    label_conf = label_confidence(confidence)
-
-
-    if is_uptrend(closes) and macd > signal and rsi > 50:
+        if is_uptrend(closes) and macd > signal and rsi > 50:
             buy = True
             label = "💎 Trend EMA200/50 + MACD + RSI confirmé (1h/4h)"
             position_pct = 7
@@ -305,7 +266,6 @@ async def process_symbol(symbol):
         sell = False
         if symbol in trades:
             entry = trades[symbol]['entry']
-
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M")
             elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
             if elapsed_time > 12:
@@ -337,44 +297,36 @@ async def process_symbol(symbol):
                 del trades[symbol]
                 return
 
-if volatility < 0.008:
-    stop = max(stop, price - atr * 0.5)
-elif volatility < 0.015:
-    stop = max(stop, price - atr * 0.8)
-else:
-    stop = max(stop, price - atr * 1.2)
+            if gain > 1.5:
+                stop = max(stop, entry)
+            if gain > 3:
+                stop = max(stop, entry * 1.01)
+            if gain > 5:
+                stop = max(stop, entry * 1.03)
 
-if gain > 1.5:
-    stop = max(stop, entry)
-if gain > 3:
-    stop = max(stop, entry * 1.01)
-if gain > 5:
-    stop = max(stop, entry * 1.03)
+            trades[symbol]["stop"] = stop
 
-trades[symbol]["stop"] = stop
+            tp1_level = 1.5 * atr
+            tp2_level = 3 * atr
+            tp3_level = 5 * atr
 
-tp1_level = 1.5 * atr
-tp2_level = 3 * atr
-tp3_level = 5 * atr
-
-if gain >= tp3_level / entry * 100 and not trades[symbol].get("tp3", False):
-    trades[symbol]["tp3"] = True
-    trades[symbol]["tp2"] = True
-    trades[symbol]["tp1"] = True
-    await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP3 atteint sur {symbol} | Gain +{gain:.2f}%")
-    sell = True
-elif gain >= tp2_level / entry * 100 and not trades[symbol].get("tp2", False):
-    trades[symbol]["tp2"] = True
-    trades[symbol]["tp1"] = True
-    await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP2 atteint sur {symbol} | Gain +{gain:.2f}%")
-elif gain >= tp1_level / entry * 100 and not trades[symbol].get("tp1", False):
-    trades[symbol]["tp1"] = True
-    await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 atteint sur {symbol} | Gain +{gain:.2f}%")
-
-if trades[symbol].get("tp1", False) and gain < 1:
-    sell = True
-
+            if gain >= tp3_level / entry * 100 and not trades[symbol].get("tp3", False):
+                trades[symbol]["tp3"] = True
+                trades[symbol]["tp2"] = True
+                trades[symbol]["tp1"] = True
+                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP3 atteint sur {symbol} | Gain +{gain:.2f}%")
                 sell = True
+            elif gain >= tp2_level / entry * 100 and not trades[symbol].get("tp2", False):
+                trades[symbol]["tp2"] = True
+                trades[symbol]["tp1"] = True
+                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP2 atteint sur {symbol} | Gain +{gain:.2f}%")
+            elif gain >= tp1_level / entry * 100 and not trades[symbol].get("tp1", False):
+                trades[symbol]["tp1"] = True
+                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 atteint sur {symbol} | Gain +{gain:.2f}%")
+
+            if trades[symbol].get("tp1", False) and gain < 1:
+                sell = True
+
             if price < stop or gain <= -1.5:
                 sell = True
 
