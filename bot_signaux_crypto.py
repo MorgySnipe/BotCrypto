@@ -172,8 +172,8 @@ def label_confidence(score):
     elif score >= 5: return f"📊 Fiabilité : {score}/10 (Fiable)"
     elif score >= 3: return f"📊 Fiabilité : {score}/10 (Risque)"
     else: return f"📊 Fiabilité : {score}/10 (Très Risqué)"
-async def 
-process_symbol(symbol):
+
+async def process_symbol(symbol):
     try:
         adx_value = compute_adx(get_klines(symbol))
         supertrend_signal = compute_supertrend(get_klines(symbol))
@@ -283,8 +283,8 @@ process_symbol(symbol):
     except Exception as e:
         print(f"Erreur {symbol} ❌ {e}", flush=True)
         traceback.print_exc()
-async def 
-process_symbol_aggressive(symbol):
+
+async def process_symbol_aggressive(symbol):
     try:
         klines = get_klines(symbol)
         closes = [float(k[4]) for k in klines]
