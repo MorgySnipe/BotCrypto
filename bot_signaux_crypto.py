@@ -300,8 +300,9 @@ async def process_symbol(symbol):
             label = "💎 Trend EMA200/50 + MACD + RSI confirmé (1h/4h)"
             position_pct = 7
 
-        sell = False
-                if symbol in trades:
+       sell = False
+       if symbol in trades:
+
             entry = trades[symbol]['entry']
 
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M")
