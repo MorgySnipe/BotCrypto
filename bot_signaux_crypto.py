@@ -301,30 +301,77 @@ async def process_symbol(symbol):
             position_pct = 7
 
         sell = False
-        if symbol in trades:
+                if symbol in trades:
             entry = trades[symbol]['entry']
+
+            entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M")
+            elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
+            if elapsed_time > 12:
+                gain = ((price - entry) / entry) * 100
+                await bot.send_message(chat_id=CHAT_ID, text=(
+                    f"⏰ Trade {symbol} clôturé automatiquement après 12h\n"
+                    f"🔚 Prix de sortie : {price:.4f} | Gain : {gain:.2f}%"
+                ))
+                log_trade(symbol, "SELL", price, gain)
+                del trades[symbol]
+                return
+
             gain = ((price - entry) / entry) * 100
             stop = trades[symbol].get("stop", entry - atr)
+
             if volatility < 0.008:
                 stop = max(stop, price - atr * 0.5)
-            if gain > 1.5: stop = max(stop, entry)
-            if gain > 3: stop = max(stop, entry * 1.01)
-            if gain > 5: stop = max(stop, entry * 1.03)
-            trades[symbol]["stop"] = stop
-            if gain >= 5 and not trades[symbol].get("tp3", False):
-                trades[symbol]["tp3"] = True
-                trades[symbol]["tp1"] = True
-                trades[symbol]["tp2"] = True
-                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP3 +5% atteint sur {symbol} | Clôture finale")
-                sell = True
-            elif gain >= 3 and not trades[symbol].get("tp2", False):
-                trades[symbol]["tp2"] = True
-                trades[symbol]["tp1"] = True
-                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP2 +3% atteint sur {symbol} | Stop {stop:.4f}")
-            elif gain >= 1.5 and not trades[symbol].get("tp1", False):
-                trades[symbol]["tp1"] = True
-                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 +1.5% atteint sur {symbol} | Stop {stop:.4f}")
-            if trades[symbol].get("tp1", False) and gain < 1:
+            elif volatility < 0.015:
+                stop = max(stop, price - atr * 0.8)
+            else:
+                stop = max(stop, price - atr * 1.2)
+
+            if rsi < 45 or macd < signal:
+                await bot.send_message(chat_id=CHAT_ID, text=(
+                    f"🔴 Sortie intelligente {symbol} | RSI: {rsi:.2f} | MACD < Signal\n"
+                    f"💰 Prix: {price:.4f} | Gain: {gain:.2f}%"
+                ))
+                log_trade(symbol, "SELL", price, gain)
+                del trades[symbol]
+                return
+
+if volatility < 0.008:
+    stop = max(stop, price - atr * 0.5)
+elif volatility < 0.015:
+    stop = max(stop, price - atr * 0.8)
+else:
+    stop = max(stop, price - atr * 1.2)
+
+if gain > 1.5:
+    stop = max(stop, entry)
+if gain > 3:
+    stop = max(stop, entry * 1.01)
+if gain > 5:
+    stop = max(stop, entry * 1.03)
+
+trades[symbol]["stop"] = stop
+
+tp1_level = 1.5 * atr
+tp2_level = 3 * atr
+tp3_level = 5 * atr
+
+if gain >= tp3_level / entry * 100 and not trades[symbol].get("tp3", False):
+    trades[symbol]["tp3"] = True
+    trades[symbol]["tp2"] = True
+    trades[symbol]["tp1"] = True
+    await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP3 atteint sur {symbol} | Gain +{gain:.2f}%")
+    sell = True
+elif gain >= tp2_level / entry * 100 and not trades[symbol].get("tp2", False):
+    trades[symbol]["tp2"] = True
+    trades[symbol]["tp1"] = True
+    await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP2 atteint sur {symbol} | Gain +{gain:.2f}%")
+elif gain >= tp1_level / entry * 100 and not trades[symbol].get("tp1", False):
+    trades[symbol]["tp1"] = True
+    await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 atteint sur {symbol} | Gain +{gain:.2f}%")
+
+if trades[symbol].get("tp1", False) and gain < 1:
+    sell = True
+
                 sell = True
             if price < stop or gain <= -1.5:
                 sell = True
