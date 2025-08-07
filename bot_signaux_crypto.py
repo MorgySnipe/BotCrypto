@@ -292,7 +292,7 @@ async def process_symbol(symbol):
             "volume_ok": np.mean(volumes[-5:]) > np.mean(volumes[-20:]),
             "above_ema200": price > ema200
         }
-        confidence = compute_confidence_score(indicators)
+                confidence = compute_confidence_score(indicators)
         label_conf = label_confidence(confidence)
 
         if is_uptrend(closes) and macd > signal and rsi > 50:
@@ -300,9 +300,8 @@ async def process_symbol(symbol):
             label = "💎 Trend EMA200/50 + MACD + RSI confirmé (1h/4h)"
             position_pct = 7
 
-       sell = False
-       if symbol in trades:
-
+        sell = False
+        if symbol in trades:
             entry = trades[symbol]['entry']
 
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M")
