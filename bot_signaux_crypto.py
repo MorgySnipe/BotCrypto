@@ -284,16 +284,18 @@ async def process_symbol(symbol):
         label = ""
         position_pct = 5
         indicators = {
-            "rsi": rsi,
-            "macd": macd,
-            "signal": signal,
-            "supertrend": supertrend_signal,
-            "adx": adx_value,
-            "volume_ok": np.mean(volumes[-5:]) > np.mean(volumes[-20:]),
-            "above_ema200": price > ema200
-        }
-                confidence = compute_confidence_score(indicators)
-        label_conf = label_confidence(confidence)
+    "rsi": rsi,
+    "macd": macd,
+    "signal": signal,
+    "supertrend": supertrend_signal,
+    "adx": adx_value,
+    "volume_ok": np.mean(volumes[-5:]) > np.mean(volumes[-20:]),
+    "above_ema200": price > ema200
+}
+
+confidence = compute_confidence_score(indicators)
+label_conf = label_confidence(confidence)
+
 
         if is_uptrend(closes) and macd > signal and rsi > 50:
             buy = True
