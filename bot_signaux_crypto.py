@@ -331,19 +331,19 @@ async def process_symbol(symbol):
             tp2_level = 3 * atr
             tp3_level = 5 * atr
 
-            if gain >= tp3_level / entry * 100 and not trades[symbol].get("tp3", False):
-                trades[symbol]["tp3"] = True
-                trades[symbol]["tp2"] = True
-                trades[symbol]["tp1"] = True
-                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP3 atteint sur {symbol} | Gain +{gain:.2f}%")
-                sell = True
-            elif gain >= tp2_level / entry * 100 and not trades[symbol].get("tp2", False):
-                trades[symbol]["tp2"] = True
-                trades[symbol]["tp1"] = True
-                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP2 atteint sur {symbol} | Gain +{gain:.2f}%")
-            elif gain >= tp1_level / entry * 100 and not trades[symbol].get("tp1", False):
-                trades[symbol]["tp1"] = True
-                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 atteint sur {symbol} | Gain +{gain:.2f}%")
+            if gain >= tp1_level / entry * 100 and not trades[symbol].get("tp1", False):
+    trades[symbol]["tp1"] = True
+    await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 atteint sur {symbol} | Gain +{gain:.2f}%")
+
+if gain >= tp2_level / entry * 100 and not trades[symbol].get("tp2", False):
+    trades[symbol]["tp2"] = True
+    await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP2 atteint sur {symbol} | Gain +{gain:.2f}%")
+
+if gain >= tp3_level / entry * 100 and not trades[symbol].get("tp3", False):
+    trades[symbol]["tp3"] = True
+    await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP3 atteint sur {symbol} | Gain +{gain:.2f}%")
+    sell = True
+
 
             if trades[symbol].get("tp1", False) and gain < 1:
                 sell = True
