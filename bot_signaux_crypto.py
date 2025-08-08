@@ -158,8 +158,29 @@ def label_confidence(score):
     elif score >= 3: return f"📊 Fiabilité : {score}/10 (Risque)"
     else: return f"📊 Fiabilité : {score}/10 (Très Risqué)"
 
+ def get_last_price(symbol):
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+    response = requests.get(url)
+    response.raise_for_status()
+    return float(response.json()['price'])
+
 async def process_symbol(symbol):
     try:
+        if symbol in trades:
+            entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M")
+            elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
+            if elapsed_time > 12:
+                entry = trades[symbol]['entry']
+                price = get_last_price(symbol)
+                gain = ((price - entry) / entry) * 100
+                await bot.send_message(chat_id=CHAT_ID, text=(
+                    f"⏰ Trade {symbol} clôturé automatiquement après 12h\n"
+                    f"🔚 Prix de sortie : {price:.4f} | Gain : {gain:.2f}%"
+                ))
+                log_trade(symbol, "SELL", price, gain)
+                del trades[symbol]
+                return
+           
         adx_value = compute_adx(get_klines(symbol))
         supertrend_signal = compute_supertrend(get_klines(symbol))
         if adx_value < 20:
