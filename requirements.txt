@@ -2,4 +2,7 @@ python-telegram-bot==20.3
 requests
 numpy
 nest_asyncio
+pandas
+matplotlib
+
 
