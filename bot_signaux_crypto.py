@@ -365,6 +365,7 @@ async def process_symbol(symbol):
                 f"📊 RSI1h: {rsi:.2f} | RSI4h: {rsi_4h:.2f}\n"
                 f"📈 MACD: {macd:.4f} / Signal: {signal:.4f}\n"
                 f"📦 Volatilité ATR: {volatility:.4%}\n📉 SL ATR: {price - atr:.4f}"
+                f"💰 Capital conseillé : {position_pct:.0f}% du portefeuille"
             ))
             log_trade(symbol, "BUY", price)
 
