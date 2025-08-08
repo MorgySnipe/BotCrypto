@@ -367,14 +367,16 @@ async def process_symbol(symbol):
                 "stop": price - atr,
                 "position_pct": position_pct
             }
-            last_trade_time[symbol] = datetime.now()
             await bot.send_message(chat_id=CHAT_ID, text=(
-                f"🟢 Achat {symbol} à {price:.4f}\n{label}\n{label_conf}\n"
+                f"🟢 Achat {symbol} à {price:.4f} (📍 Prix Binance)\n"
+                f"{label}\n{label_conf}\n"
                 f"📊 RSI1h: {rsi:.2f} | RSI4h: {rsi_4h:.2f}\n"
                 f"📈 MACD: {macd:.4f} / Signal: {signal:.4f}\n"
-                f"📦 Volatilité ATR: {volatility:.4%}\n📉 SL ATR: {price - atr:.4f}"
+                f"📦 Volatilité ATR: {volatility:.4%}\n"
+                f"📉 SL ATR: {price - atr:.4f}\n"
                 f"💰 Capital conseillé : {position_pct:.0f}% du portefeuille"
-            ))
+))
+
             log_trade(symbol, "BUY", price)
 
         elif sell and symbol in trades:
@@ -419,10 +421,13 @@ async def process_symbol_aggressive(symbol):
                     "position_pct": 5
                 }
                 await bot.send_message(chat_id=CHAT_ID, text=(
-                    f"⚡ **Signal AGRESSIF** {symbol} à {price:.4f}\n🔍 Stratégie : Breakout anticipé + Retest\n{label_confidence(score)}\n"
+                    f"⚡ **Signal AGRESSIF** {symbol} à {price:.4f} (🎯 Prix Binance)\n"
+                    f"🔍 Stratégie : Breakout anticipé + Retest\n{label_confidence(score)}\n"
                     f"RSI: {rsi_now:.2f} | MACD: {indicators['macd']:.2f} / Signal: {indicators['signal']:.2f}\n"
-                    f"ADX: {indicators['adx']:.2f} | SL initial: {price - 0.8 * atr_val:.4f}\n⚠️ **Risque accru, entrée anticipée**"
-                ))
+                    f"ADX: {indicators['adx']:.2f} | SL initial: {price - 0.8 * atr_val:.4f}\n"
+                    f"⚠️ **Risque accru, entrée anticipée**"
+))
+
     except Exception as e:
         print(f"❌ Erreur stratégie agressive {symbol}: {e}")
         traceback.print_exc()
