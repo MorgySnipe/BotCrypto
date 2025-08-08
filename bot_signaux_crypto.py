@@ -158,7 +158,7 @@ def label_confidence(score):
     elif score >= 3: return f"📊 Fiabilité : {score}/10 (Risque)"
     else: return f"📊 Fiabilité : {score}/10 (Très Risqué)"
 
- def get_last_price(symbol):
+def get_last_price(symbol):
     url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
     response = requests.get(url)
     response.raise_for_status()
