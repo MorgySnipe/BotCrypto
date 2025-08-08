@@ -129,6 +129,14 @@ def log_trade(symbol, side, price, gain=0):
     with open(LOG_FILE, "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), symbol, side, price, gain])
+    if side == "SELL":
+        history.append({
+            "symbol": symbol,
+            "exit": price,
+            "result": gain,
+            "entry": trades.get(symbol, {}).get("entry", 0),
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
 
 def trailing_stop_advanced(symbol, current_price):
     if symbol in trades:
@@ -419,16 +427,49 @@ async def process_symbol_aggressive(symbol):
         print(f"❌ Erreur stratégie agressive {symbol}: {e}")
         traceback.print_exc()
 
+def is_recent(ts_str):
+    ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+    return (datetime.now() - ts).total_seconds() <= 86400
+
 async def send_daily_summary():
     if not history: return
+    recent = [h for h in history if is_recent(h.get("time", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))]
+    if not recent:
+        await bot.send_message(chat_id=CHAT_ID, text="ℹ️ Aucun trade clôturé dans les dernières 24h.")
+        return
     msg = "🌟 Récapitulatif des trades (24h) :\n"
-    for h in history[-50:]:
+    for h in recent:
         msg += f"📈 {h['symbol']} | Entrée {h['entry']:.2f} | Sortie {h['exit']:.2f} | {h['result']:.2f}%\n"
     await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
 
 async def main_loop():
     await bot.send_message(chat_id=CHAT_ID, text=f"🚀 Bot démarré {datetime.now().strftime('%H:%M:%S')}")
     last_heartbeat = None
+    last_summary_day = None  # 🆕 Ajout pour le résumé journalier
+
+    while True:
+        try:
+            now = datetime.now()
+
+            # ✅ Message de vie toutes les heures
+            if last_heartbeat != now.hour:
+                await bot.send_message(chat_id=CHAT_ID, text=f"✅ Bot actif {now.strftime('%H:%M')}")
+                last_heartbeat = now.hour
+
+            # ✅ Résumé quotidien à 23h UTC
+            if now.hour == 23 and (last_summary_day is None or last_summary_day != now.date()):
+                await send_daily_summary()
+                last_summary_day = now.date()
+
+            await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
+            await asyncio.gather(*(process_symbol_aggressive(s) for s in SYMBOLS))
+            print("✔️ Itération terminée", flush=True)
+
+        except Exception as e:
+            await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Erreur : {e}")
+
+        await asyncio.sleep(SLEEP_SECONDS)
+
     while True:
         try:
             now = datetime.now()
