@@ -470,18 +470,6 @@ async def main_loop():
 
         await asyncio.sleep(SLEEP_SECONDS)
 
-    while True:
-        try:
-            now = datetime.now()
-            if last_heartbeat != now.hour:
-                await bot.send_message(chat_id=CHAT_ID, text=f"✅ Bot actif {now.strftime('%H:%M')}")
-                last_heartbeat = now.hour
-            await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
-            await asyncio.gather(*(process_symbol_aggressive(s) for s in SYMBOLS))
-            print("✔️ Itération terminée", flush=True)
-        except Exception as e:
-            await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Erreur : {e}")
-        await asyncio.sleep(SLEEP_SECONDS)
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
