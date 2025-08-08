@@ -221,7 +221,7 @@ async def process_symbol(symbol):
         highs = [float(k[2]) for k in klines]
         lows = [float(k[3]) for k in klines]
         volumes = [float(k[5]) for k in klines]
-        price = closes[-1]
+        price = get_last_price(symbol)
         rsi = compute_rsi(closes)
         macd, signal = compute_macd(closes)
         ema200 = compute_ema(closes, 200)
@@ -395,7 +395,7 @@ async def process_symbol_aggressive(symbol):
         klines = get_klines(symbol)
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
-        price = closes[-1]
+        price = get_last_price(symbol)
         breakout = price > max(highs[-10:]) * 1.005  # 🔥 Seuil breakout abaissé
         if breakout:
             indicators = {
