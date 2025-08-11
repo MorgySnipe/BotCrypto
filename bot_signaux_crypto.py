@@ -311,7 +311,7 @@ async def process_symbol(symbol):
         if near_ema25 and candle_ok:
            buy = True
            label = "✅ Pullback EMA25 propre + Confluence (ST/ADX/MACD/Vol)"
-            position_pct = 6
+           position_pct = 6
 
         sell = False
         if symbol in trades:
