@@ -176,7 +176,7 @@ def get_last_price(symbol):
 async def process_symbol(symbol):
     try:
         if symbol in trades:
-            entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M")
+            entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
             if elapsed_time > 12:
                 entry = trades[symbol]['entry']
