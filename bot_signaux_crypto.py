@@ -467,23 +467,66 @@ async def process_symbol(symbol):
             log_trade(symbol, "HOLD", trades[symbol]["entry"])
 
         if buy and symbol not in trades:
-            trades[symbol] = {
-                "entry": price,
-                "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-                "confidence": confidence,
-                "stop": price - 0.6 * atr,
-                "position_pct": position_pct
-            }
-            last_trade_time[symbol] = datetime.now()
-            await bot.send_message(chat_id=CHAT_ID, text=(
-                f"🟢 Achat {symbol} à {price:.4f} (📍 Prix Binance)\n"
-                f"{label}\n{label_conf}\n"
-                f"📊 RSI1h: {rsi:.2f} | RSI4h: {rsi_4h:.2f}\n"
-                f"📈 MACD: {macd:.4f} / Signal: {signal:.4f}\n"
-                f"📦 Volatilité ATR: {volatility:.4%}\n"
-                f"📉 SL ATR: {price - 0.6 * atr:.4f}\n"
-                f"💰 Capital conseillé : {position_pct:.0f}% du portefeuille"
-            ))
+    trade_id = generate_trade_id(symbol)
+    trades[symbol] = {
+        "entry": price,
+        "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+        "confidence": confidence,
+        "stop": price - 0.6 * atr,
+        "position_pct": position_pct,
+        "trade_id": trade_id
+    }
+    last_trade_time[symbol] = datetime.now()
+
+    reasons = [
+        label,
+        f"ADX {adx_value:.1f} >= 22",
+        f"MACD {macd:.3f} > Signal {signal:.3f}"
+    ]
+    msg = format_buy_msg(
+        symbol, trade_id, "standard", price, position_pct, price - 0.6 * atr, atr,
+        rsi, macd, signal, adx_value, "ON" if supertrend_signal else "OFF",
+        ema25, ema50_4h, ema200, ema200_4h,
+        np.mean(volumes[-5:]), np.mean(volumes[-20:]), np.mean(volumes[-5:]) / np.mean(volumes[-20:]),
+        is_uptrend([float(k[4]) for k in get_klines("BTCUSDT")]),
+        is_uptrend([float(k[4]) for k in get_klines("ETHUSDT")]),
+        confidence, label_conf, reasons
+    )
+    await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+
+    log_trade_csv({
+        "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "trade_id": trade_id,
+        "symbol": symbol,
+        "event": "BUY",
+        "strategy": "standard",
+        "version": BOT_VERSION,
+        "entry": price,
+        "exit": "",
+        "price": price,
+        "pnl_pct": "",
+        "position_pct": position_pct,
+        "sl_initial": price - 0.6 * atr,
+        "sl_final": "",
+        "atr_1h": atr,
+        "atr_mult_at_entry": 0.6,
+        "rsi_1h": rsi,
+        "macd": macd,
+        "signal": signal,
+        "adx_1h": adx_value,
+        "supertrend_on": supertrend_signal,
+        "ema25_1h": ema25,
+        "ema200_1h": ema200,
+        "ema50_4h": ema50_4h,
+        "ema200_4h": ema200_4h,
+        "vol_ma5": np.mean(volumes[-5:]),
+        "vol_ma20": np.mean(volumes[-20:]),
+        "vol_ratio": np.mean(volumes[-5:]) / np.mean(volumes[-20:]),
+        "btc_uptrend": is_uptrend([float(k[4]) for k in get_klines("BTCUSDT")]),
+        "eth_uptrend": is_uptrend([float(k[4]) for k in get_klines("ETHUSDT")]),
+        "reason_entry": "; ".join(reasons),
+        "reason_exit": ""
+    })
             log_trade(symbol, "BUY", price)
 
         elif sell and symbol in trades:
