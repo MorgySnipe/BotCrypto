@@ -244,33 +244,33 @@ async def process_symbol(symbol):
 
         volatility = get_volatility(atr, price)
         if volatility < 0.005:
-           print(f"{symbol} ❌ Volatilité trop faible, blocage", flush=True)
-           return
-    
+            print(f"{symbol} ❌ Volatilité trop faible, blocage", flush=True)
+            return
+
         adx_value = compute_adx(get_klines(symbol))
         supertrend_signal = compute_supertrend(get_klines(symbol))
 
         if adx_value < 20:
-    print(f"{symbol} ❌ ADX < 20 = marché plat", flush=True)
-    return
+            print(f"{symbol} ❌ ADX < 20 = marché plat", flush=True)
+            return
 
         if not supertrend_signal:
-    print(f"{symbol} ❌ SuperTrend non haussier", flush=True)
-    return
+            print(f"{symbol} ❌ SuperTrend non haussier", flush=True)
+            return
 
         if symbol in last_trade_time:
-    cooldown_left = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds() / 3600
-        if cooldown_left > 0:
-        print(f"{symbol} ⏳ Cooldown actif: {cooldown_left:.1f}h", flush=True)
-        return
+            cooldown_left = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds() / 3600
+            if cooldown_left > 0:
+                print(f"{symbol} ⏳ Cooldown actif: {cooldown_left:.1f}h", flush=True)
+                return
 
         if len(trades) >= MAX_TRADES:
-    print(f"{symbol} ❌ Trop de trades ouverts ({MAX_TRADES}), {symbol} ignoré", flush=True)
-    return
+            print(f"{symbol} ❌ Trop de trades ouverts ({MAX_TRADES}), {symbol} ignoré", flush=True)
+            return
 
         if not in_active_session():
-    print(f"{symbol} ❌ Hors session active (UTC 00-06)", flush=True)
-    return
+            print(f"{symbol} ❌ Hors session active (UTC 00-06)", flush=True)
+            return
 
         buy = False
         label = ""
