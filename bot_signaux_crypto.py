@@ -358,43 +358,33 @@ async def process_symbol(symbol):
 
             if price < stop or gain <= -1.5:
                 sell = True
+        # === Gestion des stops dynamiques et log HOLD ===
+        if symbol in trades:
+            trailing_stop_advanced(symbol, trades[symbol].get("last_price", trades[symbol]["entry"]))
+            log_trade(symbol, "HOLD", trades[symbol]["entry"])
 
-            if symbol in trades:
-                trailing_stop_advanced(symbol, trades[symbol].get("last_price", trades[symbol]["entry"]))
-                log_trade(symbol, "HOLD", trades[symbol]["entry"])
-
-            if buy and symbol not in trades:
-                trades[symbol] = {
-                    "entry": price,
-                    "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-                    "confidence": confidence,
-                    "stop": price - atr,
-                    "position_pct": position_pct
-                }
-                last_trade_time[symbol] = datetime.now()
-                await bot.send_message(chat_id=CHAT_ID, text=(
-                    f"🟢 Achat {symbol} à {price:.4f} (📍 Prix Binance)\n"
-                    f"{label}\n{label_conf}\n"
-                    f"📊 RSI1h: {rsi:.2f} | RSI4h: {rsi_4h:.2f}\n"
-                    f"📈 MACD: {macd:.4f} / Signal: {signal:.4f}\n"
-                    f"📦 Volatilité ATR: {volatility:.4%}\n"
-                    f"📉 SL ATR: {price - atr:.4f}\n"
-                    f"💰 Capital conseillé : {position_pct:.0f}% du portefeuille"
-                ))
-                log_trade(symbol, "BUY", price)
-
-            elif sell and symbol in trades:
-                entry = trades[symbol]['entry']
-                gain = ((price - entry) / entry) * 100
-                stop_used = trades[symbol].get("stop", entry - atr)
-                await bot.send_message(chat_id=CHAT_ID, text=(
-                    f"🔴 Vente {symbol} à {price:.4f} | Gain {gain:.2f}% | Stop final: {stop_used:.4f}"
-                ))
-                log_trade(symbol, "SELL", price, gain)
-                del trades[symbol]
-
+        # === Achat si conditions remplies ===
+        if buy and symbol not in trades:
+            trades[symbol] = {
+                "entry": price,
+                "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                "confidence": confidence,
+                "stop": price - atr,
+                "position_pct": position_pct
+            }
+            last_trade_time[symbol] = datetime.now()
+            await bot.send_message(chat_id=CHAT_ID, text=(
+                f"🟢 Achat {symbol} à {price:.4f} (📍 Prix Binance)\n"
+                f"{label}\n{label_conf}\n"
+                f"📊 RSI1h: {rsi:.2f} | RSI4h: {rsi_4h:.2f}\n"
+                f"📈 MACD: {macd:.4f} / Signal: {signal:.4f}\n"
+                f"📦 Volatilité ATR: {volatility:.4%}\n"
+                f"📉 SL ATR: {price - atr:.4f}\n"
+                f"💰 Capital conseillé : {position_pct:.0f}% du portefeuille"
+            ))
             log_trade(symbol, "BUY", price)
 
+        # === Vente si conditions remplies ===
         elif sell and symbol in trades:
             entry = trades[symbol]['entry']
             gain = ((price - entry) / entry) * 100
@@ -404,6 +394,7 @@ async def process_symbol(symbol):
             ))
             log_trade(symbol, "SELL", price, gain)
             del trades[symbol]
+
 
     except Exception as e:
         print(f"❌ Erreur {symbol}: {e}", flush=True)
