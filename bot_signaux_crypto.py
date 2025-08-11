@@ -366,13 +366,13 @@ def trailing_stop_advanced(symbol, current_price):
         atr_val = compute_atr(get_cached(symbol, '1h'))
         current_stop = trades[symbol].get("stop", entry - 0.6 * atr_val)
         if gain > 2:
-        trades[symbol]["stop"] = max(current_stop, current_price - 0.7 * atr_val)
-        current_stop = trades[symbol]["stop"]
+           trades[symbol]["stop"] = max(current_stop, current_price - 0.7 * atr_val)
+           current_stop = trades[symbol]["stop"]
         if gain > 4:
-        trades[symbol]["stop"] = max(current_stop, current_price - 0.5 * atr_val)
-        current_stop = trades[symbol]["stop"]
+           trades[symbol]["stop"] = max(current_stop, current_price - 0.5 * atr_val)
+           current_stop = trades[symbol]["stop"]
         if gain > 7:
-        trades[symbol]["stop"] = max(current_stop, current_price - 0.3 * atr_val)
+           trades[symbol]["stop"] = max(current_stop, current_price - 0.3 * atr_val)
 
 def compute_confidence_score(indicators):
     score = 0
