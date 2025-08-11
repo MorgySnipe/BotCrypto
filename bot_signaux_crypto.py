@@ -46,6 +46,7 @@ def st_onoff(st_bool: bool) -> str:
 def format_entry_msg(symbol, trade_id, strategy, bot_version, entry, position_pct,
                      sl_initial, sl_dist_pct, atr,
                      rsi_1h, macd, signal, adx,
+                     st_on,  # <— NOUVEAU paramètre: bool supertrend
                      ema25, ema50_4h, ema200_1h, ema200_4h,
                      vol5, vol20, vol_ratio,
                      btc_up, eth_up,
@@ -57,7 +58,7 @@ def format_entry_msg(symbol, trade_id, strategy, bot_version, entry, position_pc
         f"🎯 Prix entrée: {entry:.4f} | Taille: {position_pct:.1f}%\n"
         f"🛡 Stop initial: {sl_initial:.4f} (dist: {sl_dist_pct:.2f}%) | ATR(1h): {atr:.4f}\n"
         f"🎯 TP1/TP2/TP3: +1.5% / +3% / +5% (dynamiques)\n\n"
-        f"📊 Indicateurs 1H: RSI {rsi_1h:.2f} | MACD {macd:.4f}/{signal:.4f} | ADX {adx:.2f} | Supertrend {st_onoff(adx>=0)}\n"
+        f"📊 Indicateurs 1H: RSI {rsi_1h:.2f} | MACD {macd:.4f}/{signal:.4f} | ADX {adx:.2f} | Supertrend {st_onoff(st_on)}\n"
         f"📈 Tendances: EMA25 {ema25:.4f} | EMA50(4h) {ema50_4h:.4f} | EMA200(1h) {ema200_1h:.4f} | EMA200(4h) {ema200_4h:.4f}\n"
         f"📦 Volume: MA5 {vol5:.0f} | MA20 {vol20:.0f} | Ratio {vol_ratio:.2f}x\n"
         f"🌐 Contexte marché: BTC uptrend={btc_up} | ETH uptrend={eth_up}\n"
@@ -231,6 +232,16 @@ def log_trade(symbol, side, price, gain=0):
             "entry": trades.get(symbol, {}).get("entry", 0),
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
+        # === LOG CSV détaillé (événements BUY/TP/HOLD/SELL/STOP/AUTO_CLOSE) ===
+def log_trade_csv(row: dict, filename: str = "trade_log_full.csv"):
+    import os, csv
+    # On écrit l'en-tête si le fichier est vide ou n'existe pas encore
+    write_header = not os.path.exists(filename) or os.path.getsize(filename) == 0
+    with open(filename, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
 
 def trailing_stop_advanced(symbol, current_price):
     if symbol in trades:
@@ -467,34 +478,39 @@ async def process_symbol(symbol):
             log_trade(symbol, "HOLD", trades[symbol]["entry"])
 
         if buy and symbol not in trades:
-    trade_id = generate_trade_id(symbol)
-    trades[symbol] = {
-        "entry": price,
-        "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-        "confidence": confidence,
-        "stop": price - 0.6 * atr,
-        "position_pct": position_pct,
-        "trade_id": trade_id
-    }
-    last_trade_time[symbol] = datetime.now()
+            trade_id = make_trade_id(symbol)
+            trades[symbol] = {
+                "entry": price,
+                "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                "confidence": confidence,
+                "stop": price - 0.6 * atr,
+                "position_pct": position_pct,
+                "trade_id": trade_id
+            }
+            last_trade_time[symbol] = datetime.now()
 
-    reasons = [
-        label,
-        f"ADX {adx_value:.1f} >= 22",
-        f"MACD {macd:.3f} > Signal {signal:.3f}"
-    ]
-    msg = format_buy_msg(
-        symbol, trade_id, "standard", price, position_pct, price - 0.6 * atr, atr,
-        rsi, macd, signal, adx_value, "ON" if supertrend_signal else "OFF",
-        ema25, ema50_4h, ema200, ema200_4h,
-        np.mean(volumes[-5:]), np.mean(volumes[-20:]), np.mean(volumes[-5:]) / np.mean(volumes[-20:]),
-        is_uptrend([float(k[4]) for k in get_klines("BTCUSDT")]),
-        is_uptrend([float(k[4]) for k in get_klines("ETHUSDT")]),
-        confidence, label_conf, reasons
-    )
-    await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+            reasons = [
+                label,
+                f"ADX {adx_value:.1f} >= 22",
+                f"MACD {macd:.3f} > Signal {signal:.3f}"
+            ]
+            msg = format_entry_msg(
+                symbol, trade_id, "standard", BOT_VERSION, price, position_pct,
+                price - 0.6 * atr, ((price - (price - 0.6 * atr)) / price) * 100, atr,
+                rsi, macd, signal, adx_value,
+                supertrend_signal,  # <— NOUVEAU argument pour st_on
+                ema25, ema50_4h, ema200, ema200_4h,
+                np.mean(volumes[-5:]),  # vol5
+                np.mean(volumes[-20:]),  # vol20
+                np.mean(volumes[-5:]) / np.mean(volumes[-20:]),  # vol_ratio
+                is_uptrend([float(k[4]) for k in get_klines("BTCUSDT")]),
+                is_uptrend([float(k[4]) for k in get_klines("ETHUSDT")]),
+                confidence, label_conf, reasons
+            )
 
-    log_trade_csv({
+            await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+
+            log_trade_csv({
         "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "trade_id": trade_id,
         "symbol": symbol,
