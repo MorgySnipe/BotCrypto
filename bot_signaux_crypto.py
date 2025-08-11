@@ -276,12 +276,6 @@ async def process_symbol(symbol):
             print(f"{symbol} ❌ Hors session active (UTC 00-06)", flush=True)
             return
 
-        # --- Anti-chase / anti-pump plus strict ---
-        last3_change = (closes[-1] - closes[-4]) / closes[-4]
-        if last3_change > 0.022:
-            print(f"{symbol} ❌ Impulsion récente trop forte (+{last3_change*100:.2f}%), on n'entre pas", flush=True)
-            return
-
         ema25 = compute_ema(closes, 25)  # (si déjà plus haut, garde juste la ligne de contrôle)
         if price > ema25 * 1.02:
            print(f"{symbol} ❌ Prix trop éloigné de l'EMA25 (>2%), risque de chase", flush=True)
