@@ -364,22 +364,33 @@ async def process_symbol(symbol):
                 log_trade(symbol, "HOLD", trades[symbol]["entry"])
 
             if buy and symbol not in trades:
-               trades[symbol] = {
-                   "entry": price,
-                   "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-                   "confidence": confidence,
-                   "stop": price - atr,
-                   "position_pct": position_pct
-            }
-               await bot.send_message(chat_id=CHAT_ID, text=(
-                   f"🟢 Achat {symbol} à {price:.4f} (📍 Prix Binance)\n"
-                   f"{label}\n{label_conf}\n"
-                   f"📊 RSI1h: {rsi:.2f} | RSI4h: {rsi_4h:.2f}\n"
-                   f"📈 MACD: {macd:.4f} / Signal: {signal:.4f}\n"
-                   f"📦 Volatilité ATR: {volatility:.4%}\n"
-                   f"📉 SL ATR: {price - atr:.4f}\n"
-                   f"💰 Capital conseillé : {position_pct:.0f}% du portefeuille"
-))
+                trades[symbol] = {
+                    "entry": price,
+                    "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                    "confidence": confidence,
+                    "stop": price - atr,
+                    "position_pct": position_pct
+                }
+                await bot.send_message(chat_id=CHAT_ID, text=(
+                    f"🟢 Achat {symbol} à {price:.4f} (📍 Prix Binance)\n"
+                    f"{label}\n{label_conf}\n"
+                    f"📊 RSI1h: {rsi:.2f} | RSI4h: {rsi_4h:.2f}\n"
+                    f"📈 MACD: {macd:.4f} / Signal: {signal:.4f}\n"
+                    f"📦 Volatilité ATR: {volatility:.4%}\n"
+                    f"📉 SL ATR: {price - atr:.4f}\n"
+                    f"💰 Capital conseillé : {position_pct:.0f}% du portefeuille"
+                ))
+                log_trade(symbol, "BUY", price)
+
+            elif sell and symbol in trades:
+                entry = trades[symbol]['entry']
+                gain = ((price - entry) / entry) * 100
+                stop_used = trades[symbol].get("stop", entry - atr)
+                await bot.send_message(chat_id=CHAT_ID, text=(
+                    f"🔴 Vente {symbol} à {price:.4f} | Gain {gain:.2f}% | Stop final: {stop_used:.4f}"
+                ))
+                log_trade(symbol, "SELL", price, gain)
+                del trades[symbol]
 
             log_trade(symbol, "BUY", price)
 
