@@ -232,16 +232,31 @@ def log_trade(symbol, side, price, gain=0):
             "entry": trades.get(symbol, {}).get("entry", 0),
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
-        # === LOG CSV détaillé (événements BUY/TP/HOLD/SELL/STOP/AUTO_CLOSE) ===
-def log_trade_csv(row: dict, filename: str = "trade_log_full.csv"):
+# ====== CSV détaillé (audit) ======
+CSV_AUDIT_FILE = "trade_audit.csv"
+CSV_AUDIT_FIELDS = [
+    "ts_utc","trade_id","symbol","event","strategy","version",
+    "entry","exit","price","pnl_pct","position_pct",
+    "sl_initial","sl_final","atr_1h","atr_mult_at_entry",
+    "rsi_1h","macd","signal","adx_1h","supertrend_on",
+    "ema25_1h","ema200_1h","ema50_4h","ema200_4h",
+    "vol_ma5","vol_ma20","vol_ratio",
+    "btc_uptrend","eth_uptrend",
+    "reason_entry","reason_exit"
+]
+
+def log_trade_csv(row: dict):
+    """Écrit/append une ligne dans trade_audit.csv avec l'en-tête s'il manque."""
     import os, csv
-    # On écrit l'en-tête si le fichier est vide ou n'existe pas encore
-    write_header = not os.path.exists(filename) or os.path.getsize(filename) == 0
-    with open(filename, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if write_header:
-            writer.writeheader()
-        writer.writerow(row)
+    header_needed = not os.path.exists(CSV_AUDIT_FILE) or os.path.getsize(CSV_AUDIT_FILE) == 0
+    with open(CSV_AUDIT_FILE, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=CSV_AUDIT_FIELDS)
+        if header_needed:
+            w.writeheader()
+        # Ne garder que les champs attendus
+        clean = {k: row.get(k, "") for k in CSV_AUDIT_FIELDS}
+        w.writerow(clean)
+# ====== /CSV détaillé ======
 
 def trailing_stop_advanced(symbol, current_price):
     if symbol in trades:
