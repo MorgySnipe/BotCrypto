@@ -404,7 +404,7 @@ async def process_symbol(symbol):
                 "entry": price,
                 "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
                 "confidence": confidence,
-                "stop": price - atr,
+                "stop": price - 0.6 * atr,
                 "position_pct": position_pct
             }
             last_trade_time[symbol] = datetime.now()
@@ -414,7 +414,7 @@ async def process_symbol(symbol):
                 f"📊 RSI1h: {rsi:.2f} | RSI4h: {rsi_4h:.2f}\n"
                 f"📈 MACD: {macd:.4f} / Signal: {signal:.4f}\n"
                 f"📦 Volatilité ATR: {volatility:.4%}\n"
-                f"📉 SL ATR: {price - atr:.4f}\n"
+                f"📉 SL ATR: {price - 0.6 * atr:.4f}\n"
                 f"💰 Capital conseillé : {position_pct:.0f}% du portefeuille"
             ))
             log_trade(symbol, "BUY", price)
@@ -423,7 +423,7 @@ async def process_symbol(symbol):
         elif sell and symbol in trades:
             entry = trades[symbol]['entry']
             gain = ((price - entry) / entry) * 100
-            stop_used = trades[symbol].get("stop", entry - atr)
+            stop_used = trades[symbol].get("stop", entry - 0.6 * atr)
             await bot.send_message(chat_id=CHAT_ID, text=(
                 f"🔴 Vente {symbol} à {price:.4f} | Gain {gain:.2f}% | Stop final: {stop_used:.4f}"
             ))
@@ -523,7 +523,7 @@ async def process_symbol_aggressive(symbol):
             "entry": price,
             "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
             "confidence": score,
-            "stop": price - 0.8 * atr_val,
+            "stop": price - 0.6 * atr_val,
             "position_pct": 5,
         }
         last_trade_time[symbol] = datetime.now()  # cooldown
@@ -533,7 +533,7 @@ async def process_symbol_aggressive(symbol):
                 f"⚡ **Signal AGRESSIF (qualité)** {symbol} à {price:.4f}\n"
                 f"{label_confidence(score)} | RSI: {rsi_now:.2f} | ADX: {adx_val:.2f}\n"
                 f"MACD: {macd_line:.2f}/{macd_signal:.2f} | 4h OK (EMA50>EMA200)\n"
-                f"Breakout+Retest validé | SL: {price - 0.8 * atr_val:.4f}"
+                f"Breakout+Retest validé | SL: {price - 0.6 * atr_val:.4f}"
             )
         )
 
