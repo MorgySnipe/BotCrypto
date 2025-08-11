@@ -410,21 +410,21 @@ async def process_symbol(symbol):
     except Exception as e:
         print(f"❌ Erreur {symbol}: {e}", flush=True)
         traceback.print_exc()
-async def process_symbol_aggressive(symbol):
-    try:
-        klines = get_klines(symbol)
-        closes = [float(k[4]) for k in klines]
-        highs = [float(k[2]) for k in klines]
-        price = get_last_price(symbol)
-        breakout = price > max(highs[-10:]) * 1.005  # 🔥 Seuil breakout abaissé
-        if breakout:
+    async def process_symbol_aggressive(symbol):
+        try:
+            klines = get_klines(symbol)
+            closes = [float(k[4]) for k in klines]
+            highs = [float(k[2]) for k in klines]
+            price = get_last_price(symbol)
+            breakout = price > max(highs[-10:]) * 1.005  # 🔥 Seuil breakout abaissé
+            if breakout:
             # --- Anti-chase / anti-pump (aggressive) ---
-           last3_change = (closes[-1] - closes[-4]) / closes[-4]
-        if last3_change > 0.022:
-                print(f"{symbol} ❌ Impulsion récente trop forte (+{last3_change*100:.2f}%), on n'entre pas (aggr.)", flush=True)
-                return
+               last3_change = (closes[-1] - closes[-4]) / closes[-4]
+            if last3_change > 0.022:
+                    print(f"{symbol} ❌ Impulsion récente trop forte (+{last3_change*100:.2f}%), on n'entre pas (aggr.)", flush=True)
+                    return
 
-            ema25 = compute_ema(closes, 25)
+               ema25 = compute_ema(closes, 25)
         if price >= ema25 * 1.02:
                 print(f"{symbol} ❌ Prix trop éloigné de l'EMA25 (>2%), risque de chase (aggr.)", flush=True)
                 return
