@@ -288,29 +288,41 @@ async def process_symbol(symbol):
            return
 
         buy = False
-        label = ""
-        position_pct = 5
-        indicators = {
-            "rsi": rsi,
-            "macd": macd,
-            "signal": signal,
-            "supertrend": supertrend_signal,
-            "adx": adx_value,
-            "volume_ok": np.mean(volumes[-5:]) > np.mean(volumes[-20:]),
-            "above_ema200": price > ema200
-        }
-        confidence = compute_confidence_score(indicators)
-        label_conf = label_confidence(confidence)
+label = ""
+position_pct = 5
 
-        if is_uptrend(closes) and macd > signal and rsi > 50:
-            buy = True
-            label = "💎 Trend EMA200/50 + MACD + RSI confirmé (1h/4h)"
-            position_pct = 7
+# Conditions communes (confluence minimum)
+volume_ok = np.mean(volumes[-5:]) > np.mean(volumes[-20:])
+trend_ok  = (price > ema200) and supertrend_signal and (adx_value >= 22)
+momentum_ok = (macd > signal) and (rsi >= 55)
+
+brk_ok, brk_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
+
+# Anti-chase supplémentaire (3 dernières bougies)
+last3_change = (closes[-1] - closes[-4]) / closes[-4]
+if last3_change > 0.022:
+    brk_ok = False  # invalide un breakout trop violent
+
+# Option A : Breakout + Retest propre
+if brk_ok and trend_ok and momentum_ok and volume_ok:
+    buy = True
+    label = "⚡ Breakout + Retest validé (1h) + Confluence (ST/ADX/MACD/Vol)"
+    position_pct = 7
+
+# Option B : Pullback EMA25 propre (trend-continuation)
+elif trend_ok and momentum_ok and volume_ok:
+    ema25_now = ema25
+    near_ema25 = price <= ema25_now * 1.01
+    candle_ok  = (abs(highs[-1] - lows[-1]) / max(lows[-1], 1e-9)) <= 0.03
+    if near_ema25 and candle_ok:
+        buy = True
+        label = "✅ Pullback EMA25 propre + Confluence (ST/ADX/MACD/Vol)"
+        position_pct = 6
 
         sell = False
         if symbol in trades:
             entry = trades[symbol]['entry']
-            entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M")
+            entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
             if elapsed_time > 12:
                 gain = ((price - entry) / entry) * 100
@@ -323,7 +335,7 @@ async def process_symbol(symbol):
                 return
 
             gain = ((price - entry) / entry) * 100
-            stop = trades[symbol].get("stop", entry - atr)
+            stop = trades[symbol].get("stop", entry - 0.6 * atr)
 
             if volatility < 0.008:
                 stop = max(stop, price - atr * 0.5)
