@@ -294,18 +294,56 @@ def get_last_price(symbol):
 
 async def process_symbol(symbol):
     try:
+        # --- Auto-close après 12h si une position existe ---
         if symbol in trades:
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
             if elapsed_time > 12:
                 entry = trades[symbol]['entry']
                 price = get_last_price(symbol)
-                gain = ((price - entry) / entry) * 100
-                await bot.send_message(chat_id=CHAT_ID, text=(
-                    f"⏰ Trade {symbol} clôturé automatiquement après 12h\n"
-                    f"🔚 Prix de sortie : {price:.4f} | Gain : {gain:.2f}%"
-                ))
-                log_trade(symbol, "SELL", price, gain)
+                pnl = ((price - entry) / entry) * 100
+                trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
+
+                # Message structuré
+                msg = format_autoclose_msg(symbol, trade_id, price, pnl)
+                await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+
+                # Log détaillé CSV
+                log_trade_csv({
+                    "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                    "trade_id": trade_id,
+                    "symbol": symbol,
+                    "event": "AUTO_CLOSE",
+                    "strategy": "standard",
+                    "version": BOT_VERSION,
+                    "entry": entry,
+                    "exit": price,
+                    "price": price,
+                    "pnl_pct": pnl,
+                    "position_pct": trades[symbol].get("position_pct", ""),
+                    "sl_initial": "",
+                    "sl_final": trades[symbol].get("stop", ""),
+                    "atr_1h": "",
+                    "atr_mult_at_entry": "",
+                    "rsi_1h": "",
+                    "macd": "",
+                    "signal": "",
+                    "adx_1h": "",
+                    "supertrend_on": "",
+                    "ema25_1h": "",
+                    "ema200_1h": "",
+                    "ema50_4h": "",
+                    "ema200_4h": "",
+                    "vol_ma5": "",
+                    "vol_ma20": "",
+                    "vol_ratio": "",
+                    "btc_uptrend": "",
+                    "eth_uptrend": "",
+                    "reason_entry": "",
+                    "reason_exit": "timeout > 12h"
+                })
+
+                log_trade(symbol, "SELL", price, pnl)
                 del trades[symbol]
                 return
 
@@ -323,6 +361,7 @@ async def process_symbol(symbol):
         atr = compute_atr(klines)
         rsis = [compute_rsi(closes[i-14:i]) for i in range(14, len(closes))]
         ema25 = compute_ema(closes, 25)
+
 
         klines_4h = get_klines_4h(symbol)
         closes_4h = [float(k[4]) for k in klines_4h]
