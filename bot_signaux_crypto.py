@@ -277,7 +277,7 @@ async def process_symbol(symbol):
             return
 
         # --- Anti-chase / anti-pump plus strict ---
-           last3_change = (closes[-1] - closes[-4]) / closes[-4]
+        last3_change = (closes[-1] - closes[-4]) / closes[-4]
         if last3_change > 0.022:
             print(f"{symbol} ❌ Impulsion récente trop forte (+{last3_change*100:.2f}%), on n'entre pas", flush=True)
             return
