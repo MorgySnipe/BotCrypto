@@ -836,24 +836,24 @@ async def process_symbol_aggressive(symbol):
         if last3_change > 0.022:
             return
 
-         # ---- Conditions confluence ----
-         supertrend_ok = compute_supertrend(klines)     # basé sur atr_tv
-         above_ema200  = price > ema200                 # ema200 calculé plus haut
+        # ---- Conditions confluence ----
+        supertrend_ok = compute_supertrend(klines)     # basé sur atr_tv
+        above_ema200  = price > ema200                 # ema200 calculé plus haut
 
-         vol5   = np.mean(volumes[-5:])
-         vol20  = np.mean(volumes[-20:])
-         volume_ok = (vol5 > vol20 * 1.2) and (vol5 > MIN_VOLUME)
+        vol5   = np.mean(volumes[-5:])
+        vol20  = np.mean(volumes[-20:])
+        volume_ok = (vol5 > vol20 * 1.2) and (vol5 > MIN_VOLUME)
 
-         if not (supertrend_ok and adx_value >= 22 and above_ema200 and volume_ok):
-             return
+        if not (supertrend_ok and adx_value >= 22 and above_ema200 and volume_ok):
+            return
 
-         # Momentum MACD vs bougie précédente
-         if not (macd > signal and (macd - signal) > (macd_prev - signal_prev)):
-             return
+        # Momentum MACD vs bougie précédente
+        if not (macd > signal and (macd - signal) > (macd_prev - signal_prev)):
+            return
 
-         # RSI en zone constructive
-         if not (55 <= rsi < 80):
-             return
+        # RSI en zone constructive
+        if not (55 <= rsi < 80):
+            return
 
 
         # ---- Confluence 4h ----
