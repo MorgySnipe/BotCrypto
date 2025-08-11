@@ -30,6 +30,7 @@ trades = {}
 history = []
 last_trade_time = {}
 LOG_FILE = "trade_log.csv"
+pending_retest = {}  
 
 def safe_message(text):
     return text if len(text) < 4000 else text[:3900] + "\n... (tronqué)"
@@ -226,22 +227,7 @@ async def process_symbol(symbol):
         if detect_rsi_divergence(closes, rsis):
             print(f"{symbol} ❌ Divergence RSI détectée", flush=True)
             return
-        if (highs[-1] - lows[-1]) / lows[-1] > 0.05:
-            print(f"{symbol} ❌ Bougie >5% range, achat bloqué", flush=True)
-            return
-        if price > min(lows[-5:]) * 1.03:
-            print(f"{symbol} ❌ Prix > +3% du plus bas récent, anti-pump", flush=True)
-            return
-        if np.mean(volumes[-5:]) < 0.8 * np.mean(volumes[-20:]):
-            print(f"{symbol} ❌ Volume trop faible (<80% moyenne)", flush=True)
-            return
-        if rsi > 80 or rsi_4h > 75:
-            print(f"{symbol} ❌ RSI trop élevé (surachat), pas d'achat", flush=True)
-            return
-        if price > ema25 * 1.03:
-            print(f"{symbol} ❌ Prix trop éloigné de l'EMA25 (>3%), pump suspect", flush=True)
-            return
-
+        
         volatility = get_volatility(atr, price)
         if volatility < 0.005:
             print(f"{symbol} ❌ Volatilité trop faible, blocage", flush=True)
@@ -271,6 +257,17 @@ async def process_symbol(symbol):
         if not in_active_session():
             print(f"{symbol} ❌ Hors session active (UTC 00-06)", flush=True)
             return
+
+        # --- Anti-chase / anti-pump plus strict ---
+last3_change = (closes[-1] - closes[-4]) / closes[-4]
+if last3_change > 0.022:
+    print(f"{symbol} ❌ Impulsion récente trop forte (+{last3_change*100:.2f}%), on n'entre pas", flush=True)
+    return
+
+ema25 = compute_ema(closes, 25)  # (si déjà plus haut, garde juste la ligne de contrôle)
+if price > ema25 * 1.02:
+    print(f"{symbol} ❌ Prix trop éloigné de l'EMA25 (>2%), risque de chase", flush=True)
+    return
 
         buy = False
         label = ""
@@ -421,6 +418,17 @@ async def process_symbol_aggressive(symbol):
         price = get_last_price(symbol)
         breakout = price > max(highs[-10:]) * 1.005  # 🔥 Seuil breakout abaissé
         if breakout:
+            # --- Anti-chase / anti-pump (aggressive) ---
+           last3_change = (closes[-1] - closes[-4]) / closes[-4]
+        if last3_change > 0.022:
+                print(f"{symbol} ❌ Impulsion récente trop forte (+{last3_change*100:.2f}%), on n'entre pas (aggr.)", flush=True)
+                return
+
+            ema25 = compute_ema(closes, 25)
+        if price >= ema25 * 1.02:
+                print(f"{symbol} ❌ Prix trop éloigné de l'EMA25 (>2%), risque de chase (aggr.)", flush=True)
+                return
+
             indicators = {
                 "rsi": compute_rsi(closes),
                 "macd": compute_macd(closes)[0],
