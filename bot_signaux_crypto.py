@@ -371,6 +371,7 @@ async def process_symbol(symbol):
                     "stop": price - atr,
                     "position_pct": position_pct
                 }
+                last_trade_time[symbol] = datetime.now()
                 await bot.send_message(chat_id=CHAT_ID, text=(
                     f"🟢 Achat {symbol} à {price:.4f} (📍 Prix Binance)\n"
                     f"{label}\n{label_conf}\n"
