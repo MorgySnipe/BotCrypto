@@ -247,8 +247,8 @@ async def process_symbol(symbol):
            print(f"{symbol} ❌ Volatilité trop faible, blocage", flush=True)
            return
     
-adx_value = compute_adx(get_klines(symbol))
-supertrend_signal = compute_supertrend(get_klines(symbol))
+        adx_value = compute_adx(get_klines(symbol))
+        supertrend_signal = compute_supertrend(get_klines(symbol))
 
         if adx_value < 20:
     print(f"{symbol} ❌ ADX < 20 = marché plat", flush=True)
