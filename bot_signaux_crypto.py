@@ -304,11 +304,8 @@ async def process_symbol(symbol):
                 pnl = ((price - entry) / entry) * 100
                 trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
 
-                # Message structuré
                 msg = format_autoclose_msg(symbol, trade_id, price, pnl)
                 await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
-
-                # Log détaillé CSV
                 log_trade_csv({
                     "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                     "trade_id": trade_id,
@@ -324,25 +321,8 @@ async def process_symbol(symbol):
                     "sl_initial": "",
                     "sl_final": trades[symbol].get("stop", ""),
                     "atr_1h": "",
-                    "atr_mult_at_entry": "",
-                    "rsi_1h": "",
-                    "macd": "",
-                    "signal": "",
-                    "adx_1h": "",
-                    "supertrend_on": "",
-                    "ema25_1h": "",
-                    "ema200_1h": "",
-                    "ema50_4h": "",
-                    "ema200_4h": "",
-                    "vol_ma5": "",
-                    "vol_ma20": "",
-                    "vol_ratio": "",
-                    "btc_uptrend": "",
-                    "eth_uptrend": "",
-                    "reason_entry": "",
                     "reason_exit": "timeout > 12h"
                 })
-
                 log_trade(symbol, "SELL", price, pnl)
                 del trades[symbol]
                 return
@@ -362,55 +342,37 @@ async def process_symbol(symbol):
         rsis = [compute_rsi(closes[i-14:i]) for i in range(14, len(closes))]
         ema25 = compute_ema(closes, 25)
 
-
         klines_4h = get_klines_4h(symbol)
         closes_4h = [float(k[4]) for k in klines_4h]
         ema200_4h = compute_ema(closes_4h, 200)
         ema50_4h = compute_ema(closes_4h, 50)
         rsi_4h = compute_rsi(closes_4h)
 
-        if not is_market_bullish():
-            return
-        if price < ema200 or closes_4h[-1] < ema200_4h or closes_4h[-1] < ema50_4h:
-            return
-        if rsi_4h < 50:
-            return
+        if not is_market_bullish(): return
+        if price < ema200 or closes_4h[-1] < ema200_4h or closes_4h[-1] < ema50_4h: return
+        if rsi_4h < 50: return
         if is_market_range(closes_4h):
             await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Marché en range sur {symbol} → Trade bloqué")
             return
-        if detect_rsi_divergence(closes, rsis):
-            return
+        if detect_rsi_divergence(closes, rsis): return
 
         volatility = get_volatility(atr, price)
-        if volatility < 0.005:
-            return
+        if volatility < 0.005: return
 
         adx_value = compute_adx(get_klines(symbol))
         supertrend_signal = compute_supertrend(get_klines(symbol))
-
-        if adx_value < 20:
-            return
-        if not supertrend_signal:
-            return
+        if adx_value < 20: return
+        if not supertrend_signal: return
 
         if symbol in last_trade_time:
             cooldown_left = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds() / 3600
-            if cooldown_left > 0:
-                return
-
-        if len(trades) >= MAX_TRADES:
-            return
-        if not in_active_session():
-            return
-
-        if price > ema25 * 1.02:
-            return
+            if cooldown_left > 0: return
+        if len(trades) >= MAX_TRADES: return
+        if not in_active_session(): return
+        if price > ema25 * 1.02: return
 
         buy = False
-        label = ""
         position_pct = 5
-
-        # ---- Score de confiance ----
         indicators = {
             "rsi": rsi,
             "macd": macd,
@@ -423,25 +385,18 @@ async def process_symbol(symbol):
         confidence = compute_confidence_score(indicators)
         label_conf = label_confidence(confidence)
 
-        # Conditions communes
         volume_ok = np.mean(volumes[-5:]) > np.mean(volumes[-20:])
         trend_ok = (price > ema200) and supertrend_signal and (adx_value >= 22)
         momentum_ok = (macd > signal) and (rsi >= 55)
 
         brk_ok, _ = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
-
-        # Anti-chase
         last3_change = (closes[-1] - closes[-4]) / closes[-4]
-        if last3_change > 0.022:
-            brk_ok = False
+        if last3_change > 0.022: brk_ok = False
 
-        # Option A
         if brk_ok and trend_ok and momentum_ok and volume_ok:
             buy = True
             label = "⚡ Breakout + Retest validé (1h) + Confluence"
             position_pct = 7
-
-        # Option B
         elif trend_ok and momentum_ok and volume_ok:
             near_ema25 = price <= ema25 * 1.01
             candle_ok = (abs(highs[-1] - lows[-1]) / max(lows[-1], 1e-9)) <= 0.03
@@ -450,21 +405,12 @@ async def process_symbol(symbol):
                 label = "✅ Pullback EMA25 propre + Confluence"
                 position_pct = 6
 
+        # === GESTION TP / HOLD / SELL ===
         sell = False
         if symbol in trades:
             entry = trades[symbol]['entry']
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
-            if elapsed_time > 12:
-                gain = ((price - entry) / entry) * 100
-                await bot.send_message(chat_id=CHAT_ID, text=(
-                    f"⏰ Trade {symbol} clôturé automatiquement après 12h\n"
-                    f"🔚 Prix de sortie : {price:.4f} | Gain : {gain:.2f}%"
-                ))
-                log_trade(symbol, "SELL", price, gain)
-                del trades[symbol]
-                return
-
             gain = ((price - entry) / entry) * 100
             stop = trades[symbol].get("stop", entry - 0.6 * atr)
 
@@ -476,60 +422,34 @@ async def process_symbol(symbol):
                 stop = max(stop, price - atr * 1.2)
 
             if rsi < 45 or macd < signal:
-                await bot.send_message(chat_id=CHAT_ID, text=(
-                    f"🔴 Sortie intelligente {symbol} | RSI: {rsi:.2f} | MACD < Signal\n"
-                    f"💰 Prix: {price:.4f} | Gain: {gain:.2f}%"
-                ))
+                msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, "RSI bas ou MACD croisé à la baisse")
+                await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
                 log_trade(symbol, "SELL", price, gain)
                 del trades[symbol]
                 return
 
-            if gain > 1.5:
-                stop = max(stop, entry)
-            if gain > 3:
-                stop = max(stop, entry * 1.01)
-            if gain > 5:
-                stop = max(stop, entry * 1.03)
-
-            trades[symbol]["stop"] = stop
-
-            # Niveaux TP fixes %
-            tp1_level = 1.5
-            tp2_level = 3.0
-            tp3_level = 5.0
-
+            tp_levels = {1: 1.5, 2: 3.0, 3: 5.0}
             if "tp_times" not in trades[symbol]:
                 trades[symbol]["tp_times"] = {}
-
-            if gain >= tp1_level and not trades[symbol].get("tp1", False):
-                trades[symbol]["tp1"] = True
-                trades[symbol]["tp_times"]["tp1"] = datetime.now()
-                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 atteint sur {symbol} | Gain +{gain:.2f}%")
-
-            if gain >= tp2_level and not trades[symbol].get("tp2", False):
-                last_tp1_time = trades[symbol]["tp_times"].get("tp1")
-                if not last_tp1_time or (datetime.now() - last_tp1_time).total_seconds() >= 120:
-                    trades[symbol]["tp2"] = True
-                    trades[symbol]["tp_times"]["tp2"] = datetime.now()
-                    await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP2 atteint sur {symbol} | Gain +{gain:.2f}%")
-
-            if gain >= tp3_level and not trades[symbol].get("tp3", False):
-                last_tp2_time = trades[symbol]["tp_times"].get("tp2")
-                if not last_tp2_time or (datetime.now() - last_tp2_time).total_seconds() >= 120:
-                    trades[symbol]["tp3"] = True
-                    trades[symbol]["tp_times"]["tp3"] = datetime.now()
-                    await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP3 atteint sur {symbol} | Gain +{gain:.2f}%")
-                    sell = True
+            for tp_num, tp_pct in tp_levels.items():
+                if gain >= tp_pct and not trades[symbol].get(f"tp{tp_num}", False):
+                    last_tp_time = trades[symbol]["tp_times"].get(f"tp{tp_num-1}") if tp_num > 1 else None
+                    if not last_tp_time or (datetime.now() - last_tp_time).total_seconds() >= 120:
+                        trades[symbol][f"tp{tp_num}"] = True
+                        trades[symbol]["tp_times"][f"tp{tp_num}"] = datetime.now()
+                        new_stop = entry * (1 + (tp_pct - 0.5) / 100) if tp_num > 1 else entry
+                        trades[symbol]["stop"] = max(stop, new_stop)
+                        msg = format_tp_msg(tp_num, symbol, trades[symbol]["trade_id"], price, gain, trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100, elapsed_time, "Stop ajusté")
+                        await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
 
             if trades[symbol].get("tp1", False) and gain < 1:
                 sell = True
-
-            if price < stop or gain <= -1.5:
+            if price < trades[symbol]["stop"] or gain <= -1.5:
+                msg = format_stop_msg(symbol, trades[symbol]["trade_id"], trades[symbol]["stop"], gain, rsi, adx_value, np.mean(volumes[-5:]) / np.mean(volumes[-20:]))
+                await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
                 sell = True
-
-        if symbol in trades:
-            trailing_stop_advanced(symbol, trades[symbol].get("last_price", trades[symbol]["entry"]))
-            log_trade(symbol, "HOLD", trades[symbol]["entry"])
+            if not sell:
+                log_trade(symbol, "HOLD", price)
 
         if buy and symbol not in trades:
             trade_id = make_trade_id(symbol)
@@ -542,76 +462,33 @@ async def process_symbol(symbol):
                 "trade_id": trade_id
             }
             last_trade_time[symbol] = datetime.now()
-
-            reasons = [
-                label,
-                f"ADX {adx_value:.1f} >= 22",
-                f"MACD {macd:.3f} > Signal {signal:.3f}"
-            ]
+            reasons = [label, f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
             msg = format_entry_msg(
                 symbol, trade_id, "standard", BOT_VERSION, price, position_pct,
                 price - 0.6 * atr, ((price - (price - 0.6 * atr)) / price) * 100, atr,
-                rsi, macd, signal, adx_value,
-                supertrend_signal,  # <— NOUVEAU argument pour st_on
+                rsi, macd, signal, adx_value, supertrend_signal,
                 ema25, ema50_4h, ema200, ema200_4h,
-                np.mean(volumes[-5:]),  # vol5
-                np.mean(volumes[-20:]),  # vol20
-                np.mean(volumes[-5:]) / np.mean(volumes[-20:]),  # vol_ratio
+                np.mean(volumes[-5:]), np.mean(volumes[-20:]),
+                np.mean(volumes[-5:]) / np.mean(volumes[-20:]),
                 is_uptrend([float(k[4]) for k in get_klines("BTCUSDT")]),
                 is_uptrend([float(k[4]) for k in get_klines("ETHUSDT")]),
                 confidence, label_conf, reasons
             )
-
             await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
-
-            log_trade_csv({
-        "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-        "trade_id": trade_id,
-        "symbol": symbol,
-        "event": "BUY",
-        "strategy": "standard",
-        "version": BOT_VERSION,
-        "entry": price,
-        "exit": "",
-        "price": price,
-        "pnl_pct": "",
-        "position_pct": position_pct,
-        "sl_initial": price - 0.6 * atr,
-        "sl_final": "",
-        "atr_1h": atr,
-        "atr_mult_at_entry": 0.6,
-        "rsi_1h": rsi,
-        "macd": macd,
-        "signal": signal,
-        "adx_1h": adx_value,
-        "supertrend_on": supertrend_signal,
-        "ema25_1h": ema25,
-        "ema200_1h": ema200,
-        "ema50_4h": ema50_4h,
-        "ema200_4h": ema200_4h,
-        "vol_ma5": np.mean(volumes[-5:]),
-        "vol_ma20": np.mean(volumes[-20:]),
-        "vol_ratio": np.mean(volumes[-5:]) / np.mean(volumes[-20:]),
-        "btc_uptrend": is_uptrend([float(k[4]) for k in get_klines("BTCUSDT")]),
-        "eth_uptrend": is_uptrend([float(k[4]) for k in get_klines("ETHUSDT")]),
-        "reason_entry": "; ".join(reasons),
-        "reason_exit": ""
-    })
             log_trade(symbol, "BUY", price)
 
         elif sell and symbol in trades:
             entry = trades[symbol]['entry']
             gain = ((price - entry) / entry) * 100
             stop_used = trades[symbol].get("stop", entry - 0.6 * atr)
-            await bot.send_message(chat_id=CHAT_ID, text=(
-                f"🔴 Vente {symbol} à {price:.4f} | Gain {gain:.2f}% | Stop final: {stop_used:.4f}"
-            ))
+            await bot.send_message(chat_id=CHAT_ID, text=f"🔴 Vente {symbol} à {price:.4f} | Gain {gain:.2f}% | Stop final: {stop_used:.4f}")
             log_trade(symbol, "SELL", price, gain)
             del trades[symbol]
 
     except Exception as e:
         print(f"❌ Erreur {symbol}: {e}", flush=True)
         traceback.print_exc()
+
 async def process_symbol_aggressive(symbol):
     try:
         klines = get_klines(symbol)               # 1h
