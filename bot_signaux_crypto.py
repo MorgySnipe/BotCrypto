@@ -295,7 +295,7 @@ async def process_symbol(symbol):
 # Anti-chase supplémentaire (3 dernières bougies)
         last3_change = (closes[-1] - closes[-4]) / closes[-4]
         if last3_change > 0.022:
-        brk_ok = False  # invalide un breakout trop violent
+           brk_ok = False  # invalide un breakout trop violent
 
 # Option A : Breakout + Retest propre
         if brk_ok and trend_ok and momentum_ok and volume_ok:
