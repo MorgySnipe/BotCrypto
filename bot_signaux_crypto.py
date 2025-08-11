@@ -286,22 +286,22 @@ async def process_symbol(symbol):
         position_pct = 5
 
 # Conditions communes (confluence minimum)
-volume_ok = np.mean(volumes[-5:]) > np.mean(volumes[-20:])
-trend_ok  = (price > ema200) and supertrend_signal and (adx_value >= 22)
-momentum_ok = (macd > signal) and (rsi >= 55)
+        volume_ok = np.mean(volumes[-5:]) > np.mean(volumes[-20:])
+        trend_ok  = (price > ema200) and supertrend_signal and (adx_value >= 22)
+        momentum_ok = (macd > signal) and (rsi >= 55)
 
-brk_ok, brk_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
+        brk_ok, brk_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
 
 # Anti-chase supplémentaire (3 dernières bougies)
-last3_change = (closes[-1] - closes[-4]) / closes[-4]
-if last3_change > 0.022:
-    brk_ok = False  # invalide un breakout trop violent
+        last3_change = (closes[-1] - closes[-4]) / closes[-4]
+        if last3_change > 0.022:
+        brk_ok = False  # invalide un breakout trop violent
 
 # Option A : Breakout + Retest propre
-if brk_ok and trend_ok and momentum_ok and volume_ok:
-    buy = True
-    label = "⚡ Breakout + Retest validé (1h) + Confluence (ST/ADX/MACD/Vol)"
-    position_pct = 7
+        if brk_ok and trend_ok and momentum_ok and volume_ok:
+        buy = True
+        label = "⚡ Breakout + Retest validé (1h) + Confluence (ST/ADX/MACD/Vol)"
+        position_pct = 7
 
 # Option B : Pullback EMA25 propre (trend-continuation)
 elif trend_ok and momentum_ok and volume_ok:
