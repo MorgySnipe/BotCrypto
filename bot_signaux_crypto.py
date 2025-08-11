@@ -360,8 +360,8 @@ async def process_symbol(symbol):
                 sell = True
 
             if symbol in trades:
-    trailing_stop_advanced(symbol, trades[symbol].get("last_price", trades[symbol]["entry"]))
-    log_trade(symbol, "HOLD", trades[symbol]["entry"])
+            trailing_stop_advanced(symbol, trades[symbol].get("last_price", trades[symbol]["entry"]))
+            log_trade(symbol, "HOLD", trades[symbol]["entry"])
 
             if buy and symbol not in trades:
             trades[symbol] = {
