@@ -304,14 +304,14 @@ async def process_symbol(symbol):
            position_pct = 7
 
 # Option B : Pullback EMA25 propre (trend-continuation)
-elif trend_ok and momentum_ok and volume_ok:
-    ema25_now = ema25
-    near_ema25 = price <= ema25_now * 1.01
-    candle_ok  = (abs(highs[-1] - lows[-1]) / max(lows[-1], 1e-9)) <= 0.03
-    if near_ema25 and candle_ok:
-        buy = True
-        label = "✅ Pullback EMA25 propre + Confluence (ST/ADX/MACD/Vol)"
-        position_pct = 6
+        elif trend_ok and momentum_ok and volume_ok:
+           ema25_now = ema25
+           near_ema25 = price <= ema25_now * 1.01
+           candle_ok  = (abs(highs[-1] - lows[-1]) / max(lows[-1], 1e-9)) <= 0.03
+        if near_ema25 and candle_ok:
+           buy = True
+           label = "✅ Pullback EMA25 propre + Confluence (ST/ADX/MACD/Vol)"
+            position_pct = 6
 
         sell = False
         if symbol in trades:
