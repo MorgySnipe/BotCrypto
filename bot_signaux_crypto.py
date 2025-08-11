@@ -410,56 +410,66 @@ async def process_symbol(symbol):
     except Exception as e:
         print(f"❌ Erreur {symbol}: {e}", flush=True)
         traceback.print_exc()
-    async def process_symbol_aggressive(symbol):
-        try:
-            klines = get_klines(symbol)
-            closes = [float(k[4]) for k in klines]
-            highs = [float(k[2]) for k in klines]
-            price = get_last_price(symbol)
-            breakout = price > max(highs[-10:]) * 1.005  # 🔥 Seuil breakout abaissé
-            if breakout:
+async def process_symbol_aggressive(symbol):
+    try:
+        klines = get_klines(symbol)
+        closes = [float(k[4]) for k in klines]
+        highs = [float(k[2]) for k in klines]
+        price = get_last_price(symbol)
+
+        # Breakout léger
+        breakout = price > max(highs[-10:]) * 1.005
+        if breakout:
             # --- Anti-chase / anti-pump (aggressive) ---
-               last3_change = (closes[-1] - closes[-4]) / closes[-4]
-               if last3_change > 0.022:
-                    print(f"{symbol} ❌ Impulsion récente trop forte (+{last3_change*100:.2f}%), on n'entre pas (aggr.)", flush=True)
-                    return
+            last3_change = (closes[-1] - closes[-4]) / closes[-4]
+            if last3_change > 0.022:
+                print(f"{symbol} ❌ Impulsion récente trop forte (+{last3_change*100:.2f}%), on n'entre pas (aggr.)", flush=True)
+                return
 
-               ema25 = compute_ema(closes, 25)
-               if price >= ema25 * 1.02:
-                    print(f"{symbol} ❌ Prix trop éloigné de l'EMA25 (>2%), risque de chase (aggr.)", flush=True)
-                    return
+            ema25 = compute_ema(closes, 25)
+            if price >= ema25 * 1.02:
+                print(f"{symbol} ❌ Prix trop éloigné de l'EMA25 (>2%), risque de chase (aggr.)", flush=True)
+                return
 
-            indicators = {
-                "rsi": compute_rsi(closes),
-                "macd": compute_macd(closes)[0],
-                "signal": compute_macd(closes)[1],
-                "supertrend": compute_supertrend(klines),
-                "adx": compute_adx(klines),
-                "volume_ok": np.mean([float(k[5]) for k in klines][-5:]) > np.mean([float(k[5]) for k in klines][-20:]),
-                "above_ema200": price > compute_ema(closes, 200)
+        # Indicateurs
+        macd_line, macd_signal = compute_macd(closes)
+        indicators = {
+            "rsi": compute_rsi(closes),
+            "macd": macd_line,
+            "signal": macd_signal,
+            "supertrend": compute_supertrend(klines),
+            "adx": compute_adx(klines),
+            "volume_ok": np.mean([float(k[5]) for k in klines][-5:]) > np.mean([float(k[5]) for k in klines][-20:]),
+            "above_ema200": price > compute_ema(closes, 200),
+        }
+        score = compute_confidence_score(indicators)
+        rsi_now = indicators["rsi"]
+        atr_val = compute_atr(klines)
+
+        # Entrée agressive
+        if score >= 3 and rsi_now < 85:
+            trades[symbol] = {
+                "entry": price,
+                "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                "confidence": score,
+                "stop": price - 0.8 * atr_val,  # Stop loss dynamique
+                "position_pct": 5,
             }
-            score = compute_confidence_score(indicators)
-            rsi_now = indicators["rsi"]
-            atr_val = compute_atr(klines)
-            if score >= 3 and rsi_now < 85:  # ✅ Seuil score abaissé + tolérance RSI augmentée
-                trades[symbol] = {
-                    "entry": price,
-                    "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-                    "confidence": score,
-                    "stop": price - 0.8 * atr_val,  # ✅ Stop loss dynamique ajouté
-                    "position_pct": 5
-                }
-                await bot.send_message(chat_id=CHAT_ID, text=(
+            await bot.send_message(
+                chat_id=CHAT_ID,
+                text=(
                     f"⚡ **Signal AGRESSIF** {symbol} à {price:.4f} (🎯 Prix Binance)\n"
                     f"🔍 Stratégie : Breakout anticipé + Retest\n{label_confidence(score)}\n"
                     f"RSI: {rsi_now:.2f} | MACD: {indicators['macd']:.2f} / Signal: {indicators['signal']:.2f}\n"
                     f"ADX: {indicators['adx']:.2f} | SL initial: {price - 0.8 * atr_val:.4f}\n"
                     f"⚠️ **Risque accru, entrée anticipée**"
-))
+                )
+            )
 
     except Exception as e:
         print(f"❌ Erreur stratégie agressive {symbol}: {e}")
         traceback.print_exc()
+
 
 def is_recent(ts_str):
     ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
