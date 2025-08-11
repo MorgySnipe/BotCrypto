@@ -299,9 +299,9 @@ async def process_symbol(symbol):
 
 # Option A : Breakout + Retest propre
         if brk_ok and trend_ok and momentum_ok and volume_ok:
-        buy = True
-        label = "⚡ Breakout + Retest validé (1h) + Confluence (ST/ADX/MACD/Vol)"
-        position_pct = 7
+           buy = True
+           label = "⚡ Breakout + Retest validé (1h) + Confluence (ST/ADX/MACD/Vol)"
+           position_pct = 7
 
 # Option B : Pullback EMA25 propre (trend-continuation)
 elif trend_ok and momentum_ok and volume_ok:
