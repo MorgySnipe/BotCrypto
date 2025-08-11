@@ -206,7 +206,7 @@ async def process_symbol(symbol):
                 log_trade(symbol, "SELL", price, gain)
                 del trades[symbol]
                 return
-           
+
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
 
         klines = get_klines(symbol)
@@ -229,88 +229,85 @@ async def process_symbol(symbol):
         rsi_4h = compute_rsi(closes_4h)
 
         if not is_market_bullish():
-            print(f"{symbol} ❌ Marché global baissier", flush=True)
             return
         if price < ema200 or closes_4h[-1] < ema200_4h or closes_4h[-1] < ema50_4h:
-            print(f"{symbol} ❌ Sous EMA50/EMA200 (4h ou 1h)", flush=True)
             return
         if rsi_4h < 50:
-            print(f"{symbol} ❌ RSI 4H < 50 (faible momentum)", flush=True)
             return
         if is_market_range(closes_4h):
-            print(f"{symbol} ⚠️ Marché en range détecté, trade bloqué", flush=True)
             await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Marché en range sur {symbol} → Trade bloqué")
             return
         if detect_rsi_divergence(closes, rsis):
-            print(f"{symbol} ❌ Divergence RSI détectée", flush=True)
             return
-        
+
         volatility = get_volatility(atr, price)
         if volatility < 0.005:
-            print(f"{symbol} ❌ Volatilité trop faible, blocage", flush=True)
             return
 
         adx_value = compute_adx(get_klines(symbol))
         supertrend_signal = compute_supertrend(get_klines(symbol))
 
         if adx_value < 20:
-            print(f"{symbol} ❌ ADX < 20 = marché plat", flush=True)
             return
-
         if not supertrend_signal:
-            print(f"{symbol} ❌ SuperTrend non haussier", flush=True)
             return
 
         if symbol in last_trade_time:
             cooldown_left = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds() / 3600
             if cooldown_left > 0:
-                print(f"{symbol} ⏳ Cooldown actif: {cooldown_left:.1f}h", flush=True)
                 return
 
         if len(trades) >= MAX_TRADES:
-            print(f"{symbol} ❌ Trop de trades ouverts ({MAX_TRADES}), {symbol} ignoré", flush=True)
             return
-
         if not in_active_session():
-            print(f"{symbol} ❌ Hors session active (UTC 00-06)", flush=True)
             return
 
-        ema25 = compute_ema(closes, 25)  # (si déjà plus haut, garde juste la ligne de contrôle)
         if price > ema25 * 1.02:
-           print(f"{symbol} ❌ Prix trop éloigné de l'EMA25 (>2%), risque de chase", flush=True)
-           return
+            return
 
         buy = False
         label = ""
         position_pct = 5
 
-# Conditions communes (confluence minimum)
+        # ---- Score de confiance ----
+        indicators = {
+            "rsi": rsi,
+            "macd": macd,
+            "signal": signal,
+            "supertrend": supertrend_signal,
+            "adx": adx_value,
+            "volume_ok": np.mean(volumes[-5:]) > np.mean(volumes[-20:]),
+            "above_ema200": price > ema200,
+        }
+        confidence = compute_confidence_score(indicators)
+        label_conf = label_confidence(confidence)
+
+        # Conditions communes
         volume_ok = np.mean(volumes[-5:]) > np.mean(volumes[-20:])
-        trend_ok  = (price > ema200) and supertrend_signal and (adx_value >= 22)
+        trend_ok = (price > ema200) and supertrend_signal and (adx_value >= 22)
         momentum_ok = (macd > signal) and (rsi >= 55)
 
-        brk_ok, brk_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
+        brk_ok, _ = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
 
-# Anti-chase supplémentaire (3 dernières bougies)
+        # Anti-chase
         last3_change = (closes[-1] - closes[-4]) / closes[-4]
         if last3_change > 0.022:
-           brk_ok = False  # invalide un breakout trop violent
+            brk_ok = False
 
-# Option A : Breakout + Retest propre
+        # Option A
         if brk_ok and trend_ok and momentum_ok and volume_ok:
-           buy = True
-           label = "⚡ Breakout + Retest validé (1h) + Confluence (ST/ADX/MACD/Vol)"
-           position_pct = 7
+            buy = True
+            label = "⚡ Breakout + Retest validé (1h) + Confluence"
+            position_pct = 7
 
-# Option B : Pullback EMA25 propre (trend-continuation)
+        # Option B
         elif trend_ok and momentum_ok and volume_ok:
-           ema25_now = ema25
-           near_ema25 = price <= ema25_now * 1.01
-           candle_ok  = (abs(highs[-1] - lows[-1]) / max(lows[-1], 1e-9)) <= 0.03
-           if near_ema25 and candle_ok:
-               buy = True
-               label = "✅ Pullback EMA25 propre + Confluence (ST/ADX/MACD/Vol)"
-               position_pct = 6
+            near_ema25 = price <= ema25 * 1.01
+            candle_ok = (abs(highs[-1] - lows[-1]) / max(lows[-1], 1e-9)) <= 0.03
+            if near_ema25 and candle_ok:
+                buy = True
+                label = "✅ Pullback EMA25 propre + Confluence"
+                position_pct = 6
 
         sell = False
         if symbol in trades:
@@ -355,31 +352,27 @@ async def process_symbol(symbol):
 
             trades[symbol]["stop"] = stop
 
-           # Niveaux TP
-            tp1_level = 1.5 * atr
-            tp2_level = 3 * atr
-            tp3_level = 5 * atr
+            # Niveaux TP fixes %
+            tp1_level = 1.5
+            tp2_level = 3.0
+            tp3_level = 5.0
 
-           # Initialiser historique TP
             if "tp_times" not in trades[symbol]:
-               trades[symbol]["tp_times"] = {}
+                trades[symbol]["tp_times"] = {}
 
-           # TP1
-            if gain >= tp1_level / entry * 100 and not trades[symbol].get("tp1", False):
+            if gain >= tp1_level and not trades[symbol].get("tp1", False):
                 trades[symbol]["tp1"] = True
                 trades[symbol]["tp_times"]["tp1"] = datetime.now()
                 await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 atteint sur {symbol} | Gain +{gain:.2f}%")
 
-           # TP2 (attendre au moins 2 min après TP1)
-            if gain >= tp2_level / entry * 100 and not trades[symbol].get("tp2", False):
+            if gain >= tp2_level and not trades[symbol].get("tp2", False):
                 last_tp1_time = trades[symbol]["tp_times"].get("tp1")
                 if not last_tp1_time or (datetime.now() - last_tp1_time).total_seconds() >= 120:
                     trades[symbol]["tp2"] = True
                     trades[symbol]["tp_times"]["tp2"] = datetime.now()
                     await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP2 atteint sur {symbol} | Gain +{gain:.2f}%")
 
-           # TP3 (attendre au moins 2 min après TP2)
-            if gain >= tp3_level / entry * 100 and not trades[symbol].get("tp3", False):
+            if gain >= tp3_level and not trades[symbol].get("tp3", False):
                 last_tp2_time = trades[symbol]["tp_times"].get("tp2")
                 if not last_tp2_time or (datetime.now() - last_tp2_time).total_seconds() >= 120:
                     trades[symbol]["tp3"] = True
@@ -392,12 +385,11 @@ async def process_symbol(symbol):
 
             if price < stop or gain <= -1.5:
                 sell = True
-        # === Gestion des stops dynamiques et log HOLD ===
+
         if symbol in trades:
             trailing_stop_advanced(symbol, trades[symbol].get("last_price", trades[symbol]["entry"]))
             log_trade(symbol, "HOLD", trades[symbol]["entry"])
 
-        # === Achat si conditions remplies ===
         if buy and symbol not in trades:
             trades[symbol] = {
                 "entry": price,
@@ -418,7 +410,6 @@ async def process_symbol(symbol):
             ))
             log_trade(symbol, "BUY", price)
 
-        # === Vente si conditions remplies ===
         elif sell and symbol in trades:
             entry = trades[symbol]['entry']
             gain = ((price - entry) / entry) * 100
@@ -428,7 +419,6 @@ async def process_symbol(symbol):
             ))
             log_trade(symbol, "SELL", price, gain)
             del trades[symbol]
-
 
     except Exception as e:
         print(f"❌ Erreur {symbol}: {e}", flush=True)
