@@ -29,8 +29,7 @@ bot = Bot(token=TELEGRAM_TOKEN)
 trades = {}
 history = []
 last_trade_time = {}
-LOG_FILE = "trade_log.csv"
-pending_retest = {}  
+LOG_FILE = "trade_log.csv"  
 
 def safe_message(text):
     return text if len(text) < 4000 else text[:3900] + "\n... (tronqué)"
