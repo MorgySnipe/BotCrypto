@@ -126,6 +126,24 @@ def compute_supertrend(klines, period=10, multiplier=3):
     lowerband = hl2[-1] - multiplier * atr
     return closes[-1] > lowerband
 
+def detect_breakout_retest(closes, highs, lookback=10, tol=0.003):
+    """
+    Détecte une séquence Breakout + Retest en 1h.
+    - Breakout: bougie -2 clôture au-dessus du plus haut des `lookback` bougies précédentes
+    - Retest:   bougie -1 clôture proche (±tol) du niveau de breakout et >= level
+    tol = 0.003 -> 0,3% de tolérance
+    Retourne (ok: bool, level: float)
+    """
+    if len(highs) < lookback + 3 or len(closes) < lookback + 3:
+        return False, None
+
+    level = max(highs[-(lookback+2):-2])          # plus haut avant la bougie -2
+    breakout = closes[-2] > level * 1.003         # close -2 > +0,3% au-dessus du level
+    # Retest simple/robuste sans utiliser les lows (évite repaint)
+    retest = (abs(closes[-1] - level) / level) <= tol and (closes[-1] >= level)
+
+    return (breakout and retest), level
+
 def log_trade(symbol, side, price, gain=0):
     with open(LOG_FILE, "a", newline="") as f:
         writer = csv.writer(f)
