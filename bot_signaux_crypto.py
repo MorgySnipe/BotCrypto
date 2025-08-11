@@ -827,14 +827,14 @@ async def process_symbol_aggressive(symbol):
                 return
 
          # ---- Breakout + retest ----
-         last10_high = max(highs[-10:])
-         breakout = price > last10_high * 1.008
-         if not breakout:
-             return
+        last10_high = max(highs[-10:])
+        breakout = price > last10_high * 1.008
+        if not breakout:
+            return
 
-         last3_change = (closes[-1] - closes[-4]) / closes[-4]
-         if last3_change > 0.022:
-             return
+        last3_change = (closes[-1] - closes[-4]) / closes[-4]
+        if last3_change > 0.022:
+            return
 
          # ---- Conditions confluence ----
          supertrend_ok = compute_supertrend(klines)     # basé sur atr_tv
