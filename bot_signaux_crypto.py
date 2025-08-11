@@ -244,8 +244,8 @@ async def process_symbol(symbol):
 
         volatility = get_volatility(atr, price)
         if volatility < 0.005:
-    print(f"{symbol} ❌ Volatilité trop faible, blocage", flush=True)
-    return
+           print(f"{symbol} ❌ Volatilité trop faible, blocage", flush=True)
+           return
     
 adx_value = compute_adx(get_klines(symbol))
 supertrend_signal = compute_supertrend(get_klines(symbol))
