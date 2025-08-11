@@ -126,11 +126,20 @@ def compute_rsi(prices, period=14):
     rs = avg_gain / avg_loss if avg_loss != 0 else 0
     return 100 - (100 / (1 + rs))
 
+def compute_ema_series(prices, period):
+    """Retourne une série EMA complète."""
+    ema = [prices[0]]
+    k = 2 / (period + 1)
+    for p in prices[1:]:
+        ema.append(p * k + ema[-1] * (1 - k))
+    return np.array(ema)
+
 def compute_macd(prices, short=12, long=26, signal=9):
-    ema_short = np.convolve(prices, np.ones(short)/short, mode='valid')
-    ema_long = np.convolve(prices, np.ones(long)/long, mode='valid')
-    macd_line = ema_short[-len(ema_long):] - ema_long
-    signal_line = np.convolve(macd_line, np.ones(signal)/signal, mode='valid')
+    """MACD avec EMA exponentielles réelles."""
+    ema_short = compute_ema_series(prices, short)
+    ema_long = compute_ema_series(prices, long)
+    macd_line = ema_short - ema_long
+    signal_line = compute_ema_series(macd_line, signal)
     return macd_line[-1], signal_line[-1]
 
 def compute_ema(prices, period=200):
@@ -767,7 +776,7 @@ async def main_loop():
                 last_summary_day = now.date()
 
             await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
-            await asyncio.gather(*(process_symbol_aggressive(s) for s in SYMBOLS))
+            await asyncio.gather(*(process_symbol_aggressive(s) for s in SYMBOLS if s not in trades))
             print("✔️ Itération terminée", flush=True)
 
         except Exception as e:
