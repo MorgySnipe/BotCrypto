@@ -335,23 +335,37 @@ async def process_symbol(symbol):
 
             trades[symbol]["stop"] = stop
 
+           # Niveaux TP
             tp1_level = 1.5 * atr
             tp2_level = 3 * atr
             tp3_level = 5 * atr
 
+           # Initialiser historique TP
+            if "tp_times" not in trades[symbol]:
+               trades[symbol]["tp_times"] = {}
+
+           # TP1
             if gain >= tp1_level / entry * 100 and not trades[symbol].get("tp1", False):
-               trades[symbol]["tp1"] = True
-               await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 atteint sur {symbol} | Gain +{gain:.2f}%")
+                trades[symbol]["tp1"] = True
+                trades[symbol]["tp_times"]["tp1"] = datetime.now()
+                await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP1 atteint sur {symbol} | Gain +{gain:.2f}%")
 
+           # TP2 (attendre au moins 2 min après TP1)
             if gain >= tp2_level / entry * 100 and not trades[symbol].get("tp2", False):
-               trades[symbol]["tp2"] = True
-               await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP2 atteint sur {symbol} | Gain +{gain:.2f}%")
+                last_tp1_time = trades[symbol]["tp_times"].get("tp1")
+                if not last_tp1_time or (datetime.now() - last_tp1_time).total_seconds() >= 120:
+                    trades[symbol]["tp2"] = True
+                    trades[symbol]["tp_times"]["tp2"] = datetime.now()
+                    await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP2 atteint sur {symbol} | Gain +{gain:.2f}%")
 
+           # TP3 (attendre au moins 2 min après TP2)
             if gain >= tp3_level / entry * 100 and not trades[symbol].get("tp3", False):
-               trades[symbol]["tp3"] = True
-               await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP3 atteint sur {symbol} | Gain +{gain:.2f}%")
-               sell = True
-
+                last_tp2_time = trades[symbol]["tp_times"].get("tp2")
+                if not last_tp2_time or (datetime.now() - last_tp2_time).total_seconds() >= 120:
+                    trades[symbol]["tp3"] = True
+                    trades[symbol]["tp_times"]["tp3"] = datetime.now()
+                    await bot.send_message(chat_id=CHAT_ID, text=f"🟢 TP3 atteint sur {symbol} | Gain +{gain:.2f}%")
+                    sell = True
 
             if trades[symbol].get("tp1", False) and gain < 1:
                 sell = True
