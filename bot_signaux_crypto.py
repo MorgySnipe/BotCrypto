@@ -31,6 +31,82 @@ history = []
 last_trade_time = {}
 LOG_FILE = "trade_log.csv"  
 
+# ====== META / HELPERS POUR MESSAGES & IDs ======
+BOT_VERSION = "v1.0.0"
+
+def utc_now_str():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+def make_trade_id(symbol: str) -> str:
+    return f"{symbol}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+
+def st_onoff(st_bool: bool) -> str:
+    return "ON" if st_bool else "OFF"
+
+def format_entry_msg(symbol, trade_id, strategy, bot_version, entry, position_pct,
+                     sl_initial, sl_dist_pct, atr,
+                     rsi_1h, macd, signal, adx,
+                     ema25, ema50_4h, ema200_1h, ema200_4h,
+                     vol5, vol20, vol_ratio,
+                     btc_up, eth_up,
+                     score, score_label,
+                     reasons: list[str]):
+    return (
+        f"🟢 ACHAT | {symbol} | trade_id={trade_id}\n"
+        f"⏱ UTC: {utc_now_str()} | Stratégie: {strategy} | Version: {bot_version}\n"
+        f"🎯 Prix entrée: {entry:.4f} | Taille: {position_pct:.1f}%\n"
+        f"🛡 Stop initial: {sl_initial:.4f} (dist: {sl_dist_pct:.2f}%) | ATR(1h): {atr:.4f}\n"
+        f"🎯 TP1/TP2/TP3: +1.5% / +3% / +5% (dynamiques)\n\n"
+        f"📊 Indicateurs 1H: RSI {rsi_1h:.2f} | MACD {macd:.4f}/{signal:.4f} | ADX {adx:.2f} | Supertrend {st_onoff(adx>=0)}\n"
+        f"📈 Tendances: EMA25 {ema25:.4f} | EMA50(4h) {ema50_4h:.4f} | EMA200(1h) {ema200_1h:.4f} | EMA200(4h) {ema200_4h:.4f}\n"
+        f"📦 Volume: MA5 {vol5:.0f} | MA20 {vol20:.0f} | Ratio {vol_ratio:.2f}x\n"
+        f"🌐 Contexte marché: BTC uptrend={btc_up} | ETH uptrend={eth_up}\n"
+        f"🧠 Score fiabilité: {score}/10 — {score_label}\n\n"
+        f"📌 Raison d’entrée:\n- " + "\n- ".join(reasons)
+    )
+
+def format_tp_msg(n, symbol, trade_id, price, gain_pct, new_stop, stop_from_entry_pct, elapsed_h, action_after_tp):
+    return (
+        f"🟢 TP{n} ATTEINT | {symbol} | trade_id={trade_id}\n"
+        f"⏱ UTC: {utc_now_str()} | Gain courant: {gain_pct:.2f}% | Prix: {price:.4f}\n"
+        f"📌 Actions: {action_after_tp}\n"
+        f"🔒 Nouveau stop: {new_stop:.4f} | Distance vs entrée: {stop_from_entry_pct:.2f}%\n"
+        f"⏳ Temps depuis entrée: {elapsed_h:.2f} h"
+    )
+
+def format_hold_msg(symbol, trade_id, price, gain_pct, stop, atr_mult, rsi_1h, macd, signal, adx):
+    return (
+        f"ℹ️ MÀJ TRADE | {symbol} | trade_id={trade_id}\n"
+        f"⏱ UTC: {utc_now_str()} | Prix: {price:.4f} | Gain: {gain_pct:.2f}%\n"
+        f"🔧 Stop traînant: {stop:.4f} (méthode: ATR x {atr_mult})\n"
+        f"📊 RSI {rsi_1h:.1f} | MACD {macd:.3f}/{signal:.3f} | ADX {adx:.1f}"
+    )
+
+def format_exit_msg(symbol, trade_id, exit_price, pnl_pct, stop, elapsed_h, exit_reason):
+    return (
+        f"🔴 SORTIE TECHNIQUE | {symbol} | trade_id={trade_id}\n"
+        f"⏱ UTC: {utc_now_str()} | Prix sortie: {exit_price:.4f} | P&L: {pnl_pct:.2f}%\n"
+        f"📌 Raison sortie: {exit_reason}\n"
+        f"🔒 Stop final au moment de la sortie: {stop:.4f}\n"
+        f"⏳ Durée du trade: {elapsed_h:.2f} h"
+    )
+
+def format_stop_msg(symbol, trade_id, stop_price, pnl_pct, rsi_1h, adx, vol_ratio):
+    return (
+        f"🔴 STOP TOUCHÉ | {symbol} | trade_id={trade_id}\n"
+        f"⏱ UTC: {utc_now_str()} | Stop: {stop_price:.4f} | P&L: {pnl_pct:.2f}%\n"
+        f"📊 Contexte à la sortie: RSI {rsi_1h:.1f} | ADX {adx:.1f} | Vol ratio {vol_ratio:.2f}x"
+    )
+
+def format_autoclose_msg(symbol, trade_id, exit_price, pnl_pct):
+    return (
+        f"⏰ AUTO-CLOSE 12h | {symbol} | trade_id={trade_id}\n"
+        f"⏱ UTC: {utc_now_str()} | Prix: {exit_price:.4f} | P&L: {pnl_pct:.2f}%\n"
+        f"📌 Raison: durée > 12h sans confirmation"
+    )
+# ====== /HELPERS ======
+
+
 def safe_message(text):
     return text if len(text) < 4000 else text[:3900] + "\n... (tronqué)"
 
