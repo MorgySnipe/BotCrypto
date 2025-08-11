@@ -420,14 +420,14 @@ async def process_symbol(symbol):
             if breakout:
             # --- Anti-chase / anti-pump (aggressive) ---
                last3_change = (closes[-1] - closes[-4]) / closes[-4]
-            if last3_change > 0.022:
+               if last3_change > 0.022:
                     print(f"{symbol} ❌ Impulsion récente trop forte (+{last3_change*100:.2f}%), on n'entre pas (aggr.)", flush=True)
                     return
 
                ema25 = compute_ema(closes, 25)
-        if price >= ema25 * 1.02:
-                print(f"{symbol} ❌ Prix trop éloigné de l'EMA25 (>2%), risque de chase (aggr.)", flush=True)
-                return
+               if price >= ema25 * 1.02:
+                    print(f"{symbol} ❌ Prix trop éloigné de l'EMA25 (>2%), risque de chase (aggr.)", flush=True)
+                    return
 
             indicators = {
                 "rsi": compute_rsi(closes),
