@@ -282,8 +282,8 @@ async def process_symbol(symbol):
            return
 
         buy = False
-label = ""
-position_pct = 5
+        label = ""
+        position_pct = 5
 
 # Conditions communes (confluence minimum)
 volume_ok = np.mean(volumes[-5:]) > np.mean(volumes[-20:])
