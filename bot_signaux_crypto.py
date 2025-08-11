@@ -904,74 +904,74 @@ async def process_symbol_aggressive(symbol):
         ]
 
 
-                # ---- Entrée ----
-                atr_val = atr_tv(klines)                # ATR version TV
-                ema200_1h = ema200                      # on a déjà ema200 (1h)
-                trade_id = make_trade_id(symbol)
+        # ---- Entrée ----
+        atr_val = atr_tv(klines)                # ATR version TV
+        ema200_1h = ema200                      # on a déjà ema200 (1h)
+        trade_id = make_trade_id(symbol)
 
-                trades[symbol] = {
-                    "entry": price,
-                    "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-                    "confidence": score,
-                    "stop": price - 0.6 * atr_val,
-                    "position_pct": 5,
-                    "trade_id": trade_id,
-                    "tp_times": {},
-                    "sl_initial": price - 0.6 * atr_val,
-                    "reason_entry": "; ".join(reasons),
-                }
-                last_trade_time[symbol] = datetime.now()
+        trades[symbol] = {
+            "entry": price,
+            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+            "confidence": score,
+            "stop": price - 0.6 * atr_val,
+            "position_pct": 5,
+            "trade_id": trade_id,
+            "tp_times": {},
+            "sl_initial": price - 0.6 * atr_val,
+            "reason_entry": "; ".join(reasons),
+        }
+        last_trade_time[symbol] = datetime.now()
 
-                # uptrends via cache préchargé (pas de requêtes)
-                btc_up = is_uptrend([float(k[4]) for k in market_cache.get("BTCUSDT", [])]) if market_cache.get("BTCUSDT") else False
-                eth_up = is_uptrend([float(k[4]) for k in market_cache.get("ETHUSDT", [])]) if market_cache.get("ETHUSDT") else False
+        # uptrends via cache préchargé (pas de requêtes)
+        btc_up = is_uptrend([float(k[4]) for k in market_cache.get("BTCUSDT", [])]) if market_cache.get("BTCUSDT") else False
+        eth_up = is_uptrend([float(k[4]) for k in market_cache.get("ETHUSDT", [])]) if market_cache.get("ETHUSDT") else False
 
-                msg = format_entry_msg(
-                    symbol, trade_id, "aggressive", BOT_VERSION, price, 5,
-                    trades[symbol]["sl_initial"], ((price - trades[symbol]["sl_initial"]) / price) * 100, atr_val,
-                    rsi, macd, signal, adx_value,
-                    supertrend_ok, ema25, ema50_4h, ema200_1h, ema200_4h,
-                    vol5, vol20, vol5 / max(vol20, 1e-9),
-                    btc_up, eth_up,
-                    score, label_conf, reasons
-                )
-                await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+        msg = format_entry_msg(
+            symbol, trade_id, "aggressive", BOT_VERSION, price, 5,
+            trades[symbol]["sl_initial"], ((price - trades[symbol]["sl_initial"]) / price) * 100, atr_val,
+            rsi, macd, signal, adx_value,
+            supertrend_ok, ema25, ema50_4h, ema200_1h, ema200_4h,
+            vol5, vol20, vol5 / max(vol20, 1e-9),
+            btc_up, eth_up,
+            score, label_conf, reasons
+        )
+        await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
 
-                # Logging CSV (BUY) COMPLET
-                log_trade_csv({
-                    "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                    "trade_id": trade_id,
-                    "symbol": symbol,
-                    "event": "BUY",
-                    "strategy": "aggressive",
-                    "version": BOT_VERSION,
-                    "entry": price,
-                    "exit": "",
-                    "price": price,
-                    "pnl_pct": "",
-                    "position_pct": 5,
-                    "sl_initial": trades[symbol]["sl_initial"],
-                    "sl_final": "",
-                    "atr_1h": atr_val,
-                    "atr_mult_at_entry": 0.6,
-                    "rsi_1h": rsi,
-                    "macd": macd,
-                    "signal": signal,
-                    "adx_1h": adx_value,
-                    "supertrend_on": supertrend_ok,
-                    "ema25_1h": ema25,
-                    "ema200_1h": ema200_1h,
-                    "ema50_4h": ema50_4h,
-                    "ema200_4h": ema200_4h,
-                    "vol_ma5": vol5,
-                    "vol_ma20": vol20,
-                    "vol_ratio": vol5 / max(vol20, 1e-9),
-                    "btc_uptrend": btc_up,
-                    "eth_uptrend": eth_up,
-                    "reason_entry": "; ".join(reasons),
-                    "reason_exit": ""
-                })
-                log_trade(symbol, "BUY", price)
+        # Logging CSV (BUY) COMPLET
+        log_trade_csv({
+            "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "trade_id": trade_id,
+            "symbol": symbol,
+            "event": "BUY",
+            "strategy": "aggressive",
+            "version": BOT_VERSION,
+            "entry": price,
+            "exit": "",
+            "price": price,
+            "pnl_pct": "",
+            "position_pct": 5,
+            "sl_initial": trades[symbol]["sl_initial"],
+            "sl_final": "",
+            "atr_1h": atr_val,
+            "atr_mult_at_entry": 0.6,
+            "rsi_1h": rsi,
+            "macd": macd,
+            "signal": signal,
+            "adx_1h": adx_value,
+            "supertrend_on": supertrend_ok,
+            "ema25_1h": ema25,
+            "ema200_1h": ema200_1h,
+            "ema50_4h": ema50_4h,
+            "ema200_4h": ema200_4h,
+            "vol_ma5": vol5,
+            "vol_ma20": vol20,
+            "vol_ratio": vol5 / max(vol20, 1e-9),
+            "btc_uptrend": btc_up,
+            "eth_uptrend": eth_up,
+            "reason_entry": "; ".join(reasons),
+            "reason_exit": ""
+        })
+        log_trade(symbol, "BUY", price)
 
 
         # ---- Gestion TP / HOLD / SELL ----
