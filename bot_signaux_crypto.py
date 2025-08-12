@@ -881,16 +881,6 @@ async def process_symbol_aggressive(symbol):
             if cooldown_left > 0:
                 return
 
-         # ---- Breakout + retest ----
-        last10_high = max(highs[-10:])
-        breakout = price > last10_high * 1.008
-        if not breakout:
-            return
-
-        last3_change = (closes[-1] - closes[-4]) / closes[-4]
-        if last3_change > 0.022:
-            return
-
         # ---- Conditions confluence ----
         supertrend_ok = compute_supertrend(klines)     # basé sur atr_tv
         above_ema200  = price > ema200                 # ema200 calculé plus haut
@@ -919,22 +909,37 @@ async def process_symbol_aggressive(symbol):
         if c4[-1] < ema50_4h or ema50_4h < ema200_4h:
             return
 
-        # ---- Breakout + retest ----
+        # ----- Breakout + Retest (UNIQUE) -----
         last10_high = max(highs[-10:])
+        retest_tolerance = 0.003  # ±0.3%
+
+        # breakout : prix au-dessus du plus haut des 10 dernières bougies (avec marge)
         breakout = price > last10_high * 1.008
         if not breakout:
+            log_refusal(symbol, f"Pas de breakout (prix={price}, plus_haut10j={last10_high})")
             return
 
-        last3_change = (closes[-1] - closes[-4]) / closes[-4]
+        # éviter un mouvement déjà trop étendu sur les 3 dernières bougies
+        last3_change = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
         if last3_change > 0.022:
+            log_refusal(symbol, f"Mouvement 3 bougies trop fort (+{last3_change*100:.2f}%)")
             return
 
-        ema25 = compute_ema(closes, 25)
-        if price >= ema25 * 1.02:
-            return
-        retest_tolerance = 0.003
-        if abs(price - last10_high) / last10_high > retest_tolerance and abs(price - ema25) / ema25 > retest_tolerance:
-            return
+        # retest valide = proche du niveau de breakout OU proche de l'EMA25
+        near_level = abs(price - last10_high) / last10_high <= retest_tolerance
+        near_ema25 = abs(price - ema25) / ema25 <= retest_tolerance
+
+       # éviter d’acheter trop loin de l’EMA25
+       too_far_from_ema25 = price >= ema25 * 1.02
+       if too_far_from_ema25:
+           log_refusal(symbol, f"Prix trop éloigné de l'EMA25 (+2%) (prix={price}, ema25={ema25})")
+           return
+
+       # si le prix n'est proche ni du niveau de breakout ni de l'EMA25
+       if not (near_level or near_ema25):
+           log_refusal(symbol, "Pas de retest valide (ni proche breakout, ni proche EMA25)")
+           return
+
 
         # ---- Indicateurs ----
         # ---- Scoring + raisons (en réutilisant les variables TV déjà calculées) ----
