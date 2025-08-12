@@ -202,22 +202,6 @@ def is_market_range(prices, threshold=0.01):
 def get_volatility(atr, price):
     return atr / price
 
-def compute_adx(klines, period=14):
-    highs = np.array([float(k[2]) for k in klines])
-    lows = np.array([float(k[3]) for k in klines])
-    closes = np.array([float(k[4]) for k in klines])
-    plus_dm = highs[1:] - highs[:-1]
-    minus_dm = lows[:-1] - lows[1:]
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-    tr = np.maximum(highs[1:], closes[:-1]) - np.minimum(lows[1:], closes[:-1])
-    atr = np.convolve(tr, np.ones(period)/period, mode='valid')
-    plus_di = 100 * np.convolve(plus_dm, np.ones(period)/period, mode='valid') / atr
-    minus_di = 100 * np.convolve(minus_dm, np.ones(period)/period, mode='valid') / atr
-    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = np.convolve(dx, np.ones(period)/period, mode='valid')
-    return adx[-1] if len(adx) > 0 else 0
-
 def compute_supertrend(klines, period=10, multiplier=3):
     atr = atr_tv(klines, period)          # <- au lieu de compute_atr
     highs  = np.array([float(k[2]) for k in klines])
@@ -544,7 +528,6 @@ async def process_symbol(symbol):
            log_refusal(symbol, f"Volatilité trop faible (ATR/price={volatility:.4f} < 0.005)")
            return
 
-        adx_value = compute_adx(klines)
         supertrend_signal = compute_supertrend(klines)
         if adx_value < 20:
            log_refusal(symbol, f"ADX 1h trop faible (adx={adx_value:.1f} < 20)")
