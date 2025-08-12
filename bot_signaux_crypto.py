@@ -7,6 +7,10 @@ import nest_asyncio
 import traceback
 import csv
 # [#imports-retry]
+# [#imports-ratelimit]
+import time
+import threading
+from telegram.error import RetryAfter, TimedOut, NetworkError
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -141,6 +145,32 @@ def format_autoclose_msg(symbol, trade_id, exit_price, pnl_pct):
 
 def safe_message(text):
     return text if len(text) < 4000 else text[:3900] + "\n... (tronqué)"
+
+# === Anti-flood Telegram (1 msg/s + RetryAfter/Timeout) ===
+_tg_lock = asyncio.Lock()
+_tg_last_send_ts = 0.0  # horloge monotonic, ~1 msg/s par chat
+
+async def tg_send(text: str, chat_id: int = CHAT_ID):
+    """Envoi Telegram avec anti-flood + gestion RetryAfter/Timeout."""
+    global _tg_last_send_ts
+    async with _tg_lock:
+        # 1) respecter ~1 msg / seconde
+        now = time.monotonic()
+        wait = max(0.0, 1.05 - (now - _tg_last_send_ts))  # petite marge
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+        # 2) envoi + reprises simples
+        try:
+            await bot.send_message(chat_id=chat_id, text=safe_message(text))
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+            await bot.send_message(chat_id=chat_id, text=safe_message(text))
+        except (TimedOut, NetworkError):
+            await asyncio.sleep(2)
+            await bot.send_message(chat_id=chat_id, text=safe_message(text))
+
+        _tg_last_send_ts = time.monotonic()
 
 def get_klines(symbol, interval='1h', limit=100):
     url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}'
@@ -469,9 +499,11 @@ async def process_symbol(symbol):
                     return
                 pnl = ((price - entry) / entry) * 100
                 trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
-                # message + log
+
+                # message + log (on utilise maintenant tg_send au lieu de bot.send_message)
                 msg = format_autoclose_msg(symbol, trade_id, price, pnl)
-                await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+                await tg_send(msg)
+
                 log_trade_csv({
                     "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                     "trade_id": trade_id,
@@ -505,6 +537,7 @@ async def process_symbol(symbol):
                     "reason_entry": trades[symbol].get("reason_entry", ""),
                     "reason_exit": "timeout > 12h"
                 })
+
                 log_trade(symbol, "SELL", price, pnl)
                 del trades[symbol]
                 return
@@ -533,8 +566,8 @@ async def process_symbol(symbol):
         # --- 4h ---
         klines_4h = get_cached(symbol, '4h')
         closes_4h = [float(k[4]) for k in klines_4h]
-        ema200_4h = compute_ema(closes_4h, 200)
-        ema50_4h  = compute_ema(closes_4h, 50)
+        ema200_4h = ema_tv(closes_4h, 200)
+        ema50_4h  = ema_tv(closes_4h, 50)
         rsi_4h    = rsi_tv(closes_4h, period=14)
 
         # Contexte marché via cache
@@ -558,7 +591,7 @@ async def process_symbol(symbol):
             log_refusal(symbol, f"RSI 4h {rsi_4h:.1f} < 50")
             return
         if is_market_range(closes_4h):
-            await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Marché en range sur {symbol} → Trade bloqué")
+            await tg_send(f"⚠️ Marché en range sur {symbol} → Trade bloqué")
             return
         if detect_rsi_divergence(closes, rsi_series): return
 
@@ -651,7 +684,7 @@ async def process_symbol(symbol):
 
             if rsi < 45 or macd < signal:
                 msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, "RSI bas ou MACD croisé à la baisse")
-                await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+                await tg_send(msg)
 
                 # LOG CSV SELL (sortie technique) standard
                 log_trade_csv({
@@ -710,7 +743,7 @@ async def process_symbol(symbol):
                             trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100,
                             elapsed_time, "Stop ajusté"
                         )
-                        await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+                        await tg_send(msg)
 
                         # LOG CSV TP standard
                         log_trade_csv({
@@ -751,7 +784,7 @@ async def process_symbol(symbol):
                 sell = True
             if price < trades[symbol]["stop"] or gain <= -1.5:
                 msg = format_stop_msg(symbol, trades[symbol]["trade_id"], trades[symbol]["stop"], gain, rsi, adx_value, np.mean(volumes[-5:]) / max(np.mean(volumes[-20:]), 1e-9))
-                await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+                await tg_send(msg)
                 sell = True
 
                 # LOG CSV STOP/SELL standard
@@ -821,14 +854,14 @@ async def process_symbol(symbol):
                 btc_up, eth_up,
                 confidence, label_conf, reasons
             )
-            await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+            await tg_send(msg)
             log_trade(symbol, "BUY", price)
 
         elif sell and symbol in trades:
             entry = trades[symbol]['entry']
             gain = ((price - entry) / entry) * 100
             stop_used = trades[symbol].get("stop", entry - 0.6 * atr)
-            await bot.send_message(chat_id=CHAT_ID, text=f"🔴 Vente {symbol} à {price:.4f} | Gain {gain:.2f}% | Stop final: {stop_used:.4f}")
+            await tg_send(f"🔴 Vente {symbol} à {price:.4f} | Gain {gain:.2f}% | Stop final: {stop_used:.4f}")
             log_trade(symbol, "SELL", price, gain)
             del trades[symbol]
 
@@ -852,7 +885,7 @@ async def process_symbol_aggressive(symbol):
                 trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
                 # Message auto-close
                 msg = format_autoclose_msg(symbol, trade_id, price, pnl)
-                await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+                await tg_send(msg)
 
                 # Log CSV
                 log_trade_csv({
@@ -1039,7 +1072,7 @@ async def process_symbol_aggressive(symbol):
             btc_up, eth_up,
             score, label_conf, reasons
         )
-        await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+        await tg_send(msg)
 
         # Logging CSV (BUY) COMPLET
         log_trade_csv({
@@ -1108,7 +1141,7 @@ async def process_symbol_aggressive(symbol):
                 trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100,
                 elapsed_time, "Stop >= prix d'entrée"
             )
-            await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+            await tg_send(msg)
 
             log_trade_csv({
                 "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1144,7 +1177,7 @@ async def process_symbol_aggressive(symbol):
                     trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100,
                     elapsed_time, "Stop > entrée (+1.5%)"
                 )
-                await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+                await tg_send(msg)
 
                 log_trade_csv({
                     "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1180,7 +1213,7 @@ async def process_symbol_aggressive(symbol):
                     trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100,
                     elapsed_time, "Stop > entrée (+3%)"
                 )
-                await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+                await tg_send(msg)
 
                 log_trade_csv({
                     "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1213,7 +1246,7 @@ async def process_symbol_aggressive(symbol):
                 symbol, trades[symbol]["trade_id"], price, gain,
                 trades[symbol]["stop"], elapsed_time, raison_sortie
             )
-            await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+            await tg_send(msg)
             log_trade_csv({
                 "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                 "trade_id": trades[symbol]["trade_id"],
@@ -1244,7 +1277,7 @@ async def process_symbol_aggressive(symbol):
                 symbol, trades[symbol]["trade_id"], trades[symbol]["stop"],
                 gain, rsi, adx_value, vol5 / max(vol20, 1e-9)
             )
-            await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+            await tg_send(msg)
             log_trade_csv({
                 "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                 "trade_id": trades[symbol]["trade_id"],
@@ -1284,15 +1317,15 @@ async def send_daily_summary():
     if not history: return
     recent = [h for h in history if is_recent(h.get("time", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))]
     if not recent:
-        await bot.send_message(chat_id=CHAT_ID, text="ℹ️ Aucun trade clôturé dans les dernières 24h.")
+        await tg_send("ℹ️ Aucun trade clôturé dans les dernières 24h.")
         return
     msg = "🌟 Récapitulatif des trades (24h) :\n"
     for h in recent:
         msg += f"📈 {h['symbol']} | Entrée {h['entry']:.2f} | Sortie {h['exit']:.2f} | {h['result']:.2f}%\n"
-    await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
+    await tg_send(msg)
 
 async def main_loop():
-    await bot.send_message(chat_id=CHAT_ID, text=f"🚀 Bot démarré {datetime.now().strftime('%H:%M:%S')}")
+    await tg_send(f"🚀 Bot démarré {datetime.now().strftime('%H:%M:%S')}")
     last_heartbeat = None
     last_summary_day = None  # 🆕 Ajout pour le résumé journalier
 
@@ -1302,7 +1335,7 @@ async def main_loop():
 
             # ✅ Message de vie toutes les heures
             if last_heartbeat != now.hour:
-                await bot.send_message(chat_id=CHAT_ID, text=f"✅ Bot actif {now.strftime('%H:%M')}")
+                await tg_send(f"✅ Bot actif {now.strftime('%H:%M')}")
                 last_heartbeat = now.hour
 
             # ✅ Résumé quotidien à 23h UTC
@@ -1329,7 +1362,7 @@ async def main_loop():
 
 
         except Exception as e:
-            await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Erreur : {e}")
+            await tg_send(f"⚠️ Erreur : {e}")
 
         await asyncio.sleep(SLEEP_SECONDS)
 
