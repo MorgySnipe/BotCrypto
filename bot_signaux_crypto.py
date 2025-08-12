@@ -147,6 +147,12 @@ def compute_ema_series(prices, period):
         ema.append(p * k + ema[-1] * (1 - k))
     return np.array(ema)
 
+def ema_tv(prices, period):
+    """EMA finale façon TradingView (dernière valeur de la série EMA récursive)."""
+    if not prices:
+        return 0.0
+    return float(compute_ema_series(prices, period)[-1])
+
 def compute_macd(prices, short=12, long=26, signal=9):
     """MACD avec EMA exponentielles réelles."""
     ema_short = compute_ema_series(prices, short)
@@ -486,10 +492,10 @@ async def process_symbol(symbol):
         rsi = rsi_tv(closes, period=14)
         rsi_series = rsi_tv_series(closes, period=14)
         macd, signal = compute_macd(closes)      # MACD EMA/EMA
-        ema200 = compute_ema(closes, 200)
+        ema200 = ema_tv(closes, 200)
         atr = atr_tv(klines, period=14)
         adx_value = adx_tv(klines, period=14)
-        ema25 = compute_ema(closes, 25)
+        ema25 = ema_tv(closes, 25)
 
         # --- 4h ---
         klines_4h = get_cached(symbol, '4h')
@@ -862,10 +868,10 @@ async def process_symbol_aggressive(symbol):
         # ---- Indicateurs (versions TradingView) ----
         rsi = rsi_tv(closes, period=14)
         macd, signal = compute_macd(closes)
-        ema200 = compute_ema(closes, 200)
+        ema200 = ema_tv(closes, 200)
         atr = atr_tv(klines, period=14)
         adx_value = adx_tv(klines, period=14)
-        ema25 = compute_ema(closes, 25)
+        ema25 = ema_tv(closes, 25)
         # pour comparer l'élan MACD vs bougie précédente
         macd_prev, signal_prev = compute_macd(closes[:-1])
 
@@ -904,8 +910,8 @@ async def process_symbol_aggressive(symbol):
         # ---- Confluence 4h ----
         k4 = get_cached(symbol, '4h')
         c4 = [float(k[4]) for k in k4]
-        ema50_4h = compute_ema(c4, 50)
-        ema200_4h = compute_ema(c4, 200)
+        ema50_4h = ema_tv(c4, 50)
+        ema200_4h = ema_tv(c4, 200)
         if c4[-1] < ema50_4h or ema50_4h < ema200_4h:
             return
 
