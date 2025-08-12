@@ -171,6 +171,35 @@ async def tg_send(text: str, chat_id: int = CHAT_ID):
             await bot.send_message(chat_id=chat_id, text=safe_message(text))
 
         _tg_last_send_ts = time.monotonic()
+# --- Envoi de fichier Telegram (anti-flood + retry) ---
+async def tg_send_doc(path: str, caption: str = "", chat_id: int = CHAT_ID):
+    import os
+    global _tg_last_send_ts
+
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        await tg_send(f"ℹ️ Fichier introuvable ou vide: {path}")
+        return
+
+    async with _tg_lock:
+        # respecter ~1 msg/s comme pour tg_send
+        now = time.monotonic()
+        wait = max(0.0, 1.05 - (now - _tg_last_send_ts))
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+        try:
+            with open(path, "rb") as f:
+                await bot.send_document(chat_id=chat_id, document=f, caption=safe_message(caption)[:1024])
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+            with open(path, "rb") as f:
+                await bot.send_document(chat_id=chat_id, document=f, caption=safe_message(caption)[:1024])
+        except (TimedOut, NetworkError):
+            await asyncio.sleep(2)
+            with open(path, "rb") as f:
+                await bot.send_document(chat_id=chat_id, document=f, caption=safe_message(caption)[:1024])
+
+        _tg_last_send_ts = time.monotonic()
 
 def get_klines(symbol, interval='1h', limit=100):
     url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}'
@@ -1314,20 +1343,32 @@ def is_recent(ts_str):
     return (datetime.now() - ts).total_seconds() <= 86400
 
 async def send_daily_summary():
-    if not history: return
+    if not history:
+        return
     recent = [h for h in history if is_recent(h.get("time", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))]
     if not recent:
         await tg_send("ℹ️ Aucun trade clôturé dans les dernières 24h.")
         return
+
     msg = "🌟 Récapitulatif des trades (24h) :\n"
     for h in recent:
         msg += f"📈 {h['symbol']} | Entrée {h['entry']:.2f} | Sortie {h['exit']:.2f} | {h['result']:.2f}%\n"
     await tg_send(msg)
 
+    # ⬇️ Envoi du CSV d’audit en pièce jointe
+    try:
+        await tg_send_doc(
+            CSV_AUDIT_FILE,
+            caption=f"trade_audit.csv — {datetime.now(timezone.utc).strftime('%Y-%m-%d')} (UTC)"
+        )
+    except Exception as e:
+        await tg_send(f"⚠️ Échec d’envoi de trade_audit.csv : {e}")
+
 async def main_loop():
     await tg_send(f"🚀 Bot démarré {datetime.now().strftime('%H:%M:%S')}")
     last_heartbeat = None
-    last_summary_day = None  # 🆕 Ajout pour le résumé journalier
+    last_summary_day = None
+    last_audit_day = None   
 
     while True:
         try:
