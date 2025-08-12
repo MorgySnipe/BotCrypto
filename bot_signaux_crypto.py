@@ -393,7 +393,7 @@ def log_refusal(symbol: str, reason: str):
         if header_needed:
             w.writeheader()
         w.writerow({
-            "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             "symbol": symbol,
             "reason": reason,
         })
@@ -401,13 +401,16 @@ def log_refusal(symbol: str, reason: str):
 def log_trade_csv(row: dict):
     """Écrit/append une ligne dans trade_audit.csv avec l'en-tête s'il manque."""
     import os, csv
-    header_needed = not os.path.exists(CSV_AUDIT_FILE) or os.path.getsize(CSV_AUDIT_FILE) == 0
+    header_needed = (not os.path.exists(CSV_AUDIT_FILE)
+                     or os.path.getsize(CSV_AUDIT_FILE) == 0)
     with open(CSV_AUDIT_FILE, "a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_AUDIT_FIELDS)
         if header_needed:
             w.writeheader()
-        # Ne garder que les champs attendus
         clean = {k: row.get(k, "") for k in CSV_AUDIT_FIELDS}
+        # si l'appelant n'a pas fourni ts_utc, on le remplit proprement en UTC
+        if not clean.get("ts_utc"):
+            clean["ts_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         w.writerow(clean)
 # ====== /CSV détaillé ======
 
