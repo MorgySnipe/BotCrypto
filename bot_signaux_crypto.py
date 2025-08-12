@@ -6,8 +6,26 @@ from telegram import Bot
 import nest_asyncio
 import traceback
 import csv
+# [#imports-retry]
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 nest_asyncio.apply()
+
+# [#http-session]
+REQUEST_TIMEOUT = (5, 15)  # (connexion, lecture) en secondes
+
+SESSION = requests.Session()
+_retry = Retry(
+    total=5,                # 5 tentatives max
+    backoff_factor=0.5,     # 0.5s, 1s, 2s, 4s...
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET"],  # ne retry que GET
+    raise_on_status=False,
+)
+_adapter = HTTPAdapter(max_retries=_retry, pool_connections=100, pool_maxsize=100)
+SESSION.mount("https://", _adapter)
+SESSION.mount("http://", _adapter)
 
 TELEGRAM_TOKEN = '7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac'
 CHAT_ID = 969925512
@@ -126,9 +144,13 @@ def safe_message(text):
 
 def get_klines(symbol, interval='1h', limit=100):
     url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}'
-    response = requests.get(url)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = SESSION.get(url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        print(f"❌ Erreur réseau get_klines({symbol}): {e}")
+        return []
 
 def compute_rsi(prices, period=14):
     deltas = np.diff(prices)
@@ -421,10 +443,14 @@ def label_confidence(score):
     else: return f"📊 Fiabilité : {score}/10 (Très Risqué)"
 
 def get_last_price(symbol):
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-    response = requests.get(url)
-    response.raise_for_status()
-    return float(response.json()['price'])
+    url = "https://api.binance.com/api/v3/ticker/price"
+    try:
+        resp = SESSION.get(url, params={"symbol": symbol}, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        return float(resp.json()["price"])
+    except requests.RequestException as e:
+        print(f"⚠️ Erreur réseau get_last_price({symbol}): {e}")
+        return None
 
 async def process_symbol(symbol):
     try:
@@ -435,9 +461,11 @@ async def process_symbol(symbol):
             if elapsed_time > 12:
                 entry = trades[symbol]['entry']
                 price = get_last_price(symbol)
+                if price is None:
+                    log_refusal(symbol, "API prix indisponible")
+                    return
                 pnl = ((price - entry) / entry) * 100
                 trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
-
                 # message + log
                 msg = format_autoclose_msg(symbol, trade_id, price, pnl)
                 await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
@@ -487,7 +515,9 @@ async def process_symbol(symbol):
         lows = [float(k[3]) for k in klines]
         volumes = [float(k[5]) for k in klines]
         price = get_last_price(symbol)
-
+        if price is None:
+            log_refusal(symbol, "API prix indisponible")
+            return
         # --- Indicateurs (versions TradingView) ---
         rsi = rsi_tv(closes, period=14)
         rsi_series = rsi_tv_series(closes, period=14)
@@ -812,9 +842,11 @@ async def process_symbol_aggressive(symbol):
             if elapsed_time > 12:
                 entry = trades[symbol]['entry']
                 price = get_last_price(symbol)
+                if price is None:
+                    log_refusal(symbol, "API prix indisponible")
+                    return               
                 pnl = ((price - entry) / entry) * 100
                 trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
-
                 # Message auto-close
                 msg = format_autoclose_msg(symbol, trade_id, price, pnl)
                 await bot.send_message(chat_id=CHAT_ID, text=safe_message(msg))
@@ -865,6 +897,9 @@ async def process_symbol_aggressive(symbol):
         lows = [float(k[3]) for k in klines]
         volumes = [float(k[5]) for k in klines]
         price = get_last_price(symbol)
+        if price is None:
+            log_refusal(symbol, "API prix indisponible")
+            return
         # ---- Indicateurs (versions TradingView) ----
         rsi = rsi_tv(closes, period=14)
         macd, signal = compute_macd(closes)
