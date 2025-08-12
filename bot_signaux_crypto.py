@@ -367,6 +367,25 @@ CSV_AUDIT_FIELDS = [
     "reason_entry","reason_exit"
 ]
 
+# ====== CSV refus d'entrée (diagnostic) ======
+REFUSAL_LOG_FILE = "refusal_log.csv"
+REFUSAL_FIELDS = ["ts_utc", "symbol", "reason"]
+
+def log_refusal(symbol: str, reason: str):
+    """Append une ligne dans refusal_log.csv (diagnostic des refus)."""
+    import os, csv
+    header_needed = (not os.path.exists(REFUSAL_LOG_FILE)
+                     or os.path.getsize(REFUSAL_LOG_FILE) == 0)
+    with open(REFUSAL_LOG_FILE, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=REFUSAL_FIELDS)
+        if header_needed:
+            w.writeheader()
+        w.writerow({
+            "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "symbol": symbol,
+            "reason": reason,
+        })
+
 def log_trade_csv(row: dict):
     """Écrit/append une ligne dans trade_audit.csv avec l'en-tête s'il manque."""
     import os, csv
@@ -499,29 +518,60 @@ async def process_symbol(symbol):
         btc_up = is_uptrend([float(k[4]) for k in market_cache.get('BTCUSDT', [])]) if market_cache.get('BTCUSDT') else False
         eth_up = is_uptrend([float(k[4]) for k in market_cache.get('ETHUSDT', [])]) if market_cache.get('ETHUSDT') else False
 
-        if not is_market_bullish(): return
-        if price < ema200 or closes_4h[-1] < ema200_4h or closes_4h[-1] < ema50_4h: return
-        if rsi_4h < 50: return
+        if not is_market_bullish():
+            log_refusal(symbol, "Marché global baissier (BTC/ETH pas en uptrend)")
+            return
+        # Filtres de tendance avec log    
+        if price < ema200:
+           log_refusal(symbol, "Prix < EMA200 (1h)")
+           return
+        if closes_4h[-1] < ema200_4h:
+           log_refusal(symbol, "Clôture 4h < EMA200(4h)")
+           return
+        if closes_4h[-1] < ema50_4h:
+           log_refusal(symbol, "Clôture 4h < EMA50(4h)")
+           return
+        if rsi_4h < 50:
+            log_refusal(symbol, f"RSI 4h {rsi_4h:.1f} < 50")
+            return
         if is_market_range(closes_4h):
             await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Marché en range sur {symbol} → Trade bloqué")
             return
         if detect_rsi_divergence(closes, rsi_series): return
 
         volatility = get_volatility(atr, price)
-        if volatility < 0.005: return
+        if volatility < 0.005:
+           log_refusal(symbol, f"Volatilité trop faible (ATR/price={volatility:.4f} < 0.005)")
+           return
 
         adx_value = compute_adx(klines)
         supertrend_signal = compute_supertrend(klines)
-        if adx_value < 20: return
-        if not supertrend_signal: return
+        if adx_value < 20:
+           log_refusal(symbol, f"ADX 1h trop faible (adx={adx_value:.1f} < 20)")
+           return
+
+        if not supertrend_signal:
+           log_refusal(symbol, "Supertrend 1h non haussier (signal=False)")
+           return
 
         if symbol in last_trade_time:
             cooldown_left = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds() / 3600
-            if cooldown_left > 0: return
-        if len(trades) >= MAX_TRADES: return
-        if not in_active_session(): return
-        if price > ema25 * 1.02: return
+            if cooldown_left > 0:
+                log_refusal(symbol, f"Cooldown actif ({cooldown_left:.2f}h restantes)")
+                return
 
+        if len(trades) >= MAX_TRADES:
+            log_refusal(symbol, f"Nombre max de trades atteint ({len(trades)}/{MAX_TRADES})")
+            return
+
+        if not in_active_session():
+            log_refusal(symbol, "Hors plage horaire de trading")
+            return
+
+        if price > ema25 * 1.02:
+           log_refusal(symbol, f"Prix trop éloigné de EMA25 (> +2%) (prix={price}, ema25={ema25})")
+           return
+            
         buy = False
         position_pct = 5
         indicators = {
