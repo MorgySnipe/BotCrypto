@@ -262,7 +262,7 @@ def rsi_tv(closes, period=14):
     last = rsi_series[~np.isnan(rsi_series)]
     return float(last[-1]) if len(last) else 50.0
     def rsi_tv_series(closes, period=14):
-    c = np.asarray(closes, dtype=float)
+        c = np.asarray(closes, dtype=float)
     if len(c) < period + 1:
         return np.full(len(c), np.nan)
 
