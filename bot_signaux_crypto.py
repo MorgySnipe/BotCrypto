@@ -261,6 +261,26 @@ def rsi_tv(closes, period=14):
     # Prend la dernière valeur finie, sinon 50
     last = rsi_series[~np.isnan(rsi_series)]
     return float(last[-1]) if len(last) else 50.0
+    def rsi_tv_series(closes, period=14):
+    c = np.asarray(closes, dtype=float)
+    if len(c) < period + 1:
+        return np.full(len(c), np.nan)
+
+    deltas = np.diff(c)
+    gains = np.where(deltas > 0, deltas, 0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
+
+    avg_gain = _rma(gains, period)
+    avg_loss = _rma(losses, period)
+
+    rs = avg_gain / np.where(avg_loss == 0, np.nan, avg_loss)
+    rsi_vals = 100.0 - (100.0 / (1.0 + rs))
+
+    # réaligne sur la longueur des closes
+    rsi_full = np.full(len(c), np.nan)
+    rsi_full[1:] = rsi_vals
+    return rsi_full
+
 
 def atr_tv(klines, period=14):
     """ATR version TV: TR lissé par RMA (Wilder)."""
@@ -460,6 +480,7 @@ async def process_symbol(symbol):
 
         # --- Indicateurs (versions TradingView) ---
         rsi = rsi_tv(closes, period=14)
+        rsi_series = rsi_tv_series(closes, period=14)
         macd, signal = compute_macd(closes)      # MACD EMA/EMA
         ema200 = compute_ema(closes, 200)
         atr = atr_tv(klines, period=14)
@@ -483,7 +504,7 @@ async def process_symbol(symbol):
         if is_market_range(closes_4h):
             await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Marché en range sur {symbol} → Trade bloqué")
             return
-        if detect_rsi_divergence(closes, rsis): return
+        if detect_rsi_divergence(closes, rsi_series): return
 
         volatility = get_volatility(atr, price)
         if volatility < 0.005: return
