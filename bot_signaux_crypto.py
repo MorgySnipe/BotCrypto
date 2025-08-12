@@ -259,7 +259,7 @@ def rsi_tv(closes, period=14):
     rs = avg_gain / np.where(avg_loss == 0, np.nan, avg_loss)
     rsi_series = 100.0 - (100.0 / (1.0 + rs))
     # Prend la dernière valeur finie, sinon 50
-        last = rsi_series[~np.isnan(rsi_series)]
+    last = rsi_series[~np.isnan(rsi_series)]
     return float(last[-1]) if len(last) else 50.0
 
 
