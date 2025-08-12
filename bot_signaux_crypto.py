@@ -929,16 +929,16 @@ async def process_symbol_aggressive(symbol):
         near_level = abs(price - last10_high) / last10_high <= retest_tolerance
         near_ema25 = abs(price - ema25) / ema25 <= retest_tolerance
 
-       # éviter d’acheter trop loin de l’EMA25
-       too_far_from_ema25 = price >= ema25 * 1.02
-       if too_far_from_ema25:
-           log_refusal(symbol, f"Prix trop éloigné de l'EMA25 (+2%) (prix={price}, ema25={ema25})")
-           return
+        # éviter d’acheter trop loin de l’EMA25
+        too_far_from_ema25 = price >= ema25 * 1.02
+        if too_far_from_ema25:
+            log_refusal(symbol, f"Prix trop éloigné de l'EMA25 (+2%) (prix={price}, ema25={ema25})")
+            return
 
-       # si le prix n'est proche ni du niveau de breakout ni de l'EMA25
-       if not (near_level or near_ema25):
-           log_refusal(symbol, "Pas de retest valide (ni proche breakout, ni proche EMA25)")
-           return
+        # si le prix n'est proche ni du niveau de breakout ni de l'EMA25
+        if not (near_level or near_ema25):
+            log_refusal(symbol, "Pas de retest valide (ni proche breakout, ni proche EMA25)")
+            return
 
 
         # ---- Indicateurs ----
