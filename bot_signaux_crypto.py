@@ -140,8 +140,16 @@ def format_autoclose_msg(symbol, trade_id, exit_price, pnl_pct):
         f"⏱ UTC: {utc_now_str()} | Prix: {exit_price:.4f} | P&L: {pnl_pct:.2f}%\n"
         f"📌 Raison: durée > 12h sans confirmation"
     )
-# ====== /HELPERS ======
+        f"↗️ Raison: durée > 12h sans confirmation"
+)
 
+# [#volume-helpers]
+def kline_vol_quote(k):  # k[7] = quote asset volume (ex: USDT)
+    return float(k[7])
+
+def volumes_series(klines, quote=True):
+    return [kline_vol_quote(k) for k in klines] if quote else [float(k[5]) for k in klines]
+# ====== /HELPERS ======
 
 def safe_message(text):
     return text if len(text) < 4000 else text[:3900] + "\n... (tronqué)"
@@ -262,7 +270,7 @@ def is_uptrend(prices, period=50):
     return prices[-1] > np.mean(prices[-period:])
 
 def is_volume_increasing(klines):
-    volumes = [float(k[5]) for k in klines]
+    volumes = volumes_series(klines, quote=True)
     return np.mean(volumes[-5:]) > np.mean(volumes[-10:-5]) and np.mean(volumes[-5:]) > MIN_VOLUME
 
 def is_market_bullish():
@@ -622,7 +630,7 @@ async def process_symbol(symbol):
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
         lows = [float(k[3]) for k in klines]
-        volumes = [float(k[5]) for k in klines]
+        volumes = volumes_series(klines, quote=True)
         price = get_last_price(symbol)
         if price is None:
             log_refusal(symbol, "API prix indisponible")
@@ -1004,7 +1012,7 @@ async def process_symbol_aggressive(symbol):
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
         lows = [float(k[3]) for k in klines]
-        volumes = [float(k[5]) for k in klines]
+        volumes = volumes_series(klines, quote=True)
         price = get_last_price(symbol)
         if price is None:
             log_refusal(symbol, "API prix indisponible")
