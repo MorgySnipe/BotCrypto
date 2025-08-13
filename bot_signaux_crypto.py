@@ -300,22 +300,60 @@ def compute_supertrend(klines, period=10, multiplier=3):
 
 # ====== Versions "TradingView-like" (RMA/Wilder) ======
 
+# [#rma-nansafe]
 def _rma(values, period):
-    """Wilder's RMA (comme TradingView): 
-       rma[0] = SMA(period)
-       rma[i] = (rma[i-1]*(period-1) + value[i]) / period
+    """
+    Wilder's RMA version NaN-safe:
+      - Seed = moyenne SANS NaN sur la 1ère fenêtre 'period'
+      - Si value[i] est NaN, on réutilise r[i-1] (carry-forward)
     """
     v = np.asarray(values, dtype=float)
+
     if len(v) < period:
         return np.array([])
+
     r = np.empty_like(v)
-    # seed = SMA des 'period' premiers
-    seed = np.mean(v[:period])
-    r[:period-1] = np.nan
-    r[period-1] = seed
+    r[:] = np.nan
+
+    # seed sur la 1ère fenêtre, sans NaN
+    first = v[:period]
+    seed = np.nanmean(first)
+
+    if np.isnan(seed):
+        # si la 1ère fenêtre est toute NaN, on glisse jusqu’à trouver une fenêtre valide
+        found = False
+        for start in range(0, len(v) - period + 1):
+            win = v[start:start + period]
+            m = np.nanmean(win)
+            if not np.isnan(m):
+                r[start + period - 1] = m
+                # itération à partir de cette seed
+                for i in range(start + period, len(v)):
+                    val = v[i]
+                    prev = r[i - 1]
+                    if np.isnan(prev):
+                        prev = m
+                    if np.isnan(val):
+                        r[i] = prev
+                    else:
+                        r[i] = (prev * (period - 1) + val) / period
+                found = True
+                break
+        if not found:
+            return r  # tout NaN → on renvoie NaN
+        return r
+
+    # seed standard
+    r[period - 1] = seed
     for i in range(period, len(v)):
-        r[i] = (r[i-1]*(period-1) + v[i]) / period
+        val = v[i]
+        prev = r[i - 1]
+        if np.isnan(val):
+            r[i] = prev  # carry-forward si NaN
+        else:
+            r[i] = (prev * (period - 1) + val) / period
     return r
+
 
 def rsi_tv(closes, period=14):
     """RSI version TV (gains/pertes lissés avec RMA)."""
