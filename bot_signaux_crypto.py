@@ -6,6 +6,7 @@ from telegram import Bot
 import nest_asyncio
 import traceback
 import csv
+import os, json
 # [#imports-retry]
 # [#imports-ratelimit]
 import time
@@ -24,7 +25,7 @@ _retry = Retry(
     total=5,                # 5 tentatives max
     backoff_factor=0.5,     # 0.5s, 1s, 2s, 4s...
     status_forcelist=[429, 500, 502, 503, 504],
-    allowed_methods=["GET"],  # ne retry que GET
+    allowed_methods=frozenset["GET"],  # ne retry que GET
     raise_on_status=False,
 )
 _adapter = HTTPAdapter(max_retries=_retry, pool_connections=100, pool_maxsize=100)
@@ -52,10 +53,41 @@ trades = {}
 history = []
 market_cache = {}
 last_trade_time = {}
-LOG_FILE = "trade_log.csv"  
+LOG_FILE = "trade_log.csv" 
+# --- Persistance des positions (survit aux redémarrages) ---
+PERSIST_FILE = "trades_state.json"
+
+def load_trades():
+    try:
+        with open(PERSIST_FILE, "r") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def save_trades():
+    try:
+        # on ne sérialise que des types simples
+        serializable = {}
+        for sym, t in trades.items():
+            d = dict(t)
+            # tp_times contient des datetimes -> on peut les omettre ou str()
+            if "tp_times" in d:
+                d["tp_times"] = {k: str(v) for k, v in d["tp_times"].items()}
+            serializable[sym] = d
+        with open(PERSIST_FILE, "w") as f:
+            json.dump(serializable, f)
+    except Exception as e:
+        print(f"⚠️ save_trades: {e}")
+
 
 # === Cache par itération pour limiter les requêtes ===
 symbol_cache = {}    # {"BTCUSDT": {"1h": [...], "4h": [...]}, ...}
+
+def _delete_trade(symbol):
+    if symbol in trades:
+        del trades[symbol]
+        save_trades()
 
 def get_cached(symbol, tf="1h", limit=LIMIT):
     """Retourne les klines depuis le cache local de l'itération."""
@@ -524,20 +556,25 @@ def log_trade_csv(row: dict):
 # ====== /CSV détaillé ======
 
 def trailing_stop_advanced(symbol, current_price):
-    if symbol in trades:
-        entry = trades[symbol]['entry']
-        gain = ((current_price - entry) / entry) * 100
-        atr_val = compute_atr(get_cached(symbol, '1h'))
-        current_stop = trades[symbol].get("stop", entry - 0.6 * atr_val)
-        if gain > 2:
-           trades[symbol]["stop"] = max(current_stop, current_price - 0.7 * atr_val)
-           current_stop = trades[symbol]["stop"]
-        if gain > 4:
-           trades[symbol]["stop"] = max(current_stop, current_price - 0.5 * atr_val)
-           current_stop = trades[symbol]["stop"]
-        if gain > 7:
-           trades[symbol]["stop"] = max(current_stop, current_price - 0.3 * atr_val)
+    if symbol not in trades:
+        return
+    entry = trades[symbol]['entry']
+    gain = ((current_price - entry) / entry) * 100
+    atr_val = compute_atr(get_cached(symbol, '1h'))
+    prev_stop = trades[symbol].get("stop", entry - 0.6 * atr_val)
 
+    new_stop = prev_stop
+    if gain > 2:
+        new_stop = max(new_stop, current_price - 0.7 * atr_val)
+    if gain > 4:
+        new_stop = max(new_stop, current_price - 0.5 * atr_val)
+    if gain > 7:
+        new_stop = max(new_stop, current_price - 0.3 * atr_val)
+
+    if new_stop != prev_stop:
+        trades[symbol]["stop"] = new_stop
+        save_trades()
+        
 def compute_confidence_score(indicators):
     score = 0
     if indicators["rsi"] > 50 and indicators["rsi"] < 70: score += 2
@@ -618,13 +655,16 @@ async def process_symbol(symbol):
                 })
 
                 log_trade(symbol, "SELL", price, pnl)
-                del trades[symbol]
+                _delete_trade(symbol)
                 return
 
         # ---------- Analyse standard ----------
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
 
-        klines = get_cached(symbol, '1h')  # 1h
+        klines = get_cached(symbol, '1h')# 1h
+        if not klines or len(klines) < 50:
+            log_refusal(symbol, "Données 1h insuffisantes")
+            return
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
         lows = [float(k[3]) for k in klines]
@@ -644,6 +684,9 @@ async def process_symbol(symbol):
 
         # --- 4h ---
         klines_4h = get_cached(symbol, '4h')
+        if not klines_4h or len(klines_4h) < 50:
+            log_refusal(symbol, "Données 4h insuffisantes")
+            return
         closes_4h = [float(k[4]) for k in klines_4h]
         ema200_4h = ema_tv(closes_4h, 200)
         ema50_4h  = ema_tv(closes_4h, 50)
@@ -801,7 +844,7 @@ async def process_symbol(symbol):
                 })
 
                 log_trade(symbol, "SELL", price, gain)
-                del trades[symbol]
+                _delete_trade(symbol)
                 return
 
             # TP progressifs
@@ -816,6 +859,7 @@ async def process_symbol(symbol):
                         trades[symbol]["tp_times"][f"tp{tp_num}"] = datetime.now()
                         new_stop = entry * (1 + (tp_pct - 0.5) / 100) if tp_num > 1 else entry
                         trades[symbol]["stop"] = max(stop, new_stop)
+                        save_trades()
 
                         msg = format_tp_msg(
                             tp_num, symbol, trades[symbol]["trade_id"], price, gain,
@@ -922,6 +966,7 @@ async def process_symbol(symbol):
                 "reason_entry": "; ".join(reasons) if reasons else ""
             }
             last_trade_time[symbol] = datetime.now()
+            save_trades()   # ⬅️ persiste la nouvelle position
 
             msg = format_entry_msg(
                 symbol, trade_id, "standard", BOT_VERSION, price, position_pct,
@@ -942,7 +987,7 @@ async def process_symbol(symbol):
             stop_used = trades[symbol].get("stop", entry - 0.6 * atr)
             await tg_send(f"🔴 Vente {symbol} à {price:.4f} | Gain {gain:.2f}% | Stop final: {stop_used:.4f}")
             log_trade(symbol, "SELL", price, gain)
-            del trades[symbol]
+            _delete_trade(symbol)
 
     except Exception as e:
         print(f"❌ Erreur {symbol}: {e}", flush=True)
@@ -1002,11 +1047,14 @@ async def process_symbol_aggressive(symbol):
                 })
 
                 log_trade(symbol, "SELL", price, pnl)
-                del trades[symbol]
+                _delete_trade(symbol)
                 return
 
         # ---- Analyse agressive ----
-        klines = get_cached(symbol, '1h')               # 1h
+        klines = get_cached(symbol, '1h')
+        if not klines or len(klines) < 50:
+            log_refusal(symbol, "Données 1h insuffisantes")
+            return
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
         lows = [float(k[3]) for k in klines]
@@ -1060,6 +1108,10 @@ async def process_symbol_aggressive(symbol):
 
         # ---- Confluence 4h ----
         k4 = get_cached(symbol, '4h')
+        if not k4 or len(k4) < 50:
+            log_refusal(symbol, "Données 4h insuffisantes")
+            return
+            
         c4 = [float(k[4]) for k in k4]
         ema50_4h = ema_tv(c4, 50)
         ema200_4h = ema_tv(c4, 200)
@@ -1119,8 +1171,7 @@ async def process_symbol_aggressive(symbol):
             f"ADX {adx_value:.1f} >= 22",
             f"MACD {macd:.3f} > Signal {signal:.3f}",
         ]
-
-
+        
         # ---- Entrée ----
         atr_val = atr_tv(klines)                # ATR version TV
         ema200_1h = ema200                      # on a déjà ema200 (1h)
@@ -1138,6 +1189,7 @@ async def process_symbol_aggressive(symbol):
             "reason_entry": "; ".join(reasons),
         }
         last_trade_time[symbol] = datetime.now()
+        save_trades()
 
         # uptrends via cache préchargé (pas de requêtes)
         btc_up = is_uptrend([float(k[4]) for k in market_cache.get("BTCUSDT", [])]) if market_cache.get("BTCUSDT") else False
@@ -1215,6 +1267,7 @@ async def process_symbol_aggressive(symbol):
             trades[symbol]["tp_times"]["tp1"] = datetime.now()
             # option : remonter le stop au prix d'entrée
             trades[symbol]["stop"] = max(stop, entry)
+            save_trades()
 
             msg = format_tp_msg(
                 1, symbol, trades[symbol]["trade_id"], price, gain,
@@ -1251,6 +1304,7 @@ async def process_symbol_aggressive(symbol):
                 trades[symbol]["tp_times"]["tp2"] = datetime.now()
                 # stop > entrée (+1.5%)
                 trades[symbol]["stop"] = max(trades[symbol]["stop"], entry * 1.015)
+                save_trades()
 
                 msg = format_tp_msg(
                     2, symbol, trades[symbol]["trade_id"], price, gain,
@@ -1287,7 +1341,8 @@ async def process_symbol_aggressive(symbol):
                 trades[symbol]["tp_times"]["tp3"] = datetime.now()
                 # stop > entrée (+3%)
                 trades[symbol]["stop"] = max(trades[symbol]["stop"], entry * 1.03)
-
+                save_trades()
+                
                 msg = format_tp_msg(
                     3, symbol, trades[symbol]["trade_id"], price, gain,
                     trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100,
@@ -1316,7 +1371,7 @@ async def process_symbol_aggressive(symbol):
                 })
 
                 log_trade(symbol, "SELL", price, gain)
-                del trades[symbol]
+                _delete_trade(symbol)
                 return
 
         # ---- Si TP1 pris puis le trade retombe trop ----
@@ -1347,38 +1402,54 @@ async def process_symbol_aggressive(symbol):
                 "reason_entry": trades[symbol]["reason_entry"], "reason_exit": raison_sortie
             })
             log_trade(symbol, "SELL", price, gain)
-            del trades[symbol]
+            _delete_trade(symbol)
             return
 
         # ---- Stop touché ou perte max ----
         if price < trades[symbol]["stop"] or gain <= -1.5:
-            raison_sortie = "Stop touché" if price < trades[symbol]["stop"] else "Perte max (-1.5%)"
             msg = format_stop_msg(
                 symbol, trades[symbol]["trade_id"], trades[symbol]["stop"],
                 gain, rsi, adx_value, vol5 / max(vol20, 1e-9)
             )
             await tg_send(msg)
+
+            event_name = "STOP" if price < trades[symbol]["stop"] else "SELL"
             log_trade_csv({
                 "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                 "trade_id": trades[symbol]["trade_id"],
                 "symbol": symbol,
-                "event": "STOP" if price < trades[symbol]["stop"] else "SELL",
-                "strategy": "aggressive",
+                "event": event_name,
+                "strategy": "aggressive",         # <- important
                 "version": BOT_VERSION,
-                "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
+                "entry": entry,
+                "exit": price,
+                "price": price,
+                "pnl_pct": gain,
                 "position_pct": trades[symbol]["position_pct"],
                 "sl_initial": trades[symbol]["sl_initial"],
                 "sl_final": trades[symbol]["stop"],
-                "atr_1h": atr_val_current, "atr_mult_at_entry": 0.6,
-                "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
-                "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
-                "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
-                "vol_ma5": vol5, "vol_ma20": vol20, "vol_ratio": vol5 / max(vol20, 1e-9),
-                "btc_uptrend": btc_up, "eth_uptrend": eth_up,
-                "reason_entry": trades[symbol]["reason_entry"], "reason_exit": raison_sortie
+                "atr_1h": atr_val_current,        # cohérent avec le reste de la section
+                "atr_mult_at_entry": 0.6,
+                "rsi_1h": rsi,
+                "macd": macd,
+                "signal": signal,
+                "adx_1h": adx_value,
+                "supertrend_on": supertrend_ok,   # <- bon nom ici
+                "ema25_1h": ema25,
+                "ema200_1h": ema200_1h,
+                "ema50_4h": ema50_4h,
+                "ema200_4h": ema200_4h,
+                "vol_ma5": vol5,
+                "vol_ma20": vol20,
+                "vol_ratio": vol5 / max(vol20, 1e-9),
+                "btc_uptrend": btc_up,
+                "eth_uptrend": eth_up,
+                "reason_entry": trades[symbol]["reason_entry"],
+                "reason_exit": "Stop touché" if event_name == "STOP" else "Perte max (-1.5%)"
             })
-            log_trade(symbol, "SELL", price, gain)
-            del trades[symbol]
+
+            log_trade(symbol, event_name, price, gain)
+            _delete_trade(symbol)
             return
 
         # ---- Trailing stop & HOLD ----
@@ -1417,6 +1488,14 @@ async def send_daily_summary():
 
 async def main_loop():
     await tg_send(f"🚀 Bot démarré {datetime.now().strftime('%H:%M:%S')}")
+    global trades
+    trades.update(load_trades())
+    for _sym, _t in trades.items():
+        try:
+            last_trade_time[_sym] = datetime.fromisoformat(_t.get("time"))
+        except Exception:
+           pass
+
     last_heartbeat = None
     last_summary_day = None
     last_audit_day = None   
