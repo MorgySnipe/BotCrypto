@@ -406,32 +406,38 @@ def atr_tv(klines, period=14):
     last = r[~np.isnan(r)]
     return float(last[-1]) if len(last) else 0.0
 
+# [#adx-tv-nansafe]
 def adx_tv(klines, period=14):
-    """ADX version TV (Wilder/RMA sur DM/DI/DX)."""
+    """ADX version TV (Wilder/RMA) NaN-safe."""
     highs = np.array([float(k[2]) for k in klines], dtype=float)
     lows  = np.array([float(k[3]) for k in klines], dtype=float)
     closes= np.array([float(k[4]) for k in klines], dtype=float)
-    if len(closes) < period+1:
+    n = len(closes)
+    if n < period + 1:
         return 0.0
 
     up_move   = highs[1:] - highs[:-1]
     down_move = lows[:-1] - lows[1:]
-    plus_dm  = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm   = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm  = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
 
-    # TR (comme atr_tv), puis lissage RMA
     prev_close = closes[:-1]
-    tr = np.maximum(highs[1:] - lows[1:], 
-         np.maximum(abs(highs[1:] - prev_close), abs(lows[1:] - prev_close)))
+    tr = np.maximum(highs[1:] - lows[1:],
+         np.maximum(np.abs(highs[1:] - prev_close), np.abs(lows[1:] - prev_close)))
 
     atr = _rma(tr, period)
-    pdi = 100.0 * (_rma(plus_dm, period) / atr)
-    mdi = 100.0 * (_rma(minus_dm, period) / atr)
+    atr_nozero = np.where(atr == 0, np.nan, atr)
 
-    dx  = 100.0 * (np.abs(pdi - mdi) / np.where((pdi + mdi) == 0, np.nan, (pdi + mdi)))
+    pdi = 100.0 * (_rma(plus_dm, period) / atr_nozero)
+    mdi = 100.0 * (_rma(minus_dm, period) / atr_nozero)
+
+    denom = pdi + mdi
+    denom = np.where(denom == 0, np.nan, denom)
+    dx = 100.0 * (np.abs(pdi - mdi) / denom)
+
     adx_series = _rma(dx, period)
-    last = adx_series[~np.isnan(adx_series)]
-    return float(last[-1]) if len(last) else 0.0
+    finite = adx_series[~np.isnan(adx_series)]
+    return float(finite[-1]) if finite.size else 0.0
 
 def detect_breakout_retest(closes, highs, lookback=10, tol=0.003):
     """
