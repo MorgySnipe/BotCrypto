@@ -1043,19 +1043,20 @@ async def process_symbol_aggressive(symbol):
 
         vol5   = np.mean(volumes[-5:])
         vol20  = np.mean(volumes[-20:])
-        volume_ok = (vol5 > vol20 * 1.2) and (vol5 > MIN_VOLUME)
+        volume_ok = (vol5 > vol20 * 1.1) and (vol5 > MIN_VOLUME)  # assoupli, en USDT
 
-        if not (supertrend_ok and adx_value >= 22 and above_ema200 and volume_ok):
+
+        if not (supertrend_ok and adx_value >= 18 and above_ema200 and volume_ok):
             return
+
 
         # Momentum MACD vs bougie précédente
         if not (macd > signal and (macd - signal) > (macd_prev - signal_prev)):
             return
 
         # RSI en zone constructive
-        if not (55 <= rsi < 80):
+        if not (52 <= rsi < 82):
             return
-
 
         # ---- Confluence 4h ----
         k4 = get_cached(symbol, '4h')
@@ -1067,10 +1068,10 @@ async def process_symbol_aggressive(symbol):
 
         # ----- Breakout + Retest (UNIQUE) -----
         last10_high = max(highs[-10:])
-        retest_tolerance = 0.003  # ±0.3%
+        retest_tolerance = 0.005  # ±0.3%
 
         # breakout : prix au-dessus du plus haut des 10 dernières bougies (avec marge)
-        breakout = price > last10_high * 1.008
+        breakout = price > last10_high * 1.004
         if not breakout:
             log_refusal(symbol, f"Pas de breakout (prix={price}, plus_haut10j={last10_high})")
             return
@@ -1086,7 +1087,7 @@ async def process_symbol_aggressive(symbol):
         near_ema25 = abs(price - ema25) / ema25 <= retest_tolerance
 
         # éviter d’acheter trop loin de l’EMA25
-        too_far_from_ema25 = price >= ema25 * 1.02
+        too_far_from_ema25 = price >= ema25 * 1.03
         if too_far_from_ema25:
             log_refusal(symbol, f"Prix trop éloigné de l'EMA25 (+2%) (prix={price}, ema25={ema25})")
             return
@@ -1110,7 +1111,7 @@ async def process_symbol_aggressive(symbol):
         }
         score = compute_confidence_score(indicators)
         label_conf = label_confidence(score)
-        if score < 6:
+        if score < 7:
             return
 
         reasons = [
