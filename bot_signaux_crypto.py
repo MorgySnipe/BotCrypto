@@ -140,9 +140,7 @@ def format_autoclose_msg(symbol, trade_id, exit_price, pnl_pct):
         f"⏱ UTC: {utc_now_str()} | Prix: {exit_price:.4f} | P&L: {pnl_pct:.2f}%\n"
         f"📌 Raison: durée > 12h sans confirmation"
     )
-        f"↗️ Raison: durée > 12h sans confirmation"
-)
-
+        
 # [#volume-helpers]
 def kline_vol_quote(k):  # k[7] = quote asset volume (ex: USDT)
     return float(k[7])
