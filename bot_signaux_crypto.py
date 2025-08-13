@@ -1039,7 +1039,7 @@ async def process_symbol_aggressive(symbol):
 
         # ---- Conditions confluence ----
         supertrend_ok = compute_supertrend(klines)     # basé sur atr_tv
-        above_ema200  = price > ema200                 # ema200 calculé plus haut
+        above_ema200  = price >= ema200 * 0.98                # ema200 calculé plus haut
 
         vol5   = np.mean(volumes[-5:])
         vol20  = np.mean(volumes[-20:])
@@ -1068,7 +1068,7 @@ async def process_symbol_aggressive(symbol):
 
         # ----- Breakout + Retest (UNIQUE) -----
         last10_high = max(highs[-10:])
-        retest_tolerance = 0.005  # ±0.3%
+        retest_tolerance = 0.005  # ±0.5%
 
         # breakout : prix au-dessus du plus haut des 10 dernières bougies (avec marge)
         breakout = price > last10_high * 1.004
