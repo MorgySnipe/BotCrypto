@@ -10,6 +10,7 @@ import os, json
 # [#imports-retry]
 # [#imports-ratelimit]
 import time
+import random
 import threading
 from telegram.error import RetryAfter, TimedOut, NetworkError
 from requests.adapters import HTTPAdapter
@@ -22,15 +23,59 @@ REQUEST_TIMEOUT = (5, 15)  # (connexion, lecture) en secondes
 
 SESSION = requests.Session()
 _retry = Retry(
-    total=5,                # 5 tentatives max
-    backoff_factor=0.5,     # 0.5s, 1s, 2s, 4s...
-    status_forcelist=[429, 500, 502, 503, 504],
-    allowed_methods = frozenset(["GET"]),  # ne retry que GET
+    total=5,
+    backoff_factor=0.5,  # 0.5s, 1s, 2s, 4s...
+    status_forcelist=[418, 429, 500, 502, 503, 504],  # <-- 418 ajouté
+    allowed_methods=frozenset(["GET"]),
     raise_on_status=False,
 )
 _adapter = HTTPAdapter(max_retries=_retry, pool_connections=100, pool_maxsize=100)
 SESSION.mount("https://", _adapter)
 SESSION.mount("http://", _adapter)
+
+# En-têtes "humains" (évite certains blocages)
+SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) BotCrypto/1.0 (+github)",
+    "Accept": "application/json",
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive",
+})
+
+# Bases Binance alternatives + rotation simple
+BINANCE_BASES = [
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://data-api.binance.vision",
+]
+_base_idx = 0
+def _rotate_base():
+    global _base_idx
+    _base_idx = (_base_idx + 1) % len(BINANCE_BASES)
+
+def binance_get(path, params=None, max_tries=6):
+    """GET robuste avec rotation de domaines et backoff + jitter."""
+    for attempt in range(max_tries):
+        base = BINANCE_BASES[_base_idx]
+        url = f"{base}{path}"
+        try:
+            resp = SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            # codes à contourner
+            if resp.status_code in (418, 429, 403, 500, 502, 503, 504):
+                print(f"⚠️ Binance {resp.status_code} {url} try {attempt+1}/{max_tries} → rotate")
+                _rotate_base()
+                # backoff exponentiel + petit bruit
+                time.sleep(min(0.5 * (2 ** attempt), 5.0) + random.uniform(0.05, 0.25))
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as e:
+            print(f"❌ Réseau {url}: {e} try {attempt+1}/{max_tries}")
+            _rotate_base()
+            time.sleep(min(0.5 * (2 ** attempt), 5.0) + random.uniform(0.05, 0.25))
+    return None
+
 
 TELEGRAM_TOKEN = '7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac'
 CHAT_ID = 969925512
@@ -269,14 +314,11 @@ async def tg_send_doc(path: str, caption: str = "", chat_id: int = CHAT_ID):
         _tg_last_send_ts = time.monotonic()
 
 def get_klines(symbol, interval='1h', limit=100):
-    url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}'
-    try:
-        response = SESSION.get(url, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        return response.json()
-    except requests.RequestException as e:
-        print(f"❌ Erreur réseau get_klines({symbol}): {e}")
+    data = binance_get("/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
+    if not data:
+        print(f"❌ Erreur réseau get_klines({symbol}) (après rotation)")
         return []
+    return data
 
 def compute_rsi(prices, period=14):
     deltas = np.diff(prices)
@@ -740,13 +782,13 @@ def label_confidence(score):
     else: return f"📊 Fiabilité : {score}/10 (Très Risqué)"
 
 def get_last_price(symbol):
-    url = "https://api.binance.com/api/v3/ticker/price"
+    data = binance_get("/api/v3/ticker/price", {"symbol": symbol})
+    if not data:
+        print(f"⚠️ Erreur réseau get_last_price({symbol}) (après rotation)")
+        return None
     try:
-        resp = SESSION.get(url, params={"symbol": symbol}, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        return float(resp.json()["price"])
-    except requests.RequestException as e:
-        print(f"⚠️ Erreur réseau get_last_price({symbol}): {e}")
+        return float(data["price"])
+    except Exception:
         return None
 
 async def process_symbol(symbol):
@@ -1940,6 +1982,7 @@ async def main_loop():
                 symbol_cache.setdefault(s, {})
                 symbol_cache[s]["1h"] = get_klines(s, interval="1h", limit=LIMIT)
                 symbol_cache[s]["4h"] = get_klines(s, interval="4h", limit=LIMIT)
+                await asyncio.sleep(0.08)  # ~80 ms entre requêtes
 
             # Contexte marché (on alimente market_cache avec le 1h préchargé)
             market_cache['BTCUSDT'] = symbol_cache.get('BTCUSDT', {}).get('1h', [])
