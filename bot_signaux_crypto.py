@@ -52,6 +52,11 @@ VOL_CONFIRM_LOOKBACK = 20
 VOL_CONFIRM_MULT = 1.5
 ANTI_SPIKE_UP_STD = 1.0   # % max d'extension de la bougie d'entrée (stratégie standard)
 ANTI_SPIKE_UP_AGR = 1.2   # % max d'extension (stratégie agressive)
+# --- Stops init en % ---
+INIT_SL_PCT_STD_MIN = 0.010  # 1.0% (standard)
+INIT_SL_PCT_STD_MAX = 0.012  # 1.2%
+INIT_SL_PCT_AGR_MIN = 0.010  # 1.0% (aggressive)
+INIT_SL_PCT_AGR_MAX = 0.012  # 1.2%
 
 
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -332,6 +337,18 @@ def is_market_range(prices, threshold=0.01):
 
 def get_volatility(atr, price):
     return atr / price
+
+def _clamp(x, a, b):
+    return max(a, min(b, x))
+
+def pick_sl_pct(volatility, pct_min, pct_max, v_hi=0.02):
+    """
+    Choisit un % de stop entre pct_min et pct_max selon la volatilité (ATR/price).
+    v_hi=0.02 => au-delà de 2% de vol (ATR/price), on prend pct_max.
+    """
+    v = _clamp(volatility, 0.0, v_hi)
+    t = 0.0 if v_hi == 0 else (v / v_hi)
+    return pct_min + (pct_max - pct_min) * t
 
 def compute_supertrend(klines, period=10, multiplier=3):
     atr = atr_tv(klines, period)          # <- au lieu de compute_atr
@@ -618,7 +635,7 @@ def trailing_stop_advanced(symbol, current_price):
     entry = trades[symbol]['entry']
     gain = ((current_price - entry) / entry) * 100
     atr_val = compute_atr(get_cached(symbol, '1h'))
-    prev_stop = trades[symbol].get("stop", entry - 0.6 * atr_val)
+    prev_stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", entry * (1 - INIT_SL_PCT_STD_MIN)))
 
     new_stop = prev_stop
     if gain > 2:
@@ -823,7 +840,7 @@ async def process_symbol(symbol):
             return
 
         vol_now = float(k15[-1][7])  # volume quote de la bougie 15m en cours
-        vol_ma20 = float(np.mean(vol15s[-(VOL_CONFIRM_LOOKBACK+1):-1]))  # 20 dernières complètes (on exclut la bougie en cours)
+        vol_ma20 = float(np.mean(vols15[-(VOL_CONFIRM_LOOKBACK+1):-1]))  # 20 dernières complètes (on exclut la bougie en cours)
         vol_ratio_15m = vol_now / max(vol_ma20, 1e-9)
 
         if vol_ratio_15m < VOL_CONFIRM_MULT:
@@ -876,7 +893,7 @@ async def process_symbol(symbol):
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
             gain = ((price - entry) / entry) * 100
-            stop = trades[symbol].get("stop", entry - 0.6 * atr)
+            stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN)))
             # [#fast-exit-5m-check-standard]
             # — Sortie dynamique rapide (5m) —
             triggered, fx = fast_exit_5m_trigger(symbol, entry, price)
@@ -904,9 +921,9 @@ async def process_symbol(symbol):
                     "price": price,
                     "pnl_pct": gain,
                     "position_pct": trades[symbol].get("position_pct", ""),
-                    "sl_initial": trades[symbol].get("sl_initial", entry - 0.6 * atr),
+                    "sl_initial": trades[symbol].get("sl_initial", ""),
                     "sl_final": stop,
-                    "atr_1h": atr, "atr_mult_at_entry": 0.6,
+                    "atr_mult_at_entry": "",
                     "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
                     "supertrend_on": supertrend_signal,
                     "ema25_1h": ema25, "ema200_1h": ema200, "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
@@ -927,11 +944,16 @@ async def process_symbol(symbol):
             else:
                 stop = max(stop, price - atr * 1.2)
 
-            if rsi < 45 or macd < signal:
-                msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, "RSI bas ou MACD croisé à la baisse")
+            if gain < 0.8 and (rsi < 48 or macd < signal):
+                raison = "Momentum cassé (sortie anticipée)"
+                msg = format_exit_msg(
+                    symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, raison
+                )
                 await tg_send(msg)
 
-                # LOG CSV SELL (sortie technique) standard
+                vol5_loc  = float(np.mean(volumes[-5:]))
+                vol20_loc = float(np.mean(volumes[-20:]))
+
                 log_trade_csv({
                     "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                     "trade_id": trades[symbol]["trade_id"],
@@ -944,10 +966,10 @@ async def process_symbol(symbol):
                     "price": price,
                     "pnl_pct": gain,
                     "position_pct": trades[symbol].get("position_pct", position_pct),
-                    "sl_initial": trades[symbol].get("sl_initial", entry - 0.6 * atr),
+                    "sl_initial": trades[symbol].get("sl_initial", ""),  # stop initial en %
                     "sl_final": stop,
                     "atr_1h": atr,
-                    "atr_mult_at_entry": 0.6,
+                    "atr_mult_at_entry": "",  # n/a (on n'utilise plus ATR*0.6)
                     "rsi_1h": rsi,
                     "macd": macd,
                     "signal": signal,
@@ -957,13 +979,13 @@ async def process_symbol(symbol):
                     "ema200_1h": ema200,
                     "ema50_4h": ema50_4h,
                     "ema200_4h": ema200_4h,
-                    "vol_ma5": np.mean(volumes[-5:]),
-                    "vol_ma20": np.mean(volumes[-20:]),
-                    "vol_ratio": np.mean(volumes[-5:]) / max(np.mean(volumes[-20:]), 1e-9),
+                    "vol_ma5": vol5_loc,
+                    "vol_ma20": vol20_loc,
+                    "vol_ratio": vol5_loc / max(vol20_loc, 1e-9),
                     "btc_uptrend": btc_up,
                     "eth_uptrend": eth_up,
                     "reason_entry": trades[symbol].get("reason_entry", ""),
-                    "reason_exit": "RSI bas ou MACD croisé à la baisse"
+                    "reason_exit": raison
                 })
 
                 log_trade(symbol, "SELL", price, gain)
@@ -1004,10 +1026,10 @@ async def process_symbol(symbol):
                             "price": price,
                             "pnl_pct": gain,
                             "position_pct": trades[symbol].get("position_pct", position_pct),
-                            "sl_initial": trades[symbol].get("sl_initial", entry - 0.6 * atr),
+                            "sl_initial": trades[symbol].get("sl_initial", ""),
                             "sl_final": trades[symbol]["stop"],
                             "atr_1h": atr,
-                            "atr_mult_at_entry": 0.6,
+                            "atr_mult_at_entry": "",
                             "rsi_1h": rsi,
                             "macd": macd,
                             "signal": signal,
@@ -1047,10 +1069,10 @@ async def process_symbol(symbol):
                     "price": price,
                     "pnl_pct": gain,
                     "position_pct": trades[symbol].get("position_pct", position_pct),
-                    "sl_initial": trades[symbol].get("sl_initial", entry - 0.6 * atr),
+                    "sl_initial": trades[symbol].get("sl_initial", ""),
                     "sl_final": trades[symbol]["stop"],
                     "atr_1h": atr,
-                    "atr_mult_at_entry": 0.6,
+                    "atr_mult_at_entry": "",
                     "rsi_1h": rsi,
                     "macd": macd,
                     "signal": signal,
@@ -1075,7 +1097,8 @@ async def process_symbol(symbol):
         # --- Entrée (BUY) ---
         if buy and symbol not in trades:
             trade_id = make_trade_id(symbol)
-            sl_initial = price - 0.6 * atr
+            sl_pct = pick_sl_pct(volatility, INIT_SL_PCT_STD_MIN, INIT_SL_PCT_STD_MAX)
+            sl_initial = price * (1.0 - sl_pct)
 
             trades[symbol] = {
                 "entry": price,
@@ -1107,7 +1130,7 @@ async def process_symbol(symbol):
         elif sell and symbol in trades:
             entry = trades[symbol]['entry']
             gain = ((price - entry) / entry) * 100
-            stop_used = trades[symbol].get("stop", entry - 0.6 * atr)
+            stop_used = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN)))
             await tg_send(f"🔴 Vente {symbol} à {price:.4f} | Gain {gain:.2f}% | Stop final: {stop_used:.4f}")
             log_trade(symbol, "SELL", price, gain)
             _delete_trade(symbol)
@@ -1262,7 +1285,7 @@ async def process_symbol_aggressive(symbol):
         near_ema25 = abs(price - ema25) / ema25 <= retest_tolerance
 
         # éviter d’acheter trop loin de l’EMA25
-        too_far_from_ema25 = price >= ema25 * 1.03
+        too_far_from_ema25 = price >= ema25 * 1.02
         if too_far_from_ema25:
             log_refusal(symbol, f"Prix trop éloigné de l'EMA25 (+2%) (prix={price}, ema25={ema25})")
             return
@@ -1320,18 +1343,23 @@ async def process_symbol_aggressive(symbol):
         
         # ---- Entrée ----
         atr_val = atr_tv(klines)                # ATR version TV
-        ema200_1h = ema200                      # on a déjà ema200 (1h)
+        ema200_1h = ema200
         trade_id = make_trade_id(symbol)
+
+        # stop initial élargi 1.0–1.2% selon la vol (ATR/price)
+        vol_init = atr_val / max(price, 1e-9)
+        sl_pct_init = pick_sl_pct(vol_init, INIT_SL_PCT_AGR_MIN, INIT_SL_PCT_AGR_MAX)
+        sl_initial = price * (1.0 - sl_pct_init)
 
         trades[symbol] = {
             "entry": price,
             "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
             "confidence": score,
-            "stop": price - 0.6 * atr_val,
+            "stop": sl_initial,
             "position_pct": 5,
             "trade_id": trade_id,
             "tp_times": {},
-            "sl_initial": price - 0.6 * atr_val,
+            "sl_initial": sl_initial,
             "reason_entry": "; ".join(reasons),
         }
         last_trade_time[symbol] = datetime.now()
@@ -1368,7 +1396,7 @@ async def process_symbol_aggressive(symbol):
             "sl_initial": trades[symbol]["sl_initial"],
             "sl_final": "",
             "atr_1h": atr_val,
-            "atr_mult_at_entry": 0.6,
+            "atr_mult_at_entry": "",
             "rsi_1h": rsi,
             "macd": macd,
             "signal": signal,
@@ -1396,7 +1424,7 @@ async def process_symbol_aggressive(symbol):
 
         entry = trades[symbol]["entry"]
         gain  = ((price - entry) / entry) * 100
-        stop  = trades[symbol].get("stop", entry - 0.6 * atr_val_current)
+        stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_AGR_MIN)))
         elapsed_time = (
             datetime.now(timezone.utc)
             - datetime.strptime(trades[symbol]["time"], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
@@ -1435,7 +1463,7 @@ async def process_symbol_aggressive(symbol):
                 "position_pct": trades[symbol]["position_pct"],
                 "sl_initial": trades[symbol]["sl_initial"],
                 "sl_final": trades[symbol]["stop"],
-                "atr_1h": atr_val_current, "atr_mult_at_entry": 0.6,
+                "atr_1h": atr_val_current, "atr_mult_at_entry": "",
                 "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
                 "supertrend_on": supertrend_ok,
                 "ema25_1h": ema25, "ema200_1h": ema200_1h, "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
@@ -1448,6 +1476,58 @@ async def process_symbol_aggressive(symbol):
             log_trade(symbol, "SELL", price, gain)
             _delete_trade(symbol)
             return
+
+        # ---- Sortie anticipée "momentum cassé" (aggressive) ----
+        # Si on n'a pas déclenché la sortie rapide 5m,
+        # on sort tôt si le momentum se dégrade alors que le gain est encore faible.
+        if gain < 0.8 and (rsi < 48 or macd < signal):
+            raison = "Momentum cassé (sortie anticipée)"
+            msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, raison)
+            await tg_send(msg)
+
+            # Petites stats volume (1h) pour le CSV
+            vol5_loc = float(np.mean(volumes[-5:]))
+            vol20_loc = float(np.mean(volumes[-20:]))
+
+            # LOG CSV SELL (aggressive)
+            log_trade_csv({
+                "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "trade_id": trades[symbol]["trade_id"],
+                "symbol": symbol,
+                "event": "SELL",
+                "strategy": "aggressive",
+                "version": BOT_VERSION,
+                "entry": entry,
+                "exit": price,
+                "price": price,
+                "pnl_pct": gain,
+                "position_pct": trades[symbol]["position_pct"],
+                "sl_initial": trades[symbol]["sl_initial"],
+                "sl_final": stop,
+                "atr_1h": atr_val_current,
+                "atr_mult_at_entry": "",  # plus d'ATR*0.6
+                "rsi_1h": rsi,
+                "macd": macd,
+                "signal": signal,
+                "adx_1h": adx_value,
+                "supertrend_on": supertrend_ok,
+                "ema25_1h": ema25,
+                "ema200_1h": ema200_1h,
+                "ema50_4h": ema50_4h,
+                "ema200_4h": ema200_4h,
+                "vol_ma5": vol5_loc,
+                "vol_ma20": vol20_loc,
+                "vol_ratio": vol5_loc / max(vol20_loc, 1e-9),
+                "btc_uptrend": btc_up,
+                "eth_uptrend": eth_up,
+                "reason_entry": trades[symbol]["reason_entry"],
+                "reason_exit": raison
+            })
+
+            log_trade(symbol, "SELL", price, gain)
+            _delete_trade(symbol)
+            return
+
 
 
         # ---- TP1 (≥ +1.5%) ----
@@ -1476,7 +1556,7 @@ async def process_symbol_aggressive(symbol):
                 "position_pct": trades[symbol]["position_pct"],
                 "sl_initial": trades[symbol]["sl_initial"],
                 "sl_final": trades[symbol]["stop"],
-                "atr_1h": atr_val_current, "atr_mult_at_entry": 0.6,
+                "atr_1h": atr_val_current, "atr_mult_at_entry": "",
                 "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
                 "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
                 "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
@@ -1513,7 +1593,7 @@ async def process_symbol_aggressive(symbol):
                     "position_pct": trades[symbol]["position_pct"],
                     "sl_initial": trades[symbol]["sl_initial"],
                     "sl_final": trades[symbol]["stop"],
-                    "atr_1h": atr_val_current, "atr_mult_at_entry": 0.6,
+                    "atr_1h": atr_val_current, "atr_mult_at_entry": "",
                     "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
                     "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
                     "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
@@ -1550,7 +1630,7 @@ async def process_symbol_aggressive(symbol):
                     "position_pct": trades[symbol]["position_pct"],
                     "sl_initial": trades[symbol]["sl_initial"],
                     "sl_final": trades[symbol]["stop"],
-                    "atr_1h": atr_val_current, "atr_mult_at_entry": 0.6,
+                    "atr_1h": atr_val_current, "atr_mult_at_entry": "",
                     "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
                     "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
                     "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
@@ -1582,7 +1662,7 @@ async def process_symbol_aggressive(symbol):
                 "position_pct": trades[symbol]["position_pct"],
                 "sl_initial": trades[symbol]["sl_initial"],
                 "sl_final": trades[symbol]["stop"],
-                "atr_1h": atr_val_current, "atr_mult_at_entry": 0.6,
+                "atr_1h": atr_val_current, "atr_mult_at_entry": "",
                 "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
                 "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
                 "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
@@ -1618,7 +1698,7 @@ async def process_symbol_aggressive(symbol):
                 "sl_initial": trades[symbol]["sl_initial"],
                 "sl_final": trades[symbol]["stop"],
                 "atr_1h": atr_val_current,        # cohérent avec le reste de la section
-                "atr_mult_at_entry": 0.6,
+                "atr_mult_at_entry": "",
                 "rsi_1h": rsi,
                 "macd": macd,
                 "signal": signal,
