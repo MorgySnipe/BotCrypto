@@ -52,6 +52,13 @@ VOL_CONFIRM_LOOKBACK = 20
 VOL_CONFIRM_MULT = 1.5
 ANTI_SPIKE_UP_STD = 1.0   # % max d'extension de la bougie d'entrée (stratégie standard)
 ANTI_SPIKE_UP_AGR = 1.2   # % max d'extension (stratégie agressive)
+# --- Trailing stop harmonisé (ATR TV) ---
+TRAIL_TIERS = [
+    (2.0, 0.8),  # gain >= 2%  -> stop = P - 0.8 * ATR
+    (4.0, 0.6),  # gain >= 4%  -> stop = P - 0.6 * ATR
+    (7.0, 0.4),  # gain >= 7%  -> stop = P - 0.4 * ATR
+]
+TRAIL_BE_AFTER = 1.5  # lock BE dès ~TP1 (≥ +1.5%)
 # --- Stops init en % ---
 INIT_SL_PCT_STD_MIN = 0.010  # 1.0% (standard)
 INIT_SL_PCT_STD_MAX = 0.012  # 1.2%
@@ -678,26 +685,43 @@ def log_trade_csv(row: dict):
             clean["ts_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         w.writerow(clean)
 # ====== /CSV détaillé ======
-
-def trailing_stop_advanced(symbol, current_price):
+def trailing_stop_advanced(symbol, current_price, atr_period=14):
+    """
+    Trailing stop harmonisé ATR (version TradingView).
+    - tiers de gain -> multiplicateurs d'ATR
+    - stop n'est JAMAIS abaissé (monotone)
+    - passage à BE quand gain ≥ TRAIL_BE_AFTER ou TP1 atteint
+    """
     if symbol not in trades:
         return
-    entry = trades[symbol]['entry']
-    gain = ((current_price - entry) / entry) * 100
-    atr_val = compute_atr(get_cached(symbol, '1h'))
-    prev_stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", entry * (1 - INIT_SL_PCT_STD_MIN)))
 
+    entry = float(trades[symbol]["entry"])
+    gain_pct = ((current_price - entry) / max(entry, 1e-9)) * 100.0
+
+    k1h = get_cached(symbol, "1h")
+    if not k1h:
+        return
+    atr_val = atr_tv(k1h, period=atr_period)
+
+    prev_stop = float(trades[symbol].get("stop", trades[symbol].get("sl_initial", entry)))
     new_stop = prev_stop
-    if gain > 2:
-        new_stop = max(new_stop, current_price - 0.7 * atr_val)
-    if gain > 4:
-        new_stop = max(new_stop, current_price - 0.5 * atr_val)
-    if gain > 7:
-        new_stop = max(new_stop, current_price - 0.3 * atr_val)
 
-    if new_stop != prev_stop:
+    # paliers ATR en fonction du gain
+    for thresh_gain, atr_mult in TRAIL_TIERS:
+        if gain_pct >= thresh_gain:
+            new_stop = max(new_stop, current_price - atr_mult * atr_val)
+
+    # lock BE après TP1 ou gain suffisant
+    if trades[symbol].get("tp1", False) or gain_pct >= TRAIL_BE_AFTER:
+        new_stop = max(new_stop, entry)
+
+    # garde-fou: stop < prix courant (évite stop immédiat par arrondi)
+    new_stop = min(new_stop, current_price * 0.999)
+
+    if new_stop > prev_stop:
         trades[symbol]["stop"] = new_stop
         save_trades()
+
         
 def compute_confidence_score(indicators):
     score = 0
@@ -1010,12 +1034,9 @@ async def process_symbol(symbol):
                 _delete_trade(symbol)
                 return
 
-            if volatility < 0.008:
-                stop = max(stop, price - atr * 0.5)
-            elif volatility < 0.015:
-                stop = max(stop, price - atr * 0.8)
-            else:
-                stop = max(stop, price - atr * 1.2)
+            trailing_stop_advanced(symbol, price)
+            stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN)))
+
 
             if gain < 0.8 and (rsi < 48 or macd < signal):
                 raison = "Momentum cassé (sortie anticipée)"
