@@ -112,6 +112,17 @@ INIT_SL_PCT_AGR_MAX = 0.012  # 1.2%
 # --- Auto-close (nouvelle logique) ---
 AUTO_CLOSE_MIN_H = 12   # seuil souple: on évalue mais on NE coupe pas systématiquement
 AUTO_CLOSE_HARD_H = 24  # sécurité: on coupe quoi qu'il arrive après 24h
+# --- Timeout intelligent (stagnation) ---
+SMART_TIMEOUT_EARLIEST_H_STD = 3      # on commence à vérifier après 3h (standard)
+SMART_TIMEOUT_EARLIEST_H_AGR = 2      # après 2h (aggressive)
+SMART_TIMEOUT_WINDOW_H       = 6      # on regarde les 6 dernières bougies 1h
+SMART_TIMEOUT_RANGE_PCT_STD  = 0.6    # si High-Low <= 0.6% de l'entrée (standard)
+SMART_TIMEOUT_RANGE_PCT_AGR  = 0.8    # 0.8% (aggressive un peu plus tolérant)
+SMART_TIMEOUT_MIN_GAIN_STD   = 0.8    # on ne coupe pas si déjà > +0.8% (standard)
+SMART_TIMEOUT_MIN_GAIN_AGR   = 0.5    # > +0.5% (aggressive)
+SMART_TIMEOUT_ADX_MAX        = 18     # ADX faible
+SMART_TIMEOUT_RSI_MAX        = 50     # RSI <= 50 = mou
+SMART_TIMEOUT_VOLRATIO_MAX   = 0.90   # MA5/MA20 volume <= 0.90x
 # === Filtre régime BTC ===
 BTC_1H_DROP_PCT      = 1.0   # blocage si -1.0% sur 1h
 BTC_3H_DROP_PCT      = 2.2   # ou -2.2% sur 3h
@@ -668,6 +679,46 @@ def detect_breakout_retest(closes, highs, lookback=10, tol=0.003):
 
     return (breakout and retest), level
 
+def smart_timeout_check(klines_1h, entry_price, window_h=SMART_TIMEOUT_WINDOW_H,
+                        range_pct=0.6):
+    """
+    Retourne (True, reason) si stagnation:
+    - range (high-low) des `window_h` dernières bougies <= range_pct% de l'entrée
+    - ET momentum faible (ADX bas + RSI <= 50 ou MACD <= signal)
+    - ET volume en décélération (MA5/MA20 <= SMART_TIMEOUT_VOLRATIO_MAX)
+    """
+    if not klines_1h or len(klines_1h) < max(window_h, 20):
+        return False, ""
+
+    closes = [float(k[4]) for k in klines_1h]
+    highs  = [float(k[2]) for k in klines_1h]
+    lows   = [float(k[3]) for k in klines_1h]
+
+    sub_h = highs[-window_h:]
+    sub_l = lows[-window_h:]
+    price_range_pct = ((max(sub_h) - min(sub_l)) / max(entry_price, 1e-9)) * 100.0
+
+    adx_now = adx_tv(klines_1h, 14)
+    rsi_now = rsi_tv(closes, 14)
+    macd_now, signal_now = compute_macd(closes)
+
+    vol = volumes_series(klines_1h, quote=True)
+    vol5 = float(np.mean(vol[-5:])) if len(vol) >= 5 else 0.0
+    vol20 = float(np.mean(vol[-20:])) if len(vol) >= 20 else 0.0
+    vol_ratio = (vol5 / max(vol20, 1e-9)) if vol20 else 0.0
+
+    cond_range    = price_range_pct <= range_pct
+    cond_momentum = (adx_now <= SMART_TIMEOUT_ADX_MAX) and (rsi_now <= SMART_TIMEOUT_RSI_MAX or macd_now <= signal_now)
+    cond_volume   = vol_ratio <= SMART_TIMEOUT_VOLRATIO_MAX
+
+    if cond_range and cond_momentum and cond_volume:
+        reason = (f"stagnation: range {price_range_pct:.2f}%/{window_h}h, "
+                  f"ADX {adx_now:.1f}, RSI {rsi_now:.1f}, "
+                  f"MACD {macd_now:.3f}≤{signal_now:.3f}, vol {vol_ratio:.2f}x")
+        return True, reason
+    return False, ""
+
+
 def log_trade(symbol, side, price, gain=0):
     with open(LOG_FILE, "a", newline="") as f:
         writer = csv.writer(f)
@@ -1033,6 +1084,41 @@ async def process_symbol(symbol):
             elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
             gain = ((price - entry) / entry) * 100
             stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN)))
+            # --- Timeout intelligent (STANDARD) ---
+            if (elapsed_time >= SMART_TIMEOUT_EARLIEST_H_STD
+                and gain < SMART_TIMEOUT_MIN_GAIN_STD
+                and not trades[symbol].get("tp1", False)):
+                k1h_now = get_cached(symbol, '1h')
+                trig, why = smart_timeout_check(k1h_now, entry,
+                                                window_h=SMART_TIMEOUT_WINDOW_H,
+                                                range_pct=SMART_TIMEOUT_RANGE_PCT_STD)
+                if trig:
+                    raison = f"Timeout intelligent (standard): {why}"
+                    msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, raison)
+                    await tg_send(msg)
+
+                    # log CSV
+                    vol5_loc  = float(np.mean(volumes[-5:]))
+                    vol20_loc = float(np.mean(volumes[-20:]))
+                    log_trade_csv({
+                        "trade_id": trades[symbol]["trade_id"], "symbol": symbol, "event": "SMART_TIMEOUT",
+                        "strategy": "standard", "version": BOT_VERSION,
+                        "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
+                        "position_pct": trades[symbol].get("position_pct", position_pct),
+                        "sl_initial": trades[symbol].get("sl_initial", ""), "sl_final": stop,
+                        "atr_1h": atr, "atr_mult_at_entry": "",
+                        "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                        "supertrend_on": supertrend_signal, "ema25_1h": ema25, "ema200_1h": ema200,
+                        "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
+                        "vol_ma5": vol5_loc, "vol_ma20": vol20_loc, "vol_ratio": vol5_loc / max(vol20_loc, 1e-9),
+                        "btc_uptrend": btc_up, "eth_uptrend": eth_up,
+                        "reason_entry": trades[symbol].get("reason_entry", ""), "reason_exit": raison
+                    })
+
+                    log_trade(symbol, "SELL", price, gain)
+                    _delete_trade(symbol)
+                    return
+
             # [#fast-exit-5m-check-standard]
             # — Sortie dynamique rapide (5m) —
             triggered, fx = fast_exit_5m_trigger(symbol, entry, price)
@@ -1615,6 +1701,41 @@ async def process_symbol_aggressive(symbol):
         # tendances BTC/ETH via le cache préchargé (pas de requêtes)
         btc_up = is_uptrend([float(k[4]) for k in market_cache.get("BTCUSDT", [])]) if market_cache.get("BTCUSDT") else False
         eth_up = is_uptrend([float(k[4]) for k in market_cache.get("ETHUSDT", [])]) if market_cache.get("ETHUSDT") else False
+
+        # --- Timeout intelligent (AGGRESSIVE) ---
+        if (elapsed_time >= SMART_TIMEOUT_EARLIEST_H_AGR
+            and gain < SMART_TIMEOUT_MIN_GAIN_AGR
+            and not trades[symbol].get("tp1", False)):
+            k1h_now = get_cached(symbol, '1h')
+            trig, why = smart_timeout_check(k1h_now, entry,
+                                            window_h=SMART_TIMEOUT_WINDOW_H,
+                                            range_pct=SMART_TIMEOUT_RANGE_PCT_AGR)
+            if trig:
+                raison = f"Timeout intelligent (aggressive): {why}"
+                msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, raison)
+                await tg_send(msg)
+
+                vol5_loc  = float(np.mean(volumes[-5:]))
+                vol20_loc = float(np.mean(volumes[-20:]))
+                log_trade_csv({
+                    "trade_id": trades[symbol]["trade_id"], "symbol": symbol, "event": "SMART_TIMEOUT",
+                    "strategy": "aggressive", "version": BOT_VERSION,
+                    "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
+                    "position_pct": trades[symbol]["position_pct"],
+                    "sl_initial": trades[symbol]["sl_initial"], "sl_final": stop,
+                    "atr_1h": atr_val_current, "atr_mult_at_entry": "",
+                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                    "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
+                    "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
+                    "vol_ma5": vol5_loc, "vol_ma20": vol20_loc, "vol_ratio": vol5_loc / max(vol20_loc, 1e-9),
+                    "btc_uptrend": btc_up, "eth_uptrend": eth_up,
+                    "reason_entry": trades[symbol]["reason_entry"], "reason_exit": raison
+                })
+
+                log_trade(symbol, "SELL", price, gain)
+                _delete_trade(symbol)
+                return
+
 
         # [#fast-exit-5m-check-aggressive]
         # — Sortie dynamique rapide (5m) —
