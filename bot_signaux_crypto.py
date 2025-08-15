@@ -47,6 +47,9 @@ SLEEP_SECONDS = 300
 MAX_TRADES = 7
 MIN_VOLUME = 1000000
 COOLDOWN_HOURS = 4
+VOL_CONFIRM_TF = "15m"
+VOL_CONFIRM_LOOKBACK = 20
+VOL_CONFIRM_MULT = 1.5
 ANTI_SPIKE_UP_STD = 1.0   # % max d'extension de la bougie d'entrée (stratégie standard)
 ANTI_SPIKE_UP_AGR = 1.2   # % max d'extension (stratégie agressive)
 
@@ -811,6 +814,21 @@ async def process_symbol(symbol):
         if spike_up_pct > ANTI_SPIKE_UP_STD:
             log_refusal(symbol, f"Anti-spike: bougie 1h déjà +{spike_up_pct:.2f}% > {ANTI_SPIKE_UP_STD:.1f}%")
             return
+            
+        # [#volume-confirm-standard]
+        k15 = get_cached(symbol, VOL_CONFIRM_TF, limit=max(25, VOL_CONFIRM_LOOKBACK + 5))
+        vols15 = volumes_series(k15, quote=True)
+        if len(vols15) < VOL_CONFIRM_LOOKBACK + 1:
+            log_refusal(symbol, "Données 15m insuffisantes (volume)")
+            return
+
+        vol_now = float(k15[-1][7])  # volume quote de la bougie 15m en cours
+        vol_ma20 = float(np.mean(vol15s[-(VOL_CONFIRM_LOOKBACK+1):-1]))  # 20 dernières complètes (on exclut la bougie en cours)
+        vol_ratio_15m = vol_now / max(vol_ma20, 1e-9)
+
+        if vol_ratio_15m < VOL_CONFIRM_MULT:
+            log_refusal(symbol, f"Volume 15m insuffisant ({vol_ratio_15m:.2f}x < {VOL_CONFIRM_MULT}x)")
+            return
 
         buy = False
         position_pct = 5
@@ -1263,7 +1281,21 @@ async def process_symbol_aggressive(symbol):
             log_refusal(symbol, f"Anti-spike (aggressive): bougie 1h déjà +{spike_up_pct:.2f}% > {ANTI_SPIKE_UP_AGR:.1f}%")
             return
 
+        # [#volume-confirm-aggressive]
+        k15 = get_cached(symbol, VOL_CONFIRM_TF, limit=max(25, VOL_CONFIRM_LOOKBACK + 5))
+        vols15 = volumes_series(k15, quote=True)
+        if len(vols15) < VOL_CONFIRM_LOOKBACK + 1:
+            log_refusal(symbol, "Données 15m insuffisantes (volume)")
+            return
 
+        vol_now = float(k15[-1][7])
+        vol_ma20 = float(np.mean(vols15[-(VOL_CONFIRM_LOOKBACK+1):-1]))
+        vol_ratio_15m = vol_now / max(vol_ma20, 1e-9)
+
+        if vol_ratio_15m < VOL_CONFIRM_MULT:
+            log_refusal(symbol, f"Volume 15m insuffisant ({vol_ratio_15m:.2f}x < {VOL_CONFIRM_MULT}x)")
+            return
+            
         # ---- Indicateurs ----
         # ---- Scoring + raisons (en réutilisant les variables TV déjà calculées) ----
         indicators = {
