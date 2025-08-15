@@ -60,6 +60,12 @@ INIT_SL_PCT_AGR_MAX = 0.012  # 1.2%
 # --- Auto-close (nouvelle logique) ---
 AUTO_CLOSE_MIN_H = 12   # seuil souple: on évalue mais on NE coupe pas systématiquement
 AUTO_CLOSE_HARD_H = 24  # sécurité: on coupe quoi qu'il arrive après 24h
+# === Filtre régime BTC ===
+BTC_1H_DROP_PCT      = 1.0   # blocage si -1.0% sur 1h
+BTC_3H_DROP_PCT      = 2.2   # ou -2.2% sur 3h
+BTC_ADX_WEAK         = 18    # momentum faible si ADX < 18
+BTC_RSI_FLOOR        = 48    # RSI bas
+BTC_REGIME_BLOCK_MIN = 90    # minutes de blocage des ALTS
 
 
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -67,6 +73,8 @@ trades = {}
 history = []
 market_cache = {}
 last_trade_time = {}
+btc_block_until  = None   # datetime UTC jusqu’à laquelle on bloque les alts
+btc_block_reason = ""     # mémo de la raison (pour logs)
 LOG_FILE = "trade_log.csv" 
 # --- Persistance des positions (survit aux redémarrages) ---
 PERSIST_FILE = "trades_state.json"
@@ -144,7 +152,7 @@ def format_entry_msg(symbol, trade_id, strategy, bot_version, entry, position_pc
         f"📦 Volume: MA5 {vol5:.0f} | MA20 {vol20:.0f} | Ratio {vol_ratio:.2f}x\n"
         f"🌐 Contexte marché: BTC uptrend={btc_up} | ETH uptrend={eth_up}\n"
         f"🧠 Score fiabilité: {score}/10 — {score_label}\n\n"
-        f"📌 Raison d’entrée:\n- " + "\n- ".join(reasons)
+        f"📌 Raison d’entrée:\n- " + ("\n- ".join(reasons) if reasons else "Setup multi-confluence")
     )
 
 def format_tp_msg(n, symbol, trade_id, price, gain_pct, new_stop, stop_from_entry_pct, elapsed_h, action_after_tp):
@@ -180,11 +188,11 @@ def format_stop_msg(symbol, trade_id, stop_price, pnl_pct, rsi_1h, adx, vol_rati
         f"📊 Contexte à la sortie: RSI {rsi_1h:.1f} | ADX {adx:.1f} | Vol ratio {vol_ratio:.2f}x"
     )
 
-def format_autoclose_msg(symbol, trade_id, exit_price, pnl_pct):
+def format_autoclose_msg(symbol, trade_id, exit_price, pnl_pct, mode="soft"):
+    label = "AUTO-CLOSE 24h (sécurité)" if mode == "hard" else "AUTO-CLOSE 12h (soft)"
     return (
-        f"⏰ AUTO-CLOSE 12h | {symbol} | trade_id={trade_id}\n"
-        f"⏱ UTC: {utc_now_str()} | Prix: {exit_price:.4f} | P&L: {pnl_pct:.2f}%\n"
-        f"📌 Raison: durée > 12h sans confirmation"
+        f"⏰ {label} | {symbol} | trade_id={trade_id}\n"
+        f"⏱ UTC: {utc_now_str()} | Prix: {exit_price:.4f} | P&L: {pnl_pct:.2f}%"
     )
         
 # [#volume-helpers]
@@ -326,6 +334,45 @@ def is_market_bullish():
         return is_uptrend(btc_prices) and is_uptrend(eth_prices)
     except Exception:
         return False
+
+def btc_regime_blocked():
+    """Retourne (blocked: bool, reason: str). Active un cooldown si BTC en régime négatif."""
+    global btc_block_until, btc_block_reason
+
+    k1h = market_cache.get("BTCUSDT", [])
+    if not k1h or len(k1h) < 10:
+        return False, ""
+
+    closes = [float(k[4]) for k in k1h]
+    drop1h = (closes[-1] - closes[-2]) / max(closes[-2], 1e-9) * 100.0
+    drop3h = (closes[-1] - closes[-4]) / max(closes[-4], 1e-9) * 100.0 if len(closes) >= 4 else 0.0
+
+    rsi  = rsi_tv(closes, period=14)
+    adx  = adx_tv(k1h, period=14)
+    macd, sig = compute_macd(closes)
+    st_ok = compute_supertrend(k1h)
+    ema25 = ema_tv(closes, 25)
+
+    bear_now = (
+        drop1h <= -BTC_1H_DROP_PCT
+        or drop3h <= -BTC_3H_DROP_PCT
+        or ((rsi < BTC_RSI_FLOOR or macd < sig) and adx < BTC_ADX_WEAK)
+        or (not st_ok and closes[-1] < ema25)
+    )
+
+    now = datetime.now(timezone.utc)
+    if bear_now:
+        btc_block_until  = now + timedelta(minutes=BTC_REGIME_BLOCK_MIN)
+        btc_block_reason = (f"BTC -{drop1h:.2f}%/1h, -{drop3h:.2f}%/3h, "
+                            f"RSI {rsi:.1f}, ADX {adx:.1f}, ST={st_onoff(st_ok)}")
+        return True, btc_block_reason
+
+    if btc_block_until and now < btc_block_until:
+        mins = (btc_block_until - now).total_seconds() / 60.0
+        return True, f"cooldown BTC {mins:.0f} min restant — {btc_block_reason}"
+
+    return False, ""
+
 
 
 def in_active_session():
@@ -681,7 +728,7 @@ def get_last_price(symbol):
 async def process_symbol(symbol):
     try:
         # --- Auto-close SOUPLE (ne coupe plus automatiquement à 12h) ---
-        if symbol in trades:
+        if symbol in trades and trades[symbol].get("strategy", "standard") == "standard":
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             elapsed_h = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
 
@@ -713,7 +760,8 @@ async def process_symbol(symbol):
 
                     if should_close_soft or force_close:
                         trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
-                        msg = format_autoclose_msg(symbol, trade_id, price, gain)
+                        mode = "hard" if force_close else "soft"
+                        msg = format_autoclose_msg(symbol, trade_id, price, gain, mode)
                         await tg_send(msg)
 
                         vol_ser = volumes_series(k1h, quote=True)
@@ -837,6 +885,13 @@ async def process_symbol(symbol):
             log_refusal(symbol, "Hors plage horaire de trading")
             return
 
+        # --- Filtre régime BTC ---
+        if symbol != "BTCUSDT":
+            blocked, why = btc_regime_blocked()
+            if blocked:
+                log_refusal(symbol, f"Filtre régime BTC: {why}")
+                return
+
         if price > ema25 * 1.02:
            log_refusal(symbol, f"Prix trop éloigné de EMA25 (> +2%) (prix={price}, ema25={ema25})")
            return
@@ -906,7 +961,7 @@ async def process_symbol(symbol):
 
         # === GESTION TP / HOLD / SELL ===
         sell = False
-        if symbol in trades:
+        if symbol in trades and trades[symbol].get("strategy", "standard") == "standard":
             entry = trades[symbol]['entry']
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
@@ -1017,6 +1072,12 @@ async def process_symbol(symbol):
             for tp_num, tp_pct in tp_levels.items():
                 if gain >= tp_pct and not trades[symbol].get(f"tp{tp_num}", False):
                     last_tp_time = trades[symbol]["tp_times"].get(f"tp{tp_num-1}") if tp_num > 1 else None
+                    if isinstance(last_tp_time, str):
+                        try:
+                            last_tp_time = datetime.fromisoformat(last_tp_time)
+                        except Exception:
+                            last_tp_time = None
+                            
                     if not last_tp_time or (datetime.now() - last_tp_time).total_seconds() >= 120:
                         trades[symbol][f"tp{tp_num}"] = True
                         trades[symbol]["tp_times"][f"tp{tp_num}"] = datetime.now()
@@ -1127,7 +1188,8 @@ async def process_symbol(symbol):
                 "trade_id": trade_id,
                 "tp_times": {},
                 "sl_initial": sl_initial,
-                "reason_entry": "; ".join(reasons) if reasons else ""
+                "reason_entry": "; ".join(reasons) if reasons else "",
+                "strategy": "standard",
             }
             last_trade_time[symbol] = datetime.now()
             save_trades()   # ⬅️ persiste la nouvelle position
@@ -1145,7 +1207,7 @@ async def process_symbol(symbol):
             await tg_send(msg)
             log_trade(symbol, "BUY", price)
 
-        elif sell and symbol in trades:
+        elif sell and symbol in trades and trades[symbol].get("strategy", "standard") == "standard":
             entry = trades[symbol]['entry']
             gain = ((price - entry) / entry) * 100
             stop_used = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN)))
@@ -1160,7 +1222,7 @@ async def process_symbol(symbol):
 async def process_symbol_aggressive(symbol):
     try:
         # ---- Auto-close SOUPLE (aggressive) ----
-        if symbol in trades:
+        if symbol in trades and trades[symbol].get("strategy") == "aggressive":
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             elapsed_h = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
 
@@ -1194,7 +1256,8 @@ async def process_symbol_aggressive(symbol):
 
                     if should_close_soft or force_close:
                         trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
-                        msg = format_autoclose_msg(symbol, trade_id, price, gain)
+                        mode = "hard" if force_close else "soft"
+                        msg = format_autoclose_msg(symbol, trade_id, price, gain, mode)
                         await tg_send(msg)
 
                         vol_ser = volumes_series(k1h, quote=True)
@@ -1277,6 +1340,13 @@ async def process_symbol_aggressive(symbol):
         if symbol in last_trade_time:
             cooldown_left = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds() / 3600
             if cooldown_left > 0:
+                return
+
+        # --- Filtre régime BTC (aggressive) ---
+        if symbol != "BTCUSDT":
+            blocked, why = btc_regime_blocked()
+            if blocked:
+                log_refusal(symbol, f"Filtre régime BTC: {why}")
                 return
 
         # ---- Conditions confluence ----
@@ -1385,7 +1455,7 @@ async def process_symbol_aggressive(symbol):
 
         reasons = [
             "Breakout+Retest validé",
-            f"ADX {adx_value:.1f} >= 22",
+            f"ADX {adx_value:.1f} >= 18",
             f"MACD {macd:.3f} > Signal {signal:.3f}",
         ]
         
@@ -1409,6 +1479,7 @@ async def process_symbol_aggressive(symbol):
             "tp_times": {},
             "sl_initial": sl_initial,
             "reason_entry": "; ".join(reasons),
+            "strategy": "aggressive",
         }
         last_trade_time[symbol] = datetime.now()
         save_trades()
@@ -1613,53 +1684,64 @@ async def process_symbol_aggressive(symbol):
                 "reason_entry": trades[symbol]["reason_entry"], "reason_exit": ""
             })
 
-        # ---- TP2 (≥ +3.0%) ----
-        if gain >= 3.0 and not trades[symbol].get("tp2", False):
-            last_tp1_time = trades[symbol]["tp_times"].get("tp1")
-            if not last_tp1_time or (datetime.now() - last_tp1_time).total_seconds() >= 120:
-                trades[symbol]["tp2"] = True
-                trades[symbol]["tp_times"]["tp2"] = datetime.now()
-                # stop > entrée (+1.5%)
-                trades[symbol]["stop"] = max(trades[symbol]["stop"], entry * 1.015)
-                save_trades()
+       # ---- TP2 (≥ +3.0%) ----
+       if gain >= 3.0 and not trades[symbol].get("tp2", False):
+           last_tp1_time = trades[symbol]["tp_times"].get("tp1")
+           if isinstance(last_tp1_time, str):
+               try:
+                   last_tp1_time = datetime.fromisoformat(last_tp1_time)
+               except Exception:
+                   last_tp1_time = None
 
-                msg = format_tp_msg(
-                    2, symbol, trades[symbol]["trade_id"], price, gain,
-                    trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100,
-                    elapsed_time, "Stop > entrée (+1.5%)"
-                )
-                await tg_send(msg)
+           if not last_tp1_time or (datetime.now() - last_tp1_time).total_seconds() >= 120:
+               trades[symbol]["tp2"] = True
+               trades[symbol]["tp_times"]["tp2"] = datetime.now()
+               trades[symbol]["stop"] = max(trades[symbol]["stop"], entry * 1.015)
+               save_trades()
 
-                log_trade_csv({
-                    "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                    "trade_id": trades[symbol]["trade_id"],
-                    "symbol": symbol,
-                    "event": "TP2",
-                    "strategy": "aggressive",
-                    "version": BOT_VERSION,
-                    "entry": entry, "exit": "", "price": price, "pnl_pct": gain,
-                    "position_pct": trades[symbol]["position_pct"],
-                    "sl_initial": trades[symbol]["sl_initial"],
-                    "sl_final": trades[symbol]["stop"],
-                    "atr_1h": atr_val_current, "atr_mult_at_entry": "",
-                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
-                    "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
-                    "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
-                    "vol_ma5": vol5, "vol_ma20": vol20, "vol_ratio": vol5 / max(vol20, 1e-9),
-                    "btc_uptrend": btc_up, "eth_uptrend": eth_up,
-                    "reason_entry": trades[symbol]["reason_entry"], "reason_exit": ""
-                })
+               msg = format_tp_msg(
+                   2, symbol, trades[symbol]["trade_id"], price, gain,
+                   trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100,
+                   elapsed_time, "Stop > entrée (+1.5%)"
+               )
+               await tg_send(msg)
+
+               log_trade_csv({
+                   "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                   "trade_id": trades[symbol]["trade_id"],
+                   "symbol": symbol,
+                   "event": "TP2",
+                   "strategy": "aggressive",
+                   "version": BOT_VERSION,
+                   "entry": entry, "exit": "", "price": price, "pnl_pct": gain,
+                   "position_pct": trades[symbol]["position_pct"],
+                   "sl_initial": trades[symbol]["sl_initial"],
+                   "sl_final": trades[symbol]["stop"],
+                   "atr_1h": atr_val_current, "atr_mult_at_entry": "",
+                   "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                   "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
+                   "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
+                   "vol_ma5": vol5, "vol_ma20": vol20, "vol_ratio": vol5 / max(vol20, 1e-9),
+                   "btc_uptrend": btc_up, "eth_uptrend": eth_up,
+                   "reason_entry": trades[symbol]["reason_entry"], "reason_exit": ""
+               })
+
 
         # ---- TP3 (≥ +5.0%) ----
         if gain >= 5.0 and not trades[symbol].get("tp3", False):
             last_tp2_time = trades[symbol]["tp_times"].get("tp2")
+            if isinstance(last_tp2_time, str):
+                try:
+                    last_tp2_time = datetime.fromisoformat(last_tp2_time)
+                except Exception:
+                    last_tp2_time = None
+
             if not last_tp2_time or (datetime.now() - last_tp2_time).total_seconds() >= 120:
                 trades[symbol]["tp3"] = True
                 trades[symbol]["tp_times"]["tp3"] = datetime.now()
-                # stop > entrée (+3%)
                 trades[symbol]["stop"] = max(trades[symbol]["stop"], entry * 1.03)
                 save_trades()
-                
+        
                 msg = format_tp_msg(
                     3, symbol, trades[symbol]["trade_id"], price, gain,
                     trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100,
@@ -1844,7 +1926,9 @@ async def main_loop():
 
             # Lancement des analyses
             await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
-            await asyncio.gather(*(process_symbol_aggressive(s) for s in SYMBOLS if s not in trades))
+            await asyncio.gather(*(process_symbol_aggressive(s)
+                                   for s in SYMBOLS
+                                   if (s not in trades) or (trades.get(s, {}).get("strategy") == "aggressive")))
 
             print("✔️ Itération terminée", flush=True)
 
