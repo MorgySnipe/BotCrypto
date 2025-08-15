@@ -1684,47 +1684,47 @@ async def process_symbol_aggressive(symbol):
                 "reason_entry": trades[symbol]["reason_entry"], "reason_exit": ""
             })
 
-       # ---- TP2 (≥ +3.0%) ----
-       if gain >= 3.0 and not trades[symbol].get("tp2", False):
-           last_tp1_time = trades[symbol]["tp_times"].get("tp1")
-           if isinstance(last_tp1_time, str):
-               try:
-                   last_tp1_time = datetime.fromisoformat(last_tp1_time)
-               except Exception:
-                   last_tp1_time = None
-
-           if not last_tp1_time or (datetime.now() - last_tp1_time).total_seconds() >= 120:
-               trades[symbol]["tp2"] = True
-               trades[symbol]["tp_times"]["tp2"] = datetime.now()
-               trades[symbol]["stop"] = max(trades[symbol]["stop"], entry * 1.015)
-               save_trades()
-
-               msg = format_tp_msg(
-                   2, symbol, trades[symbol]["trade_id"], price, gain,
-                   trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100,
-                   elapsed_time, "Stop > entrée (+1.5%)"
-               )
-               await tg_send(msg)
-
-               log_trade_csv({
-                   "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                   "trade_id": trades[symbol]["trade_id"],
-                   "symbol": symbol,
-                   "event": "TP2",
-                   "strategy": "aggressive",
-                   "version": BOT_VERSION,
-                   "entry": entry, "exit": "", "price": price, "pnl_pct": gain,
-                   "position_pct": trades[symbol]["position_pct"],
-                   "sl_initial": trades[symbol]["sl_initial"],
-                   "sl_final": trades[symbol]["stop"],
-                   "atr_1h": atr_val_current, "atr_mult_at_entry": "",
-                   "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
-                   "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
-                   "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
-                   "vol_ma5": vol5, "vol_ma20": vol20, "vol_ratio": vol5 / max(vol20, 1e-9),
-                   "btc_uptrend": btc_up, "eth_uptrend": eth_up,
-                   "reason_entry": trades[symbol]["reason_entry"], "reason_exit": ""
-               })
+        # ---- TP2 (≥ +3.0%) ----
+        if gain >= 3.0 and not trades[symbol].get("tp2", False):
+            last_tp1_time = trades[symbol]["tp_times"].get("tp1")
+            if isinstance(last_tp1_time, str):
+                try:
+                    last_tp1_time = datetime.fromisoformat(last_tp1_time)
+                except Exception:
+                    last_tp1_time = None
+ 
+            if not last_tp1_time or (datetime.now() - last_tp1_time).total_seconds() >= 120:
+                trades[symbol]["tp2"] = True
+                trades[symbol]["tp_times"]["tp2"] = datetime.now()
+                trades[symbol]["stop"] = max(trades[symbol]["stop"], entry * 1.015)
+                save_trades()
+ 
+                msg = format_tp_msg(
+                    2, symbol, trades[symbol]["trade_id"], price, gain,
+                    trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100,
+                    elapsed_time, "Stop > entrée (+1.5%)"
+                )
+                await tg_send(msg)
+ 
+                log_trade_csv({
+                    "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                    "trade_id": trades[symbol]["trade_id"],
+                    "symbol": symbol,
+                    "event": "TP2",
+                    "strategy": "aggressive",
+                    "version": BOT_VERSION,
+                    "entry": entry, "exit": "", "price": price, "pnl_pct": gain,
+                    "position_pct": trades[symbol]["position_pct"],
+                    "sl_initial": trades[symbol]["sl_initial"],
+                    "sl_final": trades[symbol]["stop"],
+                    "atr_1h": atr_val_current, "atr_mult_at_entry": "",
+                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                    "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
+                    "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
+                    "vol_ma5": vol5, "vol_ma20": vol20, "vol_ratio": vol5 / max(vol20, 1e-9),
+                    "btc_uptrend": btc_up, "eth_uptrend": eth_up,
+                    "reason_entry": trades[symbol]["reason_entry"], "reason_exit": ""
+                }) 
 
 
         # ---- TP3 (≥ +5.0%) ----
