@@ -25,7 +25,7 @@ _retry = Retry(
     total=5,                # 5 tentatives max
     backoff_factor=0.5,     # 0.5s, 1s, 2s, 4s...
     status_forcelist=[429, 500, 502, 503, 504],
-    allowed_methods=frozenset["GET"],  # ne retry que GET
+    allowed_methods = frozenset(["GET"]),  # ne retry que GET
     raise_on_status=False,
 )
 _adapter = HTTPAdapter(max_retries=_retry, pool_connections=100, pool_maxsize=100)
@@ -447,12 +447,85 @@ def atr_tv(klines, period=14):
 # [#adx-tv-nansafe]
 def adx_tv(klines, period=14):
     """ADX version TV (Wilder/RMA) NaN-safe."""
-    highs = np.array([float(k[2]) for k in klines], dtype=float)
-    lows  = np.array([float(k[3]) for k in klines], dtype=float)
-    closes= np.array([float(k[4]) for k in klines], dtype=float)
+    highs  = np.array([float(k[2]) for k in klines], dtype=float)
+    lows   = np.array([float(k[3]) for k in klines], dtype=float)
+    closes = np.array([float(k[4]) for k in klines], dtype=float)
     n = len(closes)
     if n < period + 1:
         return 0.0
+
+    up_move   = highs[1:] - highs[:-1]
+    down_move = lows[:-1] - lows[1:]
+    plus_dm   = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm  = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    prev_close = closes[:-1]
+    tr = np.maximum(highs[1:] - lows[1:],
+                    np.maximum(np.abs(highs[1:] - prev_close), np.abs(lows[1:] - prev_close)))
+
+    atr = _rma(tr, period)
+    atr_nozero = np.where(atr == 0, np.nan, atr)
+
+    pdi = 100.0 * (_rma(plus_dm, period) / atr_nozero)
+    mdi = 100.0 * (_rma(minus_dm, period) / atr_nozero)
+
+    denom = pdi + mdi
+    denom = np.where(denom == 0, np.nan, denom)
+    dx = 100.0 * (np.abs(pdi - mdi) / denom)
+
+    adx_series = _rma(dx, period)
+    finite = adx_series[~np.isnan(adx_series)]
+    return float(finite[-1]) if finite.size else 0.0
+
+
+# [#fast-exit-5m]
+def _last_two_finite(values):
+    arr = np.asarray(values, dtype=float)
+    finite = arr[~np.isnan(arr)]
+    if finite.size >= 2:
+        return float(finite[-2]), float(finite[-1])
+    return float('nan'), float('nan')
+
+def fast_exit_5m_trigger(symbol: str, entry: float, current_price: float):
+    """
+    Sortie dynamique (timeframe 5m) :
+    - Si gain >= +1% ET (RSI(5m) chute > 5 pts OU MACD(5m) croise à la baisse) -> True
+    Retourne (trigger: bool, info: dict)
+    """
+    try:
+        if entry <= 0 or current_price is None:
+            return False, {}
+        gain_pct = ((current_price - entry) / entry) * 100.0
+        if gain_pct < 1.0:
+            return False, {"gain_pct": gain_pct}
+
+        k5 = get_cached(symbol, '5m', limit=60)
+        if not k5 or len(k5) < 20:
+            return False, {"gain_pct": gain_pct}
+
+        closes5 = [float(k[4]) for k in k5]
+
+        # RSI(5m) : chute entre les 2 dernières clôtures
+        rsi5_series = rsi_tv_series(closes5, period=14)
+        rsi_prev, rsi_now = _last_two_finite(rsi5_series)
+        rsi_drop = (not np.isnan(rsi_prev) and not np.isnan(rsi_now) and (rsi_prev - rsi_now) > 5.0)
+
+        # MACD(5m) : croisement baissier récent
+        macd_now,  signal_now  = compute_macd(closes5)
+        macd_prev, signal_prev = compute_macd(closes5[:-1])
+        macd_cross_down = (macd_prev >= signal_prev) and (macd_now < signal_now)
+
+        trigger = gain_pct >= 1.0 and (rsi_drop or macd_cross_down)
+        return trigger, {
+            "gain_pct": gain_pct,
+            "rsi5_prev": rsi_prev, "rsi5_now": rsi_now,
+            "rsi_drop": (rsi_prev - rsi_now) if (not np.isnan(rsi_prev) and not np.isnan(rsi_now)) else None,
+            "macd5": macd_now, "signal5": signal_now,
+            "macd5_prev": macd_prev, "signal5_prev": signal_prev,
+            "macd_cross_down": macd_cross_down
+        }
+    except Exception:
+        return False, {}    
 
     up_move   = highs[1:] - highs[:-1]
     down_move = lows[:-1] - lows[1:]
@@ -796,6 +869,48 @@ async def process_symbol(symbol):
             elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
             gain = ((price - entry) / entry) * 100
             stop = trades[symbol].get("stop", entry - 0.6 * atr)
+            # [#fast-exit-5m-check-standard]
+            # — Sortie dynamique rapide (5m) —
+            triggered, fx = fast_exit_5m_trigger(symbol, entry, price)
+            if triggered:
+                vol5 = float(np.mean(volumes[-5:]))
+                vol20 = float(np.mean(volumes[-20:]))
+                reason_bits = []
+                if fx.get("rsi_drop") is not None and fx["rsi_drop"] > 5:
+                    reason_bits.append(f"RSI(5m) -{fx['rsi_drop']:.1f} pts")
+                if fx.get("macd_cross_down"):
+                    reason_bits.append("MACD(5m) croisement baissier")
+                raison = "Sortie dynamique 5m: gain ≥ +1% ; " + " + ".join(reason_bits)
+
+                msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, raison)
+                await tg_send(msg)
+
+                log_trade_csv({
+                    "trade_id": trades[symbol]["trade_id"],
+                    "symbol": symbol,
+                    "event": "DYN_EXIT_5M",
+                    "strategy": "standard",
+                    "version": BOT_VERSION,
+                    "entry": entry,
+                    "exit": price,
+                    "price": price,
+                    "pnl_pct": gain,
+                    "position_pct": trades[symbol].get("position_pct", ""),
+                    "sl_initial": trades[symbol].get("sl_initial", entry - 0.6 * atr),
+                    "sl_final": stop,
+                    "atr_1h": atr, "atr_mult_at_entry": 0.6,
+                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                    "supertrend_on": supertrend_signal,
+                    "ema25_1h": ema25, "ema200_1h": ema200, "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
+                    "vol_ma5": vol5, "vol_ma20": vol20, "vol_ratio": vol5 / max(vol20, 1e-9),
+                    "btc_uptrend": btc_up, "eth_uptrend": eth_up,
+                    "reason_entry": trades[symbol].get("reason_entry", ""),
+                    "reason_exit": raison
+                })
+
+                log_trade(symbol, "SELL", price, gain)
+                _delete_trade(symbol)
+                return
 
             if volatility < 0.008:
                 stop = max(stop, price - atr * 0.5)
@@ -1259,6 +1374,49 @@ async def process_symbol_aggressive(symbol):
         # tendances BTC/ETH via le cache préchargé (pas de requêtes)
         btc_up = is_uptrend([float(k[4]) for k in market_cache.get("BTCUSDT", [])]) if market_cache.get("BTCUSDT") else False
         eth_up = is_uptrend([float(k[4]) for k in market_cache.get("ETHUSDT", [])]) if market_cache.get("ETHUSDT") else False
+
+        # [#fast-exit-5m-check-aggressive]
+        # — Sortie dynamique rapide (5m) —
+        triggered, fx = fast_exit_5m_trigger(symbol, entry, price)
+        if triggered:
+            vol5_local = float(np.mean(volumes[-5:]))
+            vol20_local = float(np.mean(volumes[-20:]))
+            reason_bits = []
+            if fx.get("rsi_drop") is not None and fx["rsi_drop"] > 5:
+                reason_bits.append(f"RSI(5m) -{fx['rsi_drop']:.1f} pts")
+            if fx.get("macd_cross_down"):
+                reason_bits.append("MACD(5m) croisement baissier")
+            raison = "Sortie dynamique 5m: gain ≥ +1% ; " + " + ".join(reason_bits)
+
+            msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, raison)
+            await tg_send(msg)
+
+            log_trade_csv({
+                "trade_id": trades[symbol]["trade_id"],
+                "symbol": symbol,
+                "event": "DYN_EXIT_5M",
+                "strategy": "aggressive",
+                "version": BOT_VERSION,
+                "entry": entry,
+                "exit": price,
+                "price": price,
+                "pnl_pct": gain,
+                "position_pct": trades[symbol]["position_pct"],
+                "sl_initial": trades[symbol]["sl_initial"],
+                "sl_final": trades[symbol]["stop"],
+                "atr_1h": atr_val_current, "atr_mult_at_entry": 0.6,
+                "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                "supertrend_on": supertrend_ok,
+                "ema25_1h": ema25, "ema200_1h": ema200_1h, "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
+                "vol_ma5": vol5_local, "vol_ma20": vol20_local, "vol_ratio": vol5_local / max(vol20_local, 1e-9),
+                "btc_uptrend": btc_up, "eth_uptrend": eth_up,
+                "reason_entry": trades[symbol]["reason_entry"],
+                "reason_exit": raison
+            })
+
+            log_trade(symbol, "SELL", price, gain)
+            _delete_trade(symbol)
+            return
 
 
         # ---- TP1 (≥ +1.5%) ----
