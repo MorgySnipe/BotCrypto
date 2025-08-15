@@ -129,7 +129,41 @@ BTC_3H_DROP_PCT      = 2.2   # ou -2.2% sur 3h
 BTC_ADX_WEAK         = 18    # momentum faible si ADX < 18
 BTC_RSI_FLOOR        = 48    # RSI bas
 BTC_REGIME_BLOCK_MIN = 90    # minutes de blocage des ALTS
+# === Money management (global) ===
+RISK_PER_TRADE   = 0.005   # 0.5% du capital par trade
+ACCOUNT_EQUITY   = 10000   # capital de référence pour sizing
+DAILY_MAX_LOSS   = -0.03   # -3% cumulé sur la journée (UTC)
+POSITION_BY_SCORE = {7: 6, 8: 7, 9: 8, 10: 10}  # % position par score
 
+def _parse_dt_flex(ts: str):
+    """Parser tolérant pour 'history' (SELL) : '%Y-%m-%d %H:%M:%S' ou '%Y-%m-%d %H:%M'."""
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(ts, fmt)
+        except Exception:
+            pass
+    return None
+
+def daily_pnl_pct_utc() -> float:
+    """
+    Somme des P&L (en %) des trades clôturés 'aujourd'hui' (UTC) d'après `history`.
+    Utilisé par le circuit breaker pour bloquer les nouvelles entrées.
+    """
+    if not history:
+        return 0.0
+    today = datetime.now(timezone.utc).date()
+    total = 0.0
+    for h in history:
+        ts = _parse_dt_flex(h.get("time", ""))
+        if not ts:
+            continue
+        # history.time est enregistré en local naive -> on l'interprète en UTC "naïf"
+        if ts.date() == today:
+            try:
+                total += float(h.get("result", 0.0))
+            except Exception:
+                pass
+    return total
 
 bot = Bot(token=TELEGRAM_TOKEN)
 trades = {}
@@ -1036,9 +1070,9 @@ async def process_symbol(symbol):
         if vol_ratio_15m < VOL_CONFIRM_MULT:
             log_refusal(symbol, f"Volume 15m insuffisant ({vol_ratio_15m:.2f}x < {VOL_CONFIRM_MULT}x)")
             return
-
+        
         buy = False
-        position_pct = 5
+
         indicators = {
             "rsi": rsi,
             "macd": macd,
@@ -1051,6 +1085,9 @@ async def process_symbol(symbol):
         confidence = compute_confidence_score(indicators)
         label_conf = label_confidence(confidence)
 
+        # -- NEW: position sizing basé sur le score --
+        position_pct = POSITION_BY_SCORE.get(confidence, 5)
+
         volume_ok = np.mean(volumes[-5:]) > np.mean(volumes[-20:])
         trend_ok = (price > ema200) and supertrend_signal and (adx_value >= 22)
         momentum_ok = (macd > signal) and (rsi >= 55)
@@ -1060,12 +1097,10 @@ async def process_symbol(symbol):
         if last3_change > 0.022:
             brk_ok = False
 
-        # raisons (on remplit si on a un setup)
         reasons = []
         if brk_ok and trend_ok and momentum_ok and volume_ok:
             buy = True
             label = "⚡ Breakout + Retest validé (1h) + Confluence"
-            position_pct = 7
             reasons = [label, f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
         elif trend_ok and momentum_ok and volume_ok:
             near_ema25 = price <= ema25 * 1.01
@@ -1073,8 +1108,8 @@ async def process_symbol(symbol):
             if near_ema25 and candle_ok:
                 buy = True
                 label = "✅ Pullback EMA25 propre + Confluence"
-                position_pct = 6
                 reasons = [label, f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
+
 
         # === GESTION TP / HOLD / SELL ===
         sell = False
@@ -1322,6 +1357,12 @@ async def process_symbol(symbol):
             if not sell:
                 log_trade(symbol, "HOLD", price)
 
+        # --- Circuit breaker JOUR (avant toute nouvelle entrée) ---
+        if buy and symbol not in trades:
+            pnl_today = daily_pnl_pct_utc()
+            if pnl_today <= DAILY_MAX_LOSS * 100.0:
+                log_refusal(symbol, f"Daily loss limit hit (P&L jour {pnl_today:.2f}% ≤ {DAILY_MAX_LOSS*100:.0f}%)")
+                return
         # --- Entrée (BUY) ---
         if buy and symbol not in trades:
             trade_id = make_trade_id(symbol)
@@ -1599,7 +1640,14 @@ async def process_symbol_aggressive(symbol):
         }
         score = compute_confidence_score(indicators)
         label_conf = label_confidence(score)
+        position_pct = POSITION_BY_SCORE.get(score, 5)
         if score < 7:
+            return
+
+        # --- Circuit breaker JOUR (aggressive) ---
+        pnl_today = daily_pnl_pct_utc()
+        if pnl_today <= DAILY_MAX_LOSS * 100.0:
+            log_refusal(symbol, f"Daily loss limit hit (P&L jour {pnl_today:.2f}% ≤ {DAILY_MAX_LOSS*100:.0f}%)")
             return
 
         reasons = [
@@ -1623,7 +1671,7 @@ async def process_symbol_aggressive(symbol):
             "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
             "confidence": score,
             "stop": sl_initial,
-            "position_pct": 5,
+            "position_pct": position_pct,
             "trade_id": trade_id,
             "tp_times": {},
             "sl_initial": sl_initial,
@@ -1638,7 +1686,7 @@ async def process_symbol_aggressive(symbol):
         eth_up = is_uptrend([float(k[4]) for k in market_cache.get("ETHUSDT", [])]) if market_cache.get("ETHUSDT") else False
 
         msg = format_entry_msg(
-            symbol, trade_id, "aggressive", BOT_VERSION, price, 5,
+            symbol, trade_id, "aggressive", BOT_VERSION, price, position_pct,
             trades[symbol]["sl_initial"], ((price - trades[symbol]["sl_initial"]) / price) * 100, atr_val,
             rsi, macd, signal, adx_value,
             supertrend_ok, ema25, ema50_4h, ema200_1h, ema200_4h,
@@ -1660,7 +1708,7 @@ async def process_symbol_aggressive(symbol):
             "exit": "",
             "price": price,
             "pnl_pct": "",
-            "position_pct": 5,
+            "position_pct": position_pct,
             "sl_initial": trades[symbol]["sl_initial"],
             "sl_final": "",
             "atr_1h": atr_val,
