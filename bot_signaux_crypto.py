@@ -57,6 +57,9 @@ INIT_SL_PCT_STD_MIN = 0.010  # 1.0% (standard)
 INIT_SL_PCT_STD_MAX = 0.012  # 1.2%
 INIT_SL_PCT_AGR_MIN = 0.010  # 1.0% (aggressive)
 INIT_SL_PCT_AGR_MAX = 0.012  # 1.2%
+# --- Auto-close (nouvelle logique) ---
+AUTO_CLOSE_MIN_H = 12   # seuil souple: on évalue mais on NE coupe pas systématiquement
+AUTO_CLOSE_HARD_H = 24  # sécurité: on coupe quoi qu'il arrive après 24h
 
 
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -677,60 +680,75 @@ def get_last_price(symbol):
 
 async def process_symbol(symbol):
     try:
-        # --- Auto-close après 12h si une position existe ---
+        # --- Auto-close SOUPLE (ne coupe plus automatiquement à 12h) ---
         if symbol in trades:
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-            elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
-            if elapsed_time > 12:
+            elapsed_h = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
+
+            if elapsed_h >= AUTO_CLOSE_MIN_H:
                 entry = trades[symbol]['entry']
                 price = get_last_price(symbol)
                 if price is None:
                     log_refusal(symbol, "API prix indisponible")
                     return
-                pnl = ((price - entry) / entry) * 100
-                trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
+                gain = ((price - entry) / entry) * 100
 
-                # message + log (on utilise maintenant tg_send au lieu de bot.send_message)
-                msg = format_autoclose_msg(symbol, trade_id, price, pnl)
-                await tg_send(msg)
+                k1h = get_cached(symbol, '1h')
+                if not k1h or len(k1h) < 50:
+                    await tg_send(f"⚠️ {symbol} — {elapsed_h:.1f}h: données 1h insuffisantes, trade maintenu (gain {gain:.2f}%).")
+                else:
+                    closes_now = [float(k[4]) for k in k1h]
+                    rsi_now = rsi_tv(closes_now, 14)
+                    macd_now, signal_now = compute_macd(closes_now)
+                    adx_now = adx_tv(k1h, 14)
+                    ema25_now = ema_tv(closes_now, 25)
+                    st_ok = compute_supertrend(k1h)
 
-                log_trade_csv({
-                    "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                    "trade_id": trade_id,
-                    "symbol": symbol,
-                    "event": "AUTO_CLOSE",
-                    "strategy": "standard",
-                    "version": BOT_VERSION,
-                    "entry": entry,
-                    "exit": price,
-                    "price": price,
-                    "pnl_pct": pnl,
-                    "position_pct": trades[symbol].get("position_pct", ""),
-                    "sl_initial": trades[symbol].get("sl_initial", ""),
-                    "sl_final": trades[symbol].get("stop", ""),
-                    "atr_1h": "",
-                    "atr_mult_at_entry": "",
-                    "rsi_1h": "",
-                    "macd": "",
-                    "signal": "",
-                    "adx_1h": "",
-                    "supertrend_on": "",
-                    "ema25_1h": "",
-                    "ema200_1h": "",
-                    "ema50_4h": "",
-                    "ema200_4h": "",
-                    "vol_ma5": "",
-                    "vol_ma20": "",
-                    "vol_ratio": "",
-                    "btc_uptrend": "",
-                    "eth_uptrend": "",
-                    "reason_entry": trades[symbol].get("reason_entry", ""),
-                    "reason_exit": "timeout > 12h"
-                })
+                    should_close_soft = (
+                        (gain <= 0.0 and (rsi_now < 50 or macd_now < signal_now)) or
+                        (gain < 0.5 and (rsi_now < 48 or macd_now < signal_now) and adx_now < 18) or
+                        (closes_now[-1] < ema25_now and not st_ok)
+                    )
+                    force_close = (elapsed_h >= AUTO_CLOSE_HARD_H)
 
-                log_trade(symbol, "SELL", price, pnl)
-                _delete_trade(symbol)
-                return
+                    if should_close_soft or force_close:
+                        trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
+                        msg = format_autoclose_msg(symbol, trade_id, price, gain)
+                        await tg_send(msg)
+
+                        vol_ser = volumes_series(k1h, quote=True)
+                        vol5 = float(np.mean(vol_ser[-5:])) if len(vol_ser) >= 5 else 0.0
+                        vol20 = float(np.mean(vol_ser[-20:])) if len(vol_ser) >= 20 else 0.0
+
+                        log_trade_csv({
+                            "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "trade_id": trade_id, "symbol": symbol,
+                            "event": "AUTO_CLOSE" if force_close else "AUTO_CLOSE_SOFT",
+                            "strategy": "standard", "version": BOT_VERSION,
+                            "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
+                            "position_pct": trades[symbol].get("position_pct", ""),
+                            "sl_initial": trades[symbol].get("sl_initial", ""),
+                            "sl_final": trades[symbol].get("stop", ""),
+                            "atr_1h": atr_tv(k1h, 14), "atr_mult_at_entry": "",
+                            "rsi_1h": rsi_now, "macd": macd_now, "signal": signal_now, "adx_1h": adx_now,
+                            "supertrend_on": st_ok, "ema25_1h": ema25_now, "ema200_1h": ema_tv(closes_now, 200),
+                            "ema50_4h": "", "ema200_4h": "",
+                            "vol_ma5": vol5 if vol5 else "", "vol_ma20": vol20 if vol20 else "",
+                            "vol_ratio": (vol5 / max(vol20, 1e-9)) if (vol5 and vol20) else "",
+                            "btc_uptrend": "", "eth_uptrend": "",
+                            "reason_entry": trades[symbol].get("reason_entry", ""),
+                            "reason_exit": "timeout > 24h (sécurité)" if force_close else "timeout > 12h (momentum faible)"
+                        })
+
+                        log_trade(symbol, "SELL", price, gain)
+                        _delete_trade(symbol)
+                        return
+                    else:
+                        # on laisse courir : sécuriser au moins à BE si possible
+                        if "stop" in trades[symbol]:
+                            trades[symbol]["stop"] = max(trades[symbol]["stop"], entry)
+                        save_trades()
+                        await tg_send(f"⏳ {symbol} — {elapsed_h:.1f}h: trade maintenu (gain {gain:.2f}%, momentum OK).")
 
         # ---------- Analyse standard ----------
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
@@ -1141,60 +1159,90 @@ async def process_symbol(symbol):
 
 async def process_symbol_aggressive(symbol):
     try:
-        # --- Auto-close après 12h si une position existe ---
+        # ---- Auto-close SOUPLE (aggressive) ----
         if symbol in trades:
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-            elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
-            if elapsed_time > 12:
+            elapsed_h = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
+
+            if elapsed_h >= AUTO_CLOSE_MIN_H:
                 entry = trades[symbol]['entry']
                 price = get_last_price(symbol)
                 if price is None:
                     log_refusal(symbol, "API prix indisponible")
-                    return               
-                pnl = ((price - entry) / entry) * 100
-                trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
-                # Message auto-close
-                msg = format_autoclose_msg(symbol, trade_id, price, pnl)
-                await tg_send(msg)
+                    return
+                gain = ((price - entry) / entry) * 100
 
-                # Log CSV
-                log_trade_csv({
-                    "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                    "trade_id": trade_id,
-                    "symbol": symbol,
-                    "event": "AUTO_CLOSE",
-                    "strategy": "aggressive",
-                    "version": BOT_VERSION,
-                    "entry": entry,
-                    "exit": price,
-                    "price": price,
-                    "pnl_pct": pnl,
-                    "position_pct": trades[symbol].get("position_pct", ""),
-                    "sl_initial": "",
-                    "sl_final": trades[symbol].get("stop", ""),
-                    "atr_1h": "",
-                    "atr_mult_at_entry": "",
-                    "rsi_1h": "",
-                    "macd": "",
-                    "signal": "",
-                    "adx_1h": "",
-                    "supertrend_on": "",
-                    "ema25_1h": "",
-                    "ema200_1h": "",
-                    "ema50_4h": "",
-                    "ema200_4h": "",
-                    "vol_ma5": "",
-                    "vol_ma20": "",
-                    "vol_ratio": "",
-                    "btc_uptrend": "",
-                    "eth_uptrend": "",
-                    "reason_entry": "",
-                    "reason_exit": "timeout > 12h"
-                })
+                k1h = get_cached(symbol, '1h')
+                if not k1h or len(k1h) < 50:
+                    await tg_send(f"⚠️ {symbol} — {elapsed_h:.1f}h: données 1h insuffisantes, trade maintenu (gain {gain:.2f}%).")
+                    return
+                else:
+                    closes_now = [float(k[4]) for k in k1h]
+                    rsi_now = rsi_tv(closes_now, 14)
+                    macd_now, signal_now = compute_macd(closes_now)
+                    adx_now = adx_tv(k1h, 14)
+                    ema25_now = ema_tv(closes_now, 25)
+                    st_ok = compute_supertrend(k1h)
 
-                log_trade(symbol, "SELL", price, pnl)
-                _delete_trade(symbol)
-                return
+                    # un peu PLUS TOLÉRANT que la standard
+                    should_close_soft = (
+                        (gain <= -0.2 and (rsi_now < 48 or macd_now < signal_now)) or
+                        (gain < 0.3 and (rsi_now < 46 or macd_now < signal_now) and adx_now < 16) or
+                        (closes_now[-1] < ema25_now * 0.997 and not st_ok)
+                    )
+                    force_close = (elapsed_h >= AUTO_CLOSE_HARD_H)
+
+                    if should_close_soft or force_close:
+                        trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
+                        msg = format_autoclose_msg(symbol, trade_id, price, gain)
+                        await tg_send(msg)
+
+                        vol_ser = volumes_series(k1h, quote=True)
+                        vol5 = float(np.mean(vol_ser[-5:])) if len(vol_ser) >= 5 else 0.0
+                        vol20 = float(np.mean(vol_ser[-20:])) if len(vol_ser) >= 20 else 0.0
+
+                        log_trade_csv({
+                            "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "trade_id": trade_id,
+                            "symbol": symbol,
+                            "event": "AUTO_CLOSE" if force_close else "AUTO_CLOSE_SOFT",
+                            "strategy": "aggressive",
+                            "version": BOT_VERSION,
+                            "entry": entry,
+                            "exit": price,
+                            "price": price,
+                            "pnl_pct": gain,
+                            "position_pct": trades[symbol].get("position_pct", ""),
+                            "sl_initial": trades[symbol].get("sl_initial", ""),
+                            "sl_final": trades[symbol].get("stop", ""),
+                            "atr_1h": atr_tv(k1h, 14),
+                            "atr_mult_at_entry": "",
+                            "rsi_1h": rsi_now,
+                            "macd": macd_now,
+                            "signal": signal_now,
+                            "adx_1h": adx_now,
+                            "supertrend_on": st_ok,
+                            "ema25_1h": ema25_now,
+                            "ema200_1h": ema_tv(closes_now, 200),
+                            "ema50_4h": "",
+                            "ema200_4h": "",
+                            "vol_ma5": vol5,
+                            "vol_ma20": vol20,
+                            "vol_ratio": (vol5 / max(vol20, 1e-9)) if vol20 > 0 else "",
+                            "btc_uptrend": "",
+                            "eth_uptrend": "",
+                            "reason_entry": trades[symbol].get("reason_entry", ""),
+                            "reason_exit": "timeout > 24h (sécurité)" if force_close else "timeout > 12h (momentum faible)"
+                        })
+
+                        log_trade(symbol, "SELL", price, gain)
+                        _delete_trade(symbol)
+                        return
+                    else:
+                        # agressif = on laisse respirer, pas de remontée forcée du stop ici
+                        trailing_stop_advanced(symbol, price)
+                        await tg_send(f"⏳ {symbol} — {elapsed_h:.1f}h: trade agressif maintenu (gain {gain:.2f}%, momentum OK).")
+                        return
 
         # ---- Analyse agressive ----
         klines = get_cached(symbol, '1h')
