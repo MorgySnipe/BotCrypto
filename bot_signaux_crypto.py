@@ -131,7 +131,6 @@ BTC_RSI_FLOOR        = 48    # RSI bas
 BTC_REGIME_BLOCK_MIN = 90    # minutes de blocage des ALTS
 # === Money management (global) ===
 RISK_PER_TRADE   = 0.005   # 0.5% du capital par trade
-ACCOUNT_EQUITY   = 10000   # capital de référence pour sizing
 DAILY_MAX_LOSS   = -0.03   # -3% cumulé sur la journée (UTC)
 POSITION_BY_SCORE = {7: 6, 8: 7, 9: 8, 10: 10}  # % position par score
 
@@ -220,14 +219,25 @@ def _delete_trade(symbol):
         del trades[symbol]
         save_trades()
 
-def get_cached(symbol, tf="1h", limit=LIMIT):
-    """Retourne les klines depuis le cache local de l'itération."""
+def get_cached(symbol, tf="1h", limit=LIMIT, force: bool = False):
+    """
+    Retourne les klines depuis le cache de l'itération.
+    - Si pas encore en cache, on charge.
+    - Si le cache existe mais est plus court que `limit`, on recharge avec `limit`.
+    - `force=True` pour forcer un rechargement.
+    """
     if symbol not in symbol_cache:
         symbol_cache[symbol] = {}
-    if tf not in symbol_cache[symbol]:
-        symbol_cache[symbol][tf] = get_klines(symbol, interval=tf, limit=limit)
-    return symbol_cache[symbol][tf]
 
+    # Série présente ?
+    series = symbol_cache[symbol].get(tf)
+
+    # Besoin d'upgrader (ou initialiser / forcer) ?
+    if force or series is None or len(series) < int(limit):
+        series = get_klines(symbol, interval=tf, limit=limit)
+        symbol_cache[symbol][tf] = series
+
+    return series
 
 # ====== META / HELPERS POUR MESSAGES & IDs ======
 BOT_VERSION = "v1.0.0"
@@ -1288,9 +1298,9 @@ async def process_symbol(symbol):
             return
 
         # === Confluence & scoring (recréés) ===
-        volume_ok  = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
-        trend_ok   = (price > ema200) and supertrend_signal and (adx_value >= 22)
-        momentum_ok= (macd > signal) and (rsi >= 55)
+        volume_ok   = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
+        trend_ok    = (price > ema200) and supertrend_signal and (adx_value >= 22)
+        momentum_ok = (macd > signal) and (rsi >= 55)
 
         indicators = {
             "rsi": rsi,
@@ -1301,9 +1311,27 @@ async def process_symbol(symbol):
             "volume_ok": volume_ok,
             "above_ema200": price > ema200,
         }
-        confidence   = compute_confidence_score(indicators)
-        label_conf   = label_confidence(confidence)
-        position_pct = POSITION_BY_SCORE.get(confidence, 5)
+        confidence = compute_confidence_score(indicators)
+        label_conf = label_confidence(confidence)
+
+        # --- Stop provisoire pour le sizing (même logique que l'entrée) ---
+        volatility      = get_volatility(atr, price)  # atr/price
+        sl_pct_sizing   = pick_sl_pct(volatility, INIT_SL_PCT_STD_MIN, INIT_SL_PCT_STD_MAX)
+        stop_for_sizing = price * (1.0 - sl_pct_sizing)
+
+        # --- Position sizing au risque ---
+        risk_pct = (price - stop_for_sizing) / max(price, 1e-9)  # distance du stop en %
+        if risk_pct > 0:
+            # % du capital à engager pour risquer au plus RISK_PER_TRADE
+            pos_pct_risk = (RISK_PER_TRADE / risk_pct) * 100.0
+            # borne via scoring + garde-fous 1%–10%
+            position_pct = min(
+                max(1.0, pos_pct_risk),
+                POSITION_BY_SCORE.get(confidence, 5)
+            )
+        else:
+            position_pct = POSITION_BY_SCORE.get(confidence, 5)
+
 
         # --- Décision d'achat (standard) avec filtre 15m ---
         brk_ok, br_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
@@ -1654,15 +1682,16 @@ async def process_symbol(symbol):
         # --- Entrée (BUY) ---
         if buy and symbol not in trades:
             trade_id = make_trade_id(symbol)
-            sl_pct = pick_sl_pct(volatility, INIT_SL_PCT_STD_MIN, INIT_SL_PCT_STD_MAX)
-            sl_initial = price * (1.0 - sl_pct)
+
+            # 🔁 réutilise le stop calculé plus haut pour le sizing
+            sl_initial = stop_for_sizing   # <= au lieu de recalculer avec pick_sl_pct(...)
 
             trades[symbol] = {
                 "entry": price,
                 "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
                 "confidence": confidence,
                 "stop": sl_initial,
-                "position_pct": position_pct,
+                "position_pct": position_pct,    # <- issu du sizing au risque
                 "trade_id": trade_id,
                 "tp_times": {},
                 "sl_initial": sl_initial,
@@ -1670,7 +1699,7 @@ async def process_symbol(symbol):
                 "strategy": "standard",
             }
             last_trade_time[symbol] = datetime.now()
-            save_trades()   # ⬅️ persiste la nouvelle position
+            save_trades()
 
             msg = format_entry_msg(
                 symbol, trade_id, "standard", BOT_VERSION, price, position_pct,
@@ -1851,6 +1880,7 @@ async def process_symbol_aggressive(symbol):
         # pour comparer l'élan MACD vs bougie précédente
         macd_prev, signal_prev = compute_macd(closes[:-1])
 
+
         # ---- Garde-fous ----
         slots = allowed_trade_slots()
         if len(trades) >= slots:
@@ -1995,9 +2025,22 @@ async def process_symbol_aggressive(symbol):
         }
         score = compute_confidence_score(indicators)
         label_conf = label_confidence(score)
-        position_pct = POSITION_BY_SCORE.get(score, 5)
         if score < 7:
             return
+
+        # ---- Sizing au risque (aggressive) ----
+        volatility_aggr    = get_volatility(atr, price)  # atr/price (1h)
+        sl_pct_sizing_aggr = pick_sl_pct(volatility_aggr, INIT_SL_PCT_AGR_MIN, INIT_SL_PCT_AGR_MAX)
+        stop_for_sizing    = price * (1.0 - sl_pct_sizing_aggr)
+
+        risk_pct = (price - stop_for_sizing) / max(price, 1e-9)
+        if risk_pct > 0:
+            pos_pct_risk = (RISK_PER_TRADE / risk_pct) * 100.0
+            cap_score    = POSITION_BY_SCORE.get(score, 5)
+            position_pct = min(max(1.0, pos_pct_risk), cap_score)
+        else:
+            position_pct = POSITION_BY_SCORE.get(score, 5)
+
 
         # --- Anti-chasse (wick 1h) + confirmation 15m + entrée limit (aggressive) ---
         if is_wick_hunt_1h(klines[-1]):
@@ -2037,21 +2080,20 @@ async def process_symbol_aggressive(symbol):
         ]
         
         # ---- Entrée ----
-        atr_val = atr_tv(klines)                # ATR version TV
-        ema200_1h = ema200
         trade_id = make_trade_id(symbol)
 
-        # stop initial élargi 1.0–1.2% selon la vol (ATR/price)
-        vol_init = atr_val / max(price, 1e-9)
-        sl_pct_init = pick_sl_pct(vol_init, INIT_SL_PCT_AGR_MIN, INIT_SL_PCT_AGR_MAX)
-        sl_initial = price * (1.0 - sl_pct_init)
+        # Conserver cette var car réutilisée plus bas dans les logs/CSV
+        ema200_1h = ema200
+
+        # ✅ Utilise le stop issu du sizing au risque (calculé plus haut)
+        sl_initial = stop_for_sizing
 
         trades[symbol] = {
             "entry": price,
             "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
             "confidence": score,
             "stop": sl_initial,
-            "position_pct": position_pct,
+            "position_pct": position_pct,   # ← vient du sizing au risque
             "trade_id": trade_id,
             "tp_times": {},
             "sl_initial": sl_initial,
@@ -2067,7 +2109,7 @@ async def process_symbol_aggressive(symbol):
 
         msg = format_entry_msg(
             symbol, trade_id, "aggressive", BOT_VERSION, price, position_pct,
-            trades[symbol]["sl_initial"], ((price - trades[symbol]["sl_initial"]) / price) * 100, atr_val,
+            trades[symbol]["sl_initial"], ((price - trades[symbol]["sl_initial"]) / price) * 100, atr,
             rsi, macd, signal, adx_value,
             supertrend_ok, ema25, ema50_4h, ema200_1h, ema200_4h,
             vol5, vol20, vol5 / max(vol20, 1e-9),
@@ -2091,7 +2133,7 @@ async def process_symbol_aggressive(symbol):
             "position_pct": position_pct,
             "sl_initial": trades[symbol]["sl_initial"],
             "sl_final": "",
-            "atr_1h": atr_val,
+            "atr_1h": atr,
             "atr_mult_at_entry": "",
             "rsi_1h": rsi,
             "macd": macd,
