@@ -567,6 +567,28 @@ def in_active_session():
     hour = datetime.now(timezone.utc).hour
     return not (0 <= hour < 6)
 
+def is_active_liquidity_session(now=None):
+    """
+    Sessions actives (UTC) :
+      - EU : 07:00 → 15:00
+      - US : 13:00 → 21:00
+    + On conserve l'interdiction 00:00 → 06:00 (no-trade window).
+    Retourne (ok: bool, label: str)
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    h = now.hour
+
+    # fenêtre interdite conservée
+    if 0 <= h < 6:
+        return False, "blocked_00_06"
+
+    eu = (7 <= h < 15)
+    us = (13 <= h < 21)
+    ok = eu or us
+    label = "EU" if eu and not us else ("US" if us and not eu else ("EU+US" if eu and us else "NONE"))
+    return ok, label
+
 def get_klines_4h(symbol, limit=100):
     return get_klines(symbol, interval='4h', limit=limit)
 
@@ -1140,10 +1162,11 @@ async def process_symbol(symbol):
             log_refusal(symbol, f"Nombre max de trades atteint ({len(trades)}/{MAX_TRADES})")
             return
 
-        if not in_active_session():
-            log_refusal(symbol, "Hors plage horaire de trading")
+        ok_session, _sess = is_active_liquidity_session()
+        if not ok_session:
+            log_refusal(symbol, "Low-liquidity session")
             return
-
+            
         # --- Filtre régime BTC ---
         if symbol != "BTCUSDT":
             blocked, why = btc_regime_blocked()
@@ -1620,7 +1643,7 @@ async def process_symbol_aggressive(symbol):
 
                     # 1) Sous-performance vs BTC sur 6h
                     underperf = False
-                    if market_cache.get("BTCUSDT") and len(closes_now) >= 7 and len(market_cache["BTCUSDT"]) >= 7:
+                    if symbol != "BTCUSDT" and market_cache.get("BTCUSDT") and len(closes_now) >= 7 and len(market_cache["BTCUSDT"]) >= 7:
                         btc_closes = [float(k[4]) for k in market_cache["BTCUSDT"]]
                         alt_pct_6h = ((closes_now[-1] - closes_now[-7]) / max(closes_now[-7], 1e-9)) * 100.0
                         btc_pct_6h = ((btc_closes[-1] - btc_closes[-7]) / max(btc_closes[-7], 1e-9)) * 100.0
@@ -1720,7 +1743,9 @@ async def process_symbol_aggressive(symbol):
         # ---- Garde-fous ----
         if len(trades) >= MAX_TRADES:
             return
-        if not in_active_session():
+        ok_session, _sess = is_active_liquidity_session()
+        if not ok_session:
+            log_refusal(symbol, "Low-liquidity session")
             return
         if not is_market_bullish():
             return
