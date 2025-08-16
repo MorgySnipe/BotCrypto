@@ -147,10 +147,11 @@ def allowed_trade_slots() -> int:
     return min(7, 1 + high)
 
 def _parse_dt_flex(ts: str):
-    """Parser tolérant pour 'history' (SELL) : '%Y-%m-%d %H:%M:%S' ou '%Y-%m-%d %H:%M'."""
+    """Parser tolérant pour 'history' (SELL) : retourne un datetime UTC 'aware'."""
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
         try:
-            return datetime.strptime(ts, fmt)
+            # On force l'UTC 'aware'
+            return datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)
         except Exception:
             pass
     return None
@@ -168,8 +169,10 @@ def daily_pnl_pct_utc() -> float:
         ts = _parse_dt_flex(h.get("time", ""))
         if not ts:
             continue
-        # history.time est enregistré en local naive -> on l'interprète en UTC "naïf"
-        if ts.date() == today:
+        # si ts est naïf → on l'interprète comme UTC
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts.astimezone(timezone.utc).date() == today:
             try:
                 total += float(h.get("result", 0.0))
             except Exception:
@@ -914,14 +917,14 @@ def smart_timeout_check(klines_1h, entry_price, window_h=SMART_TIMEOUT_WINDOW_H,
 def log_trade(symbol, side, price, gain=0):
     with open(LOG_FILE, "a", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), symbol, side, price, gain])
+        writer.writerow([datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), symbol, side, price, gain])
     if side == "SELL":
         history.append({
             "symbol": symbol,
             "exit": price,
             "result": gain,
             "entry": trades.get(symbol, {}).get("entry", 0),
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         })
 # ====== CSV détaillé (audit) ======
 CSV_AUDIT_FILE = "trade_audit.csv"
@@ -1100,7 +1103,7 @@ async def process_symbol(symbol):
                         vol20 = float(np.mean(vol_ser[-20:])) if len(vol_ser) >= 20 else 0.0
 
                         log_trade_csv({
-                            "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                             "trade_id": trade_id, "symbol": symbol,
                             "event": "AUTO_CLOSE" if force_close else "AUTO_CLOSE_SOFT",
                             "strategy": "standard", "version": BOT_VERSION,
@@ -1131,7 +1134,7 @@ async def process_symbol(symbol):
                         await tg_send(f"⏳ {symbol} — {elapsed_h:.1f}h: trade maintenu (gain {gain:.2f}%, momentum OK).")
 
         # ---------- Analyse standard ----------
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
+        print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
 
         klines = get_cached(symbol, '1h')# 1h
         if not klines or len(klines) < 50:
@@ -1238,7 +1241,7 @@ async def process_symbol(symbol):
            return
 
         if symbol in last_trade_time:
-            cooldown_left_h = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds() / 3600
+            cooldown_left_h = COOLDOWN_HOURS - (datetime.now(timezone.utc) - last_trade_time[symbol]).total_seconds() / 3600
             if cooldown_left_h > 0:
                 log_refusal(
                     symbol,
@@ -1414,7 +1417,7 @@ async def process_symbol(symbol):
                 vol20_loc = float(np.mean(volumes[-20:]))
 
                 log_trade_csv({
-                    "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                     "trade_id": trades[symbol]["trade_id"], "symbol": symbol,
                     "event": "SELL", "strategy": "standard", "version": BOT_VERSION,
                     "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
@@ -1528,7 +1531,7 @@ async def process_symbol(symbol):
                 vol20_loc = float(np.mean(volumes[-20:]))
 
                 log_trade_csv({
-                    "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                     "trade_id": trades[symbol]["trade_id"],
                     "symbol": symbol,
                     "event": "SELL",
@@ -1578,9 +1581,9 @@ async def process_symbol(symbol):
                         except Exception:
                             last_tp_time = None
                             
-                    if not last_tp_time or (datetime.now() - last_tp_time).total_seconds() >= 120:
+                    if not last_tp_time or (datetime.now(timezone.utc) - last_tp_time).total_seconds() >= 120:
                         trades[symbol][f"tp{tp_num}"] = True
-                        trades[symbol]["tp_times"][f"tp{tp_num}"] = datetime.now()
+                        trades[symbol]["tp_times"][f"tp{tp_num}"] = datetime.now(timezone.utc)
                         new_stop = entry * (1 + (tp_pct - 0.5) / 100) if tp_num > 1 else entry
                         trades[symbol]["stop"] = max(stop, new_stop)
                         save_trades()
@@ -1594,7 +1597,7 @@ async def process_symbol(symbol):
 
                         # LOG CSV TP standard
                         log_trade_csv({
-                            "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                             "trade_id": trades[symbol]["trade_id"],
                             "symbol": symbol,
                             "event": f"TP{tp_num}",
@@ -1637,7 +1640,7 @@ async def process_symbol(symbol):
                 # LOG CSV STOP/SELL standard
                 event_name = "STOP" if price < trades[symbol]["stop"] else "SELL"
                 log_trade_csv({
-                    "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                     "trade_id": trades[symbol]["trade_id"],
                     "symbol": symbol,
                     "event": event_name,
@@ -1698,7 +1701,7 @@ async def process_symbol(symbol):
                 "reason_entry": "; ".join(reasons) if reasons else "",
                 "strategy": "standard",
             }
-            last_trade_time[symbol] = datetime.now()
+            last_trade_time[symbol] = datetime.now(timezone.utc)
             save_trades()
 
             msg = format_entry_msg(
@@ -1789,7 +1792,7 @@ async def process_symbol_aggressive(symbol):
                         vol20 = float(np.mean(vol_ser[-20:])) if len(vol_ser) >= 20 else 0.0
 
                         log_trade_csv({
-                            "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                             "trade_id": trade_id,
                             "symbol": symbol,
                             "event": "AUTO_CLOSE" if force_close else "AUTO_CLOSE_SOFT",
@@ -1894,7 +1897,7 @@ async def process_symbol_aggressive(symbol):
         if not is_market_bullish():
             return
         if symbol in last_trade_time:
-            cooldown_left_h = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds() / 3600
+            cooldown_left_h = COOLDOWN_HOURS - (datetime.now(timezone.utc) - last_trade_time[symbol]).total_seconds() / 3600
             if cooldown_left_h > 0:
                 log_refusal(
                     symbol,
@@ -2100,7 +2103,7 @@ async def process_symbol_aggressive(symbol):
             "reason_entry": "; ".join(reasons),
             "strategy": "aggressive",
         }
-        last_trade_time[symbol] = datetime.now()
+        last_trade_time[symbol] = datetime.now(timezone.utc)
         save_trades()
 
         # uptrends via cache préchargé (pas de requêtes)
@@ -2120,7 +2123,7 @@ async def process_symbol_aggressive(symbol):
 
         # Logging CSV (BUY) COMPLET
         log_trade_csv({
-            "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             "trade_id": trade_id,
             "symbol": symbol,
             "event": "BUY",
@@ -2183,7 +2186,7 @@ async def process_symbol_aggressive(symbol):
             vol20_loc = float(np.mean(volumes[-20:]))
 
             log_trade_csv({
-                "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "trade_id": trades[symbol]["trade_id"], "symbol": symbol,
                 "event": "SELL", "strategy": "aggressive", "version": BOT_VERSION,
                 "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
@@ -2296,7 +2299,7 @@ async def process_symbol_aggressive(symbol):
 
             # LOG CSV SELL (aggressive)
             log_trade_csv({
-                "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "trade_id": trades[symbol]["trade_id"],
                 "symbol": symbol,
                 "event": "SELL",
@@ -2338,7 +2341,7 @@ async def process_symbol_aggressive(symbol):
         # ---- TP1 (≥ +1.5%) ----
         if gain >= 1.5 and not trades[symbol].get("tp1", False):
             trades[symbol]["tp1"] = True
-            trades[symbol]["tp_times"]["tp1"] = datetime.now()
+            trades[symbol]["tp_times"]["tp1"] = datetime.now(timezone.utc)
             # option : remonter le stop au prix d'entrée
             trades[symbol]["stop"] = max(stop, entry)
             save_trades()
@@ -2351,7 +2354,7 @@ async def process_symbol_aggressive(symbol):
             await tg_send(msg)
 
             log_trade_csv({
-                "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "trade_id": trades[symbol]["trade_id"],
                 "symbol": symbol,
                 "event": "TP1",
@@ -2379,9 +2382,9 @@ async def process_symbol_aggressive(symbol):
                 except Exception:
                     last_tp1_time = None
  
-            if not last_tp1_time or (datetime.now() - last_tp1_time).total_seconds() >= 120:
+            if not last_tp1_time or (datetime.now(timezone.utc) - last_tp1_time).total_seconds() >= 120:
                 trades[symbol]["tp2"] = True
-                trades[symbol]["tp_times"]["tp2"] = datetime.now()
+                trades[symbol]["tp_times"]["tp2"] = datetime.now(timezone.utc)
                 trades[symbol]["stop"] = max(trades[symbol]["stop"], entry * 1.015)
                 save_trades()
  
@@ -2393,7 +2396,7 @@ async def process_symbol_aggressive(symbol):
                 await tg_send(msg)
  
                 log_trade_csv({
-                    "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                     "trade_id": trades[symbol]["trade_id"],
                     "symbol": symbol,
                     "event": "TP2",
@@ -2422,9 +2425,9 @@ async def process_symbol_aggressive(symbol):
                 except Exception:
                     last_tp2_time = None
 
-            if not last_tp2_time or (datetime.now() - last_tp2_time).total_seconds() >= 120:
+            if not last_tp2_time or (datetime.now(timezone.utc) - last_tp2_time).total_seconds() >= 120:
                 trades[symbol]["tp3"] = True
-                trades[symbol]["tp_times"]["tp3"] = datetime.now()
+                trades[symbol]["tp_times"]["tp3"] = datetime.now(timezone.utc)
                 trades[symbol]["stop"] = max(trades[symbol]["stop"], entry * 1.03)
                 save_trades()
         
@@ -2436,7 +2439,7 @@ async def process_symbol_aggressive(symbol):
                 await tg_send(msg)
 
                 log_trade_csv({
-                    "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                     "trade_id": trades[symbol]["trade_id"],
                     "symbol": symbol,
                     "event": "TP3",
@@ -2468,7 +2471,7 @@ async def process_symbol_aggressive(symbol):
             )
             await tg_send(msg)
             log_trade_csv({
-                "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "trade_id": trades[symbol]["trade_id"],
                 "symbol": symbol,
                 "event": "SELL",
@@ -2500,7 +2503,7 @@ async def process_symbol_aggressive(symbol):
 
             event_name = "STOP" if price < trades[symbol]["stop"] else "SELL"
             log_trade_csv({
-                "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "trade_id": trades[symbol]["trade_id"],
                 "symbol": symbol,
                 "event": event_name,
@@ -2546,13 +2549,17 @@ async def process_symbol_aggressive(symbol):
         traceback.print_exc()
 
 def is_recent(ts_str):
-    ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-    return (datetime.now() - ts).total_seconds() <= 86400
+    ts = _parse_dt_flex(ts_str)  # "YYYY-MM-DD HH:MM[:SS]"
+    if not ts:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts).total_seconds() <= 86400
 
 async def send_daily_summary():
     if not history:
         return
-    recent = [h for h in history if is_recent(h.get("time", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))]
+    recent = [h for h in history if is_recent(h.get("time", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")))]
     if not recent:
         await tg_send("ℹ️ Aucun trade clôturé dans les dernières 24h.")
         return
@@ -2572,14 +2579,27 @@ async def send_daily_summary():
         await tg_send(f"⚠️ Échec d’envoi de trade_audit.csv : {e}")
 
 async def main_loop():
-    await tg_send(f"🚀 Bot démarré {datetime.now().strftime('%H:%M:%S')}")
+    await tg_send(f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
     global trades
     trades.update(load_trades())
+    # Hydratation correcte de last_trade_time depuis les trades persistés
     for _sym, _t in trades.items():
         try:
-            last_trade_time[_sym] = datetime.fromisoformat(_t.get("time"))
-        except Exception:
-           pass
+            ts = _t.get("time")  # ex: "2025-02-14 13:47"
+            if not ts:
+                continue
+        # 1) essaie le parse tolérant (avec ou sans secondes)
+        dt = _parse_dt_flex(ts)
+        # 2) sinon tente ISO (au cas où tu aurais déjà enregistré un ISO)
+        if dt is None:
+            dt = datetime.fromisoformat(ts)
+        # 3) force l’UTC si naïf
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        last_trade_time[_sym] = dt
+    except Exception:
+        # on ignore silencieusement les timestamps illisibles
+        pass
 
     last_heartbeat = None
     last_summary_day = None
@@ -2587,7 +2607,7 @@ async def main_loop():
 
     while True:
         try:
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
 
             # ✅ Message de vie toutes les heures
             if last_heartbeat != now.hour:
@@ -2612,8 +2632,11 @@ async def main_loop():
             market_cache['ETHUSDT'] = symbol_cache.get('ETHUSDT', {}).get('1h', [])
 
             # Lancement des analyses
+            # 1) D’abord la stratégie standard
             await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
-            await asyncio.gather(*(process_symbol_aggressive(s)
+            # 2) Ensuite la stratégie agressive, mais seulement si pas déjà en trade
+            await asyncio.gather(*(process_symbol_aggressive(s) for s in SYMBOLS if s not in trades))
+
                                    for s in SYMBOLS
                                    if (s not in trades) or (trades.get(s, {}).get("strategy") == "aggressive")))
 
