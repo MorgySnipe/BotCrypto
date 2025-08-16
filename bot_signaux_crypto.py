@@ -242,7 +242,7 @@ def format_entry_msg(symbol, trade_id, strategy, bot_version, entry, position_pc
         f"🟢 ACHAT | {symbol} | trade_id={trade_id}\n"
         f"⏱ UTC: {utc_now_str()} | Stratégie: {strategy} | Version: {bot_version}\n"
         f"🎯 Prix entrée: {entry:.4f} | Taille: {position_pct:.1f}%\n"
-        f"🛡 Stop initial: {sl_initial:.4f} (dist: {sl_dist_pct:.2f}%) | ATR(1h): {atr:.4f}\n"
+        f"🛡 Stop initial: {sl_initial:.4f} (dist: {sl_dist_pct:.2f}%) | ATR-TV(1h): {atr:.4f}\n"
         f"🎯 TP1/TP2/TP3: +1.5% / +3% / +5% (dynamiques)\n\n"
         f"📊 Indicateurs 1H: RSI {rsi_1h:.2f} | MACD {macd:.4f}/{signal:.4f} | ADX {adx:.2f} | Supertrend {st_onoff(st_on)}\n"
         f"📈 Tendances: EMA25 {ema25:.4f} | EMA50(4h) {ema50_4h:.4f} | EMA200(1h) {ema200_1h:.4f} | EMA200(4h) {ema200_4h:.4f}\n"
@@ -485,11 +485,16 @@ def compute_ema(prices, period=200):
     return ema[-1]
 
 def compute_atr(klines, period=14):
-    highs = np.array([float(k[2]) for k in klines])
-    lows = np.array([float(k[3]) for k in klines])
-    closes = np.array([float(k[4]) for k in klines])
-    tr = np.maximum(highs[1:], closes[:-1]) - np.minimum(lows[1:], closes[:-1])
-    return np.mean(tr[-period:])
+    """
+    [DEPRECATED] N'utilisez plus cette version classique.
+    Harmonisation : ATR-TV uniquement.
+    Cette fonction redirige vers atr_tv(...) pour garantir la cohérence.
+    """
+    try:
+        return atr_tv(klines, period=period)
+    except Exception:
+        # fallback très défensif : renvoie 0.0 si atr_tv échoue
+        return 0.0
 
 def detect_rsi_divergence(prices, rsis):
     return prices[-1] > prices[-2] and rsis[-1] < rsis[-2]
