@@ -896,10 +896,13 @@ CSV_AUDIT_FIELDS = [
 
 # ====== CSV refus d'entrée (diagnostic) ======
 REFUSAL_LOG_FILE = "refusal_log.csv"
-REFUSAL_FIELDS = ["ts_utc", "symbol", "reason"]
+REFUSAL_FIELDS = ["ts_utc", "symbol", "reason", "trigger", "cooldown_left_min"]
 
-def log_refusal(symbol: str, reason: str):
-    """Append une ligne dans refusal_log.csv (diagnostic des refus)."""
+def log_refusal(symbol: str, reason: str, trigger: str = "", cooldown_left_min: int | None = None):
+    """Append une ligne dans refusal_log.csv (diagnostic des refus).
+       - trigger : valeur déclenchante (ex. 'adx=17.8', 'vol15_ratio=1.12', 'dist_ema25=2.4%')
+       - cooldown_left_min : minutes restantes de cooldown si pertinent
+    """
     import os, csv
     header_needed = (not os.path.exists(REFUSAL_LOG_FILE)
                      or os.path.getsize(REFUSAL_LOG_FILE) == 0)
@@ -911,6 +914,8 @@ def log_refusal(symbol: str, reason: str):
             "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             "symbol": symbol,
             "reason": reason,
+            "trigger": trigger or "",
+            "cooldown_left_min": "" if cooldown_left_min is None else int(cooldown_left_min),
         })
 
 def log_trade_csv(row: dict):
@@ -1145,19 +1150,22 @@ async def process_symbol(symbol):
 
         supertrend_signal = compute_supertrend(klines)
         if adx_value < 20:
-           log_refusal(symbol, f"ADX 1h trop faible (adx={adx_value:.1f} < 20)")
+           log_refusal(symbol, "ADX 1h trop faible", trigger=f"adx={adx_value:.1f}")
            return
-
         if not supertrend_signal:
            log_refusal(symbol, "Supertrend 1h non haussier (signal=False)")
            return
 
         if symbol in last_trade_time:
-            cooldown_left = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds() / 3600
-            if cooldown_left > 0:
-                log_refusal(symbol, f"Cooldown actif ({cooldown_left:.2f}h restantes)")
+            cooldown_left_h = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds() / 3600
+            if cooldown_left_h > 0:
+                log_refusal(
+                    symbol,
+                    "Cooldown actif",
+                    cooldown_left_min=int(cooldown_left_h * 60)
+                )
                 return
-
+                
         if len(trades) >= MAX_TRADES:
             log_refusal(symbol, f"Nombre max de trades atteint ({len(trades)}/{MAX_TRADES})")
             return
@@ -1175,8 +1183,10 @@ async def process_symbol(symbol):
                 return
 
         if price > ema25 * 1.02:
-           log_refusal(symbol, f"Prix trop éloigné de EMA25 (> +2%) (prix={price}, ema25={ema25})")
+           dist = (price / max(ema25, 1e-9) - 1) * 100
+           log_refusal(symbol, "Prix trop éloigné de l'EMA25 (>+2%)", trigger=f"dist_ema25={dist:.2f}%")
            return
+
 
         # [#anti-spike-standard]
         open_now = float(klines[-1][1])
@@ -1184,8 +1194,9 @@ async def process_symbol(symbol):
         # on prend le pire des deux: extension jusqu'au plus haut OU jusqu'au prix actuel
         spike_up_pct = ((max(high_now, price) - open_now) / max(open_now, 1e-9)) * 100.0
         if spike_up_pct > ANTI_SPIKE_UP_STD:
-            log_refusal(symbol, f"Anti-spike: bougie 1h déjà +{spike_up_pct:.2f}% > {ANTI_SPIKE_UP_STD:.1f}%")
+            log_refusal(symbol, "Anti-spike 1h", trigger=f"spike={spike_up_pct:.2f}%")
             return
+
             
         # [#volume-confirm-standard]
         k15 = get_cached(symbol, VOL_CONFIRM_TF, limit=max(25, VOL_CONFIRM_LOOKBACK + 5))
@@ -1199,7 +1210,7 @@ async def process_symbol(symbol):
         vol_ratio_15m = vol_now / max(vol_ma20, 1e-9)
 
         if vol_ratio_15m < VOL_CONFIRM_MULT:
-            log_refusal(symbol, f"Volume 15m insuffisant ({vol_ratio_15m:.2f}x < {VOL_CONFIRM_MULT}x)")
+            log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f}")
             return
 
         # === Confluence & scoring (recréés) ===
@@ -1750,10 +1761,15 @@ async def process_symbol_aggressive(symbol):
         if not is_market_bullish():
             return
         if symbol in last_trade_time:
-            cooldown_left = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds() / 3600
-            if cooldown_left > 0:
+            cooldown_left_h = COOLDOWN_HOURS - (datetime.now() - last_trade_time[symbol]).total_seconds() / 3600
+            if cooldown_left_h > 0:
+                log_refusal(
+                    symbol,
+                    "Cooldown actif",
+                    cooldown_left_min=int(cooldown_left_h * 60)
+                )
                 return
-
+                
         # --- Filtre régime BTC (aggressive) ---
         if symbol != "BTCUSDT":
             blocked, why = btc_regime_blocked()
@@ -1831,9 +1847,13 @@ async def process_symbol_aggressive(symbol):
         # on prend le pire des deux: le plus haut "officiel" OU le prix courant si encore plus haut
         spike_up_pct = ((max(high_now, price) - open_now) / max(open_now, 1e-9)) * 100.0
         if spike_up_pct > ANTI_SPIKE_UP_AGR:
-            log_refusal(symbol, f"Anti-spike (aggressive): bougie 1h déjà +{spike_up_pct:.2f}% > {ANTI_SPIKE_UP_AGR:.1f}%")
+            log_refusal(
+                symbol,
+                "Anti-spike (aggressive)",
+                trigger=f"bougie_1h={spike_up_pct:.2f}%, seuil={ANTI_SPIKE_UP_AGR:.1f}%"
+            )
             return
-
+            
         # [#volume-confirm-aggressive]
         k15 = get_cached(symbol, VOL_CONFIRM_TF, limit=max(25, VOL_CONFIRM_LOOKBACK + 5))
         vols15 = volumes_series(k15, quote=True)
@@ -1892,9 +1912,13 @@ async def process_symbol_aggressive(symbol):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (aggressive)")
             return
 
-        # Entrée limit resserrée
+        # Entrée Limit resserrée
         if price > ema25 * 1.01:
-            log_refusal(symbol, f"Entrée limit (aggressive): prix {price:.4f} > EMA25*1.01 ({ema25*1.01:.4f})")
+            log_refusal(
+                symbol,
+                "Entrée limit (aggressive)",
+                trigger=f"prix={price:.4f}, limite={ema25*1.01:.4f}"
+            )
             return
 
         # --- Circuit breaker JOUR (aggressive) ---
