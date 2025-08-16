@@ -2582,24 +2582,24 @@ async def main_loop():
     await tg_send(f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
     global trades
     trades.update(load_trades())
-    # Hydratation correcte de last_trade_time depuis les trades persistés
+    # Hydratation correcte de last_trade_time depuis les trades persistés (UTC aware)
     for _sym, _t in trades.items():
         try:
             ts = _t.get("time")  # ex: "2025-02-14 13:47"
             if not ts:
                 continue
-        # 1) essaie le parse tolérant (avec ou sans secondes)
-        dt = _parse_dt_flex(ts)
-        # 2) sinon tente ISO (au cas où tu aurais déjà enregistré un ISO)
-        if dt is None:
-            dt = datetime.fromisoformat(ts)
-        # 3) force l’UTC si naïf
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        last_trade_time[_sym] = dt
-    except Exception:
-        # on ignore silencieusement les timestamps illisibles
-        pass
+            # 1) essaie parse tolérant (aware UTC grâce au patch de _parse_dt_flex)
+            dt = _parse_dt_flex(ts)
+            # 2) sinon tente ISO
+            if dt is None:
+                dt = datetime.fromisoformat(ts)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+            # 3) stocke en UTC
+            last_trade_time[_sym] = dt.astimezone(timezone.utc)
+        except Exception:
+            # ignore les timestamps illisibles
+            pass
 
     last_heartbeat = None
     last_summary_day = None
