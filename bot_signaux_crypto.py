@@ -450,6 +450,33 @@ def check_15m_filter(k15, breakout_level=None):
                + (f", Close>retest={retest_ok}" if breakout_level is not None else ""))
     return ok, details
 
+# === Ajoute ici les nouveaux helpers de l’étape 3 ===
+
+def is_wick_hunt_1h(kline_1h_last) -> bool:
+    """
+    Mèche haute dominante sur la bougie 1h en cours:
+    (high - close) / (high - low) > 0.6  -> considéré comme stop-hunt.
+    """
+    h = float(kline_1h_last[2])
+    l = float(kline_1h_last[3])
+    c = float(kline_1h_last[4])
+    rng = max(h - l, 1e-9)
+    return ((h - c) / rng) > 0.6
+
+
+def confirm_15m_after_signal(k15, breakout_level=None, ema25_1h=None, tol=0.001) -> bool:
+    """
+    Exige UNE clôture 15m (la dernière COMPLÈTE) au-dessus:
+      - du niveau de retest (si breakout_level fourni), OU
+      - de l'EMA25(1h) à ±0.1% (tol=0.001)
+    """
+    if not k15 or len(k15) < 2:
+        return False
+    close15 = float(k15[-2][4])  # dernière bougie 15m COMPLÈTE
+
+    ok_level = breakout_level is not None and close15 >= breakout_level
+    ok_ema   = ema25_1h is not None and close15 >= (ema25_1h * (1 - tol))
+    return ok_level or ok_ema
 
 def compute_ema(prices, period=200):
     weights = np.exp(np.linspace(-1., 0., period))
@@ -1126,7 +1153,7 @@ async def process_symbol(symbol):
             log_refusal(symbol, f"Volume 15m insuffisant ({vol_ratio_15m:.2f}x < {VOL_CONFIRM_MULT}x)")
             return
 
-        # === Confluence & scoring (recréés) ===
+                # === Confluence & scoring (recréés) ===
         volume_ok  = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
         trend_ok   = (price > ema200) and supertrend_signal and (adx_value >= 22)
         momentum_ok= (macd > signal) and (rsi >= 55)
@@ -1143,8 +1170,8 @@ async def process_symbol(symbol):
         confidence   = compute_confidence_score(indicators)
         label_conf   = label_confidence(confidence)
         position_pct = POSITION_BY_SCORE.get(confidence, 5)
-        
-                # --- Décision d'achat (standard) avec filtre 15m ---
+
+        # --- Décision d'achat (standard) avec filtre 15m ---
         brk_ok, br_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
         last3_change = (closes[-1] - closes[-4]) / closes[-4]
         if last3_change > 0.022:
@@ -1159,6 +1186,20 @@ async def process_symbol(symbol):
             if not ok15:
                 log_refusal(symbol, f"Filtre 15m non validé (BRK): {det15}")
                 return
+
+            # --- Anti-chasse (wick 1h) + confirmation 15m + entrée limit resserrée ---
+            if is_wick_hunt_1h(klines[-1]):
+                log_refusal(symbol, "Anti-chasse: mèche haute dominante sur la bougie 1h d'entrée")
+                return
+
+            if not confirm_15m_after_signal(k15, breakout_level=br_level, ema25_1h=ema25, tol=0.001):
+                log_refusal(symbol, "Anti-chasse: pas de clôture 15m > niveau de retest OU > EMA25(1h) ±0.1%")
+                return
+
+            if price > ema25 * 1.01:
+                log_refusal(symbol, f"Entrée limit: prix {price:.4f} > EMA25*1.01 ({ema25*1.01:.4f})")
+                return
+
             buy = True
             label = "⚡ Breakout + Retest validé (1h) + Confluence"
             reasons = [label, f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
@@ -1172,12 +1213,27 @@ async def process_symbol(symbol):
                 if not ok15:
                     log_refusal(symbol, f"Filtre 15m non validé (PB EMA25): {det15}")
                     return
+
+                # --- Anti-chasse & confirmation 15m ---
+                if is_wick_hunt_1h(klines[-1]):
+                    log_refusal(symbol, "Anti-chasse: mèche haute dominante sur la bougie 1h d'entrée (PB)")
+                    return
+
+                # pour PB: on exige close 15m > EMA25(1h) ±0.1%
+                if not confirm_15m_after_signal(k15, breakout_level=None, ema25_1h=ema25, tol=0.001):
+                    log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (PB)")
+                    return
+
+                if price > ema25 * 1.01:
+                    log_refusal(symbol, f"Entrée limit (PB): prix {price:.4f} > EMA25*1.01 ({ema25*1.01:.4f})")
+                    return
+
                 buy = True
                 label = "✅ Pullback EMA25 propre + Confluence"
                 reasons = [label, f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
 
-
         # === GESTION TP / HOLD / SELL ===
+
         sell = False
         if symbol in trades and trades[symbol].get("strategy", "standard") == "standard":
             entry = trades[symbol]['entry']
@@ -1718,6 +1774,27 @@ async def process_symbol_aggressive(symbol):
         label_conf = label_confidence(score)
         position_pct = POSITION_BY_SCORE.get(score, 5)
         if score < 7:
+            return
+
+        # --- Anti-chasse (wick 1h) + confirmation 15m + entrée limit (aggressive) ---
+        if is_wick_hunt_1h(klines[-1]):
+            log_refusal(symbol, "Anti-chasse: mèche haute dominante sur la bougie 1h d'entrée (aggressive)")
+            return
+
+        # Confirmation 15m après le signal:
+        # - si on est proche du niveau de breakout (near_level) → exiger 1 clôture 15m > niveau de retest (last10_high)
+        # - sinon (near_ema25) → exiger 1 clôture 15m > EMA25(1h) ±0.1%
+        br_level_for_check = last10_high if near_level else None
+        if not confirm_15m_after_signal(k15, breakout_level=br_level_for_check, ema25_1h=ema25, tol=0.001):
+            if br_level_for_check is not None:
+                log_refusal(symbol, "Anti-chasse: pas de clôture 15m > niveau de retest (aggressive)")
+            else:
+                log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (aggressive)")
+            return
+
+        # Entrée limit resserrée
+        if price > ema25 * 1.01:
+            log_refusal(symbol, f"Entrée limit (aggressive): prix {price:.4f} > EMA25*1.01 ({ema25*1.01:.4f})")
             return
 
         # --- Circuit breaker JOUR (aggressive) ---
