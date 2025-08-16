@@ -517,7 +517,6 @@ def is_market_bullish():
         return False
 
 def btc_regime_blocked():
-    """Retourne (blocked: bool, reason: str). Active un cooldown si BTC en régime négatif."""
     global btc_block_until, btc_block_reason
 
     k1h = market_cache.get("BTCUSDT", [])
@@ -528,8 +527,8 @@ def btc_regime_blocked():
     drop1h = (closes[-1] - closes[-2]) / max(closes[-2], 1e-9) * 100.0
     drop3h = (closes[-1] - closes[-4]) / max(closes[-4], 1e-9) * 100.0 if len(closes) >= 4 else 0.0
 
-    rsi  = rsi_tv(closes, period=14)
-    adx  = adx_tv(k1h, period=14)
+    rsi  = rsi_tv(closes, 14)
+    adx  = adx_tv(k1h, 14)
     macd, sig = compute_macd(closes)
     st_ok = compute_supertrend(k1h)
     ema25 = ema_tv(closes, 25)
@@ -542,15 +541,23 @@ def btc_regime_blocked():
     )
 
     now = datetime.now(timezone.utc)
+
+    # --- Safety valve: si on était en cooldown mais conditions redevenues OK -> on lève le blocage
+    if btc_block_until and now < btc_block_until:
+        quick_unblock = (rsi > 50) and (macd > sig) and st_ok
+        if quick_unblock:
+            btc_block_until = None
+            btc_block_reason = ""
+            return False, ""
+        else:
+            mins = (btc_block_until - now).total_seconds() / 60.0
+            return True, f"cooldown BTC {mins:.0f} min restant — {btc_block_reason}"
+
     if bear_now:
         btc_block_until  = now + timedelta(minutes=BTC_REGIME_BLOCK_MIN)
         btc_block_reason = (f"BTC -{drop1h:.2f}%/1h, -{drop3h:.2f}%/3h, "
                             f"RSI {rsi:.1f}, ADX {adx:.1f}, ST={st_onoff(st_ok)}")
         return True, btc_block_reason
-
-    if btc_block_until and now < btc_block_until:
-        mins = (btc_block_until - now).total_seconds() / 60.0
-        return True, f"cooldown BTC {mins:.0f} min restant — {btc_block_reason}"
 
     return False, ""
 
@@ -1158,7 +1165,7 @@ async def process_symbol(symbol):
             log_refusal(symbol, f"Volume 15m insuffisant ({vol_ratio_15m:.2f}x < {VOL_CONFIRM_MULT}x)")
             return
 
-                # === Confluence & scoring (recréés) ===
+        # === Confluence & scoring (recréés) ===
         volume_ok  = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
         trend_ok   = (price > ema200) and supertrend_signal and (adx_value >= 22)
         momentum_ok= (macd > signal) and (rsi >= 55)
@@ -1246,6 +1253,38 @@ async def process_symbol(symbol):
             elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
             gain = ((price - entry) / entry) * 100
             stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN)))
+            # --- Sortie anticipée si BTC tourne négatif (gain faible) ---
+            blocked, why_btc = btc_regime_blocked()
+            if blocked and gain < 0.8:
+                raison = "BTC regime turned negative"
+                msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, raison)
+                await tg_send(msg)
+
+                vol5_loc  = float(np.mean(volumes[-5:]))
+                vol20_loc = float(np.mean(volumes[-20:]))
+
+                log_trade_csv({
+                    "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                    "trade_id": trades[symbol]["trade_id"], "symbol": symbol,
+                    "event": "SELL", "strategy": "standard", "version": BOT_VERSION,
+                    "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
+                    "position_pct": trades[symbol].get("position_pct", position_pct),
+                    "sl_initial": trades[symbol].get("sl_initial", ""), "sl_final": stop,
+                    "atr_1h": atr, "atr_mult_at_entry": "",
+                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                    "supertrend_on": supertrend_signal, "ema25_1h": ema25, "ema200_1h": ema200,
+                    "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
+                    "vol_ma5": vol5_loc, "vol_ma20": vol20_loc,
+                    "vol_ratio": vol5_loc / max(vol20_loc, 1e-9),
+                    "btc_uptrend": btc_up, "eth_uptrend": eth_up,
+                    "reason_entry": trades[symbol].get("reason_entry", ""),
+                    "reason_exit": raison
+                })
+
+                log_trade(symbol, "SELL", price, gain)
+                _delete_trade(symbol)
+                return
+
             # --- Timeout intelligent (STANDARD) ---
             if (elapsed_time >= SMART_TIMEOUT_EARLIEST_H_STD
                 and gain < SMART_TIMEOUT_MIN_GAIN_STD
@@ -1907,6 +1946,38 @@ async def process_symbol_aggressive(symbol):
         # tendances BTC/ETH via le cache préchargé (pas de requêtes)
         btc_up = is_uptrend([float(k[4]) for k in market_cache.get("BTCUSDT", [])]) if market_cache.get("BTCUSDT") else False
         eth_up = is_uptrend([float(k[4]) for k in market_cache.get("ETHUSDT", [])]) if market_cache.get("ETHUSDT") else False
+
+        # --- Sortie anticipée si BTC tourne négatif (gain faible) ---
+        blocked, why_btc = btc_regime_blocked()
+        if blocked and gain < 0.8:
+            raison = "BTC regime turned negative"
+            msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, raison)
+            await tg_send(msg)
+
+            vol5_loc  = float(np.mean(volumes[-5:]))
+            vol20_loc = float(np.mean(volumes[-20:]))
+
+            log_trade_csv({
+                "ts_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                "trade_id": trades[symbol]["trade_id"], "symbol": symbol,
+                "event": "SELL", "strategy": "aggressive", "version": BOT_VERSION,
+                "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
+                "position_pct": trades[symbol]["position_pct"],
+                "sl_initial": trades[symbol]["sl_initial"], "sl_final": stop,
+                "atr_1h": atr_val_current, "atr_mult_at_entry": "",
+                "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
+                "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
+                "vol_ma5": vol5_loc, "vol_ma20": vol20_loc,
+                "vol_ratio": vol5_loc / max(vol20_loc, 1e-9),
+                "btc_uptrend": btc_up, "eth_uptrend": eth_up,
+                "reason_entry": trades[symbol]["reason_entry"],
+                "reason_exit": raison
+            })
+
+            log_trade(symbol, "SELL", price, gain)
+            _delete_trade(symbol)
+            return
 
         # --- Timeout intelligent (AGGRESSIVE) ---
         if (elapsed_time >= SMART_TIMEOUT_EARLIEST_H_AGR
