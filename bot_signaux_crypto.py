@@ -132,7 +132,6 @@ BTC_REGIME_BLOCK_MIN = 90    # minutes de blocage des ALTS
 # === Money management (global) ===
 RISK_PER_TRADE   = 0.005   # 0.5% du capital par trade
 DAILY_MAX_LOSS   = -0.03   # -3% cumulé sur la journée (UTC)
-POSITION_BY_SCORE = {7: 6, 8: 7, 9: 8, 10: 10}  # % position par score
 
 def allowed_trade_slots() -> int:
     """
@@ -225,22 +224,22 @@ def _delete_trade(symbol):
 def get_cached(symbol, tf="1h", limit=LIMIT, force: bool = False):
     """
     Retourne les klines depuis le cache de l'itération.
-    - Si pas encore en cache, on charge.
-    - Si le cache existe mais est plus court que `limit`, on recharge avec `limit`.
-    - `force=True` pour forcer un rechargement.
+    - Recharge si `force=True` ou si le cache est absent OU plus court que `limit`.
+    - N'écrase pas le cache existant si l'API renvoie moins/vides.
     """
-    if symbol not in symbol_cache:
-        symbol_cache[symbol] = {}
+    d = symbol_cache.setdefault(symbol, {})
+    series = d.get(tf)
 
-    # Série présente ?
-    series = symbol_cache[symbol].get(tf)
+    need_reload = force or (series is None) or (int(limit) and len(series) < int(limit))
 
-    # Besoin d'upgrader (ou initialiser / forcer) ?
-    if force or series is None or len(series) < int(limit):
-        series = get_klines(symbol, interval=tf, limit=limit)
-        symbol_cache[symbol][tf] = series
+    if need_reload:
+        fresh = get_klines(symbol, interval=tf, limit=int(limit))
+        # On ne remplace que si on a vraiment mieux/plus long
+        if fresh and (series is None or len(fresh) >= len(series)):
+            d[tf] = fresh
+            series = fresh
 
-    return series
+    return series or []
 
 # ====== META / HELPERS POUR MESSAGES & IDs ======
 BOT_VERSION = "v1.0.0"
@@ -646,6 +645,7 @@ def get_volatility(atr, price):
 def _clamp(x, a, b):
     return max(a, min(b, x))
 
+
 def pick_sl_pct(volatility, pct_min, pct_max, v_hi=0.02):
     """
     Choisit un % de stop entre pct_min et pct_max selon la volatilité (ATR/price).
@@ -654,6 +654,31 @@ def pick_sl_pct(volatility, pct_min, pct_max, v_hi=0.02):
     v = _clamp(volatility, 0.0, v_hi)
     t = 0.0 if v_hi == 0 else (v / v_hi)
     return pct_min + (pct_max - pct_min) * t
+
+# --- Money management (risk-based) ---
+# garde-fous globaux
+POS_MIN_PCT = 1.0   # min 1% du capital
+POS_MAX_PCT = 10.0  # max 10% du capital
+
+def position_pct_from_risk(entry_price: float, stop_price: float, score: int | None = None) -> float:
+    """
+    Taille = (RISK_PER_TRADE / distance_stop) en %
+    - distance_stop = (entry - stop)/entry  (en %)
+    - cap global entre POS_MIN_PCT et POS_MAX_PCT
+    - cap optionnel par score si tu gardes POSITION_BY_SCORE
+    """
+    risk_pct = (entry_price - stop_price) / max(entry_price, 1e-9)  # distance du stop en %
+    if risk_pct <= 0:
+        return POS_MIN_PCT
+    pos_pct = (RISK_PER_TRADE / risk_pct) * 100.0
+
+    # Si tu veux encore plafonner par le score, décommente la ligne suivante
+    # cap_score = POSITION_BY_SCORE.get(score, POS_MAX_PCT) if score is not None else POS_MAX_PCT
+    # pos_pct = min(pos_pct, cap_score)
+
+    # Cap dur global
+    return float(_clamp(pos_pct, POS_MIN_PCT, POS_MAX_PCT))
+
 
 def compute_supertrend(klines, period=10, multiplier=3):
     atr = atr_tv(klines, period)          # <- au lieu de compute_atr
@@ -1322,19 +1347,7 @@ async def process_symbol(symbol):
         sl_pct_sizing   = pick_sl_pct(volatility, INIT_SL_PCT_STD_MIN, INIT_SL_PCT_STD_MAX)
         stop_for_sizing = price * (1.0 - sl_pct_sizing)
 
-        # --- Position sizing au risque ---
-        risk_pct = (price - stop_for_sizing) / max(price, 1e-9)  # distance du stop en %
-        if risk_pct > 0:
-            # % du capital à engager pour risquer au plus RISK_PER_TRADE
-            pos_pct_risk = (RISK_PER_TRADE / risk_pct) * 100.0
-            # borne via scoring + garde-fous 1%–10%
-            position_pct = min(
-                max(1.0, pos_pct_risk),
-                POSITION_BY_SCORE.get(confidence, 5)
-            )
-        else:
-            position_pct = POSITION_BY_SCORE.get(confidence, 5)
-
+        position_pct = position_pct_from_risk(price, stop_for_sizing)
 
         # --- Décision d'achat (standard) avec filtre 15m ---
         brk_ok, br_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
@@ -2036,14 +2049,8 @@ async def process_symbol_aggressive(symbol):
         sl_pct_sizing_aggr = pick_sl_pct(volatility_aggr, INIT_SL_PCT_AGR_MIN, INIT_SL_PCT_AGR_MAX)
         stop_for_sizing    = price * (1.0 - sl_pct_sizing_aggr)
 
-        risk_pct = (price - stop_for_sizing) / max(price, 1e-9)
-        if risk_pct > 0:
-            pos_pct_risk = (RISK_PER_TRADE / risk_pct) * 100.0
-            cap_score    = POSITION_BY_SCORE.get(score, 5)
-            position_pct = min(max(1.0, pos_pct_risk), cap_score)
-        else:
-            position_pct = POSITION_BY_SCORE.get(score, 5)
-
+        # Taille de position basée sur le risque (+ garde-fous min/max)
+        position_pct = position_pct_from_risk(price, stop_for_sizing, score)
 
         # --- Anti-chasse (wick 1h) + confirmation 15m + entrée limit (aggressive) ---
         if is_wick_hunt_1h(klines[-1]):
@@ -2085,10 +2092,9 @@ async def process_symbol_aggressive(symbol):
         # ---- Entrée ----
         trade_id = make_trade_id(symbol)
 
-        # Conserver cette var car réutilisée plus bas dans les logs/CSV
-        ema200_1h = ema200
+        ema200_1h = ema200  # réutilisé plus bas
 
-        # ✅ Utilise le stop issu du sizing au risque (calculé plus haut)
+        # ✅ Stop issu du sizing au risque
         sl_initial = stop_for_sizing
 
         trades[symbol] = {
@@ -2096,7 +2102,7 @@ async def process_symbol_aggressive(symbol):
             "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
             "confidence": score,
             "stop": sl_initial,
-            "position_pct": position_pct,   # ← vient du sizing au risque
+            "position_pct": position_pct,   # ← vient de position_pct_from_risk(...)
             "trade_id": trade_id,
             "tp_times": {},
             "sl_initial": sl_initial,
