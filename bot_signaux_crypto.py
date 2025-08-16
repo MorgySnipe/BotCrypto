@@ -396,6 +396,61 @@ def compute_macd(prices, short=12, long=26, signal=9):
     signal_line = compute_ema_series(macd_line, signal)
     return macd_line[-1], signal_line[-1]
 
+# ==== Helpers EMA/Structure 15m ====
+
+def ema_tv_series(values, period):
+    """
+    Série EMA 'TradingView-like' (même recursion que compute_ema_series).
+    Retourne un np.array de même longueur que 'values'.
+    """
+    return compute_ema_series(np.asarray(values, dtype=float), period)
+
+def is_bull_structure_15m(highs, lows, n=3):
+    """
+    True si les 'n' dernières bougies complètes forment une structure haussière :
+    HH en progression ET HL en progression (strictement croissants).
+    """
+    if len(highs) < n or len(lows) < n:
+        return False
+    hh = highs[-n:]
+    hl = lows[-n:]
+    hh_up = all(hh[i] < hh[i+1] for i in range(n-1))
+    hl_up = all(hl[i] < hl[i+1] for i in range(n-1))
+    return hh_up and hl_up
+
+def check_15m_filter(k15, breakout_level=None):
+    """
+    Vérifie le filtre 15m avant achat.
+    - EMA20(15m) pente positive (EMA20[t] > EMA20[t-1])
+    - Structure haussière sur 3 bougies complètes (HH & HL progressent)
+    - Close15m > EMA20(15m)
+    - Si breakout_level fourni (breakout+retest), Close15m >= breakout_level
+    Retourne (ok: bool, details: str)
+    """
+    if not k15 or len(k15) < 25:
+        return False, "Données 15m insuffisantes"
+
+    # On ne prend que les bougies COMPLÈTES (on exclut la bougie en cours)
+    k = k15[:-1] if len(k15) >= 2 else k15
+    closes = [float(x[4]) for x in k]
+    highs  = [float(x[2]) for x in k]
+    lows   = [float(x[3]) for x in k]
+
+    ema20_series = ema_tv_series(closes, 20)
+    if len(ema20_series) < 2:
+        return False, "EMA20(15m) insuffisante"
+
+    ema20_up   = ema20_series[-1] > ema20_series[-2]
+    close_ok   = closes[-1] > ema20_series[-1]
+    struct_ok  = is_bull_structure_15m(highs, lows, n=3)
+    retest_ok  = True if breakout_level is None else (closes[-1] >= breakout_level)
+
+    ok = ema20_up and close_ok and struct_ok and retest_ok
+    details = (f"EMA20_up={ema20_up}, Struct={struct_ok}, Close>EMA20={close_ok}"
+               + (f", Close>retest={retest_ok}" if breakout_level is not None else ""))
+    return ok, details
+
+
 def compute_ema(prices, period=200):
     weights = np.exp(np.linspace(-1., 0., period))
     weights /= weights.sum()
@@ -1070,8 +1125,11 @@ async def process_symbol(symbol):
         if vol_ratio_15m < VOL_CONFIRM_MULT:
             log_refusal(symbol, f"Volume 15m insuffisant ({vol_ratio_15m:.2f}x < {VOL_CONFIRM_MULT}x)")
             return
-        
-        buy = False
+
+        # === Confluence & scoring (recréés) ===
+        volume_ok  = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
+        trend_ok   = (price > ema200) and supertrend_signal and (adx_value >= 22)
+        momentum_ok= (macd > signal) and (rsi >= 55)
 
         indicators = {
             "rsi": rsi,
@@ -1079,33 +1137,41 @@ async def process_symbol(symbol):
             "signal": signal,
             "supertrend": supertrend_signal,
             "adx": adx_value,
-            "volume_ok": np.mean(volumes[-5:]) > np.mean(volumes[-20:]),
+            "volume_ok": volume_ok,
             "above_ema200": price > ema200,
         }
-        confidence = compute_confidence_score(indicators)
-        label_conf = label_confidence(confidence)
-
-        # -- NEW: position sizing basé sur le score --
+        confidence   = compute_confidence_score(indicators)
+        label_conf   = label_confidence(confidence)
         position_pct = POSITION_BY_SCORE.get(confidence, 5)
-
-        volume_ok = np.mean(volumes[-5:]) > np.mean(volumes[-20:])
-        trend_ok = (price > ema200) and supertrend_signal and (adx_value >= 22)
-        momentum_ok = (macd > signal) and (rsi >= 55)
-
-        brk_ok, _ = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
+        
+                # --- Décision d'achat (standard) avec filtre 15m ---
+        brk_ok, br_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
         last3_change = (closes[-1] - closes[-4]) / closes[-4]
         if last3_change > 0.022:
             brk_ok = False
 
+        buy = False
         reasons = []
+
         if brk_ok and trend_ok and momentum_ok and volume_ok:
+            # Filtre 15m avec niveau de breakout
+            ok15, det15 = check_15m_filter(k15, breakout_level=br_level)
+            if not ok15:
+                log_refusal(symbol, f"Filtre 15m non validé (BRK): {det15}")
+                return
             buy = True
             label = "⚡ Breakout + Retest validé (1h) + Confluence"
             reasons = [label, f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
+
         elif trend_ok and momentum_ok and volume_ok:
             near_ema25 = price <= ema25 * 1.01
             candle_ok = (abs(highs[-1] - lows[-1]) / max(lows[-1], 1e-9)) <= 0.03
             if near_ema25 and candle_ok:
+                # Filtre 15m sans niveau de breakout
+                ok15, det15 = check_15m_filter(k15, breakout_level=None)
+                if not ok15:
+                    log_refusal(symbol, f"Filtre 15m non validé (PB EMA25): {det15}")
+                    return
                 buy = True
                 label = "✅ Pullback EMA25 propre + Confluence"
                 reasons = [label, f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
@@ -1625,6 +1691,16 @@ async def process_symbol_aggressive(symbol):
 
         if vol_ratio_15m < VOL_CONFIRM_MULT:
             log_refusal(symbol, f"Volume 15m insuffisant ({vol_ratio_15m:.2f}x < {VOL_CONFIRM_MULT}x)")
+            return
+
+        # --- Filtre structure 15m (aggressive) ---
+        if near_level:
+            ok15, det15 = check_15m_filter(k15, breakout_level=last10_high)
+        else:
+            ok15, det15 = check_15m_filter(k15, breakout_level=None)
+
+        if not ok15:
+            log_refusal(symbol, f"Filtre 15m non validé (aggressive): {det15}")
             return
             
         # ---- Indicateurs ----
