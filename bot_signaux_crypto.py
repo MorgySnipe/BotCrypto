@@ -2638,7 +2638,7 @@ async def main_loop():
             await asyncio.gather(*(process_symbol_aggressive(s) for s in SYMBOLS if s not in trades))
 
                                    for s in SYMBOLS
-                                   if (s not in trades) or (trades.get(s, {}).get("strategy") == "aggressive")))
+                                   if (s not in trades) or (trades.get(s, {}).get("strategy") == "aggressive"):
 
             print("✔️ Itération terminée", flush=True)
 
