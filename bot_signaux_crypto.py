@@ -135,6 +135,18 @@ ACCOUNT_EQUITY   = 10000   # capital de référence pour sizing
 DAILY_MAX_LOSS   = -0.03   # -3% cumulé sur la journée (UTC)
 POSITION_BY_SCORE = {7: 6, 8: 7, 9: 8, 10: 10}  # % position par score
 
+def allowed_trade_slots() -> int:
+    """
+    MAX_TRADES dynamique :
+    min(7, 1 + nb_trades_avec_score_>=8)
+    On compte les trades OUVERTS avec confidence >= 8.
+    """
+    try:
+        high = sum(1 for t in trades.values() if float(t.get("confidence", 0)) >= 8)
+    except Exception:
+        high = 0
+    return min(7, 1 + high)
+
 def _parse_dt_flex(ts: str):
     """Parser tolérant pour 'history' (SELL) : '%Y-%m-%d %H:%M:%S' ou '%Y-%m-%d %H:%M'."""
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
@@ -298,6 +310,26 @@ def kline_vol_quote(k):  # k[7] = quote asset volume (ex: USDT)
 
 def volumes_series(klines, quote=True):
     return [kline_vol_quote(k) for k in klines] if quote else [float(k[5]) for k in klines]
+
+def is_hourly_volume_anomalously_low(k1h, factor=0.5, min_lookback=50):
+    """
+    Retourne (too_low: bool, last_vol: float, median_ref: float, lookback_used: int)
+    Compare le volume de la DERNIÈRE bougie 1h à la médiane du lookback dispo.
+    - factor=0.5 => trop faible si < 50% de la médiane.
+    - On garde aussi le plancher MIN_VOLUME.
+    """
+    if not k1h or len(k1h) < min_lookback:
+        return False, 0.0, 0.0, 0
+
+    vols = np.array(volumes_series(k1h, quote=True), dtype=float)
+    last_vol = float(vols[-1])
+    # On essaie d'utiliser jusqu'à 720 bougies (≈30j) si dispo ; sinon ce qu'on a.
+    lookback = min(len(vols), 720)
+    ref = float(np.median(vols[-lookback:]))
+
+    too_low = (last_vol < max(MIN_VOLUME, ref * factor))
+    return bool(too_low), last_vol, ref, lookback
+
 # ====== /HELPERS ======
 
 def safe_message(text):
@@ -1037,12 +1069,15 @@ async def process_symbol(symbol):
                     vol_fade = ((atr_curr / max(price, 1e-9)) < 0.004) and (macd_now < signal_now)
 
                     should_close_soft = (
-                        (gain <= 0.0 and (rsi_now < 50 or macd_now < signal_now))
-                        or (gain < 0.5 and (rsi_now < 48 or macd_now < signal_now) and adx_now < 18)
-                        or (closes_now[-1] < ema25_now and not st_ok)
-                        or underperf
-                        or vol_fade
-                    ) 
+                        (gain <= 0.0 and (rsi_now < 50 or macd_now < signal_now)) or
+                        (gain < 0.5 and (rsi_now < 48 or macd_now < signal_now) and adx_now < 18) or
+                        (closes_now[-1] < ema25_now and not st_ok) or
+                        underperf or
+                        vol_fade
+                    )
+
+                    # Forçage hard après un timeout (ex: 24h)
+                    force_close = (elapsed_h >= AUTO_CLOSE_HARD_H)
 
                     if should_close_soft or force_close:
                         trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
@@ -1077,6 +1112,7 @@ async def process_symbol(symbol):
                         log_trade(symbol, "SELL", price, gain)
                         _delete_trade(symbol)
                         return
+
                     else:
                         # on laisse courir : sécuriser au moins à BE si possible
                         if "stop" in trades[symbol]:
@@ -1091,6 +1127,41 @@ async def process_symbol(symbol):
         if not klines or len(klines) < 50:
             log_refusal(symbol, "Données 1h insuffisantes")
             return
+
+        # --- Volume 1h anormalement faible vs médiane 30j (si dispo) ---
+        try:
+            vol_now_1h = float(klines[-1][7])  # quote volume de la bougie 1h en cours
+
+            # On tente de charger ~30 jours (720 bougies 1h). Si l'endpoint refuse, on tombera au fallback.
+            k1h_30d = get_cached(symbol, '1h', limit=750) or []
+            vols_hist = volumes_series(k1h_30d, quote=True)
+            vols_hist = vols_hist[-721:]  # ~30j + bougie courante
+
+            if len(vols_hist) >= 200:
+                # médiane sur les 30j SANS la bougie en cours
+                med_30d = float(np.median(vols_hist[:-1]))
+                # seuil “anormalement faible” = 40% de la médiane 30j
+                if med_30d > 0 and vol_now_1h < 0.40 * med_30d:
+                    log_refusal(
+                        symbol,
+                        f"Volume 1h anormalement faible ({vol_now_1h:.0f} < 0.40×med30j {med_30d:.0f})"
+                    )
+                    return
+            else:
+                # Fallback si on n'a pas 30j : garder le garde-fou MIN_VOLUME
+                if vol_now_1h < MIN_VOLUME:
+                    log_refusal(symbol, f"Volume 1h trop faible ({vol_now_1h:.0f} < {MIN_VOLUME})")
+                    return
+        except Exception:
+            # En cas d’erreur réseau ou autre, fallback MIN_VOLUME
+            try:
+                vol_now_1h = float(klines[-1][7])
+                if vol_now_1h < MIN_VOLUME:
+                    log_refusal(symbol, f"Volume 1h trop faible ({vol_now_1h:.0f} < {MIN_VOLUME})")
+                    return
+            except Exception:
+                pass
+
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
         lows = [float(k[3]) for k in klines]
@@ -1166,9 +1237,12 @@ async def process_symbol(symbol):
                 )
                 return
                 
-        if len(trades) >= MAX_TRADES:
-            log_refusal(symbol, f"Nombre max de trades atteint ({len(trades)}/{MAX_TRADES})")
+        # ----- Garde-fous -----
+        slots = allowed_trade_slots()
+        if len(trades) >= slots:
+            log_refusal(symbol, f"Nombre max de trades atteint dynamiquement ({len(trades)}/{slots})")
             return
+
 
         ok_session, _sess = is_active_liquidity_session()
         if not ok_session:
@@ -1316,7 +1390,7 @@ async def process_symbol(symbol):
                     "trade_id": trades[symbol]["trade_id"], "symbol": symbol,
                     "event": "SELL", "strategy": "standard", "version": BOT_VERSION,
                     "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
-                    "position_pct": trades[symbol].get("position_pct", position_pct),
+                    "position_pct": trades[symbol].get("position_pct", ""),
                     "sl_initial": trades[symbol].get("sl_initial", ""), "sl_final": stop,
                     "atr_1h": atr, "atr_mult_at_entry": "",
                     "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
@@ -1353,7 +1427,7 @@ async def process_symbol(symbol):
                         "trade_id": trades[symbol]["trade_id"], "symbol": symbol, "event": "SMART_TIMEOUT",
                         "strategy": "standard", "version": BOT_VERSION,
                         "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
-                        "position_pct": trades[symbol].get("position_pct", position_pct),
+                        "position_pct": trades[symbol].get("position_pct", ""),
                         "sl_initial": trades[symbol].get("sl_initial", ""), "sl_final": stop,
                         "atr_1h": atr, "atr_mult_at_entry": "",
                         "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
@@ -1436,7 +1510,7 @@ async def process_symbol(symbol):
                     "exit": price,
                     "price": price,
                     "pnl_pct": gain,
-                    "position_pct": trades[symbol].get("position_pct", position_pct),
+                    "position_pct": trades[symbol].get("position_pct", ""),
                     "sl_initial": trades[symbol].get("sl_initial", ""),  # stop initial en %
                     "sl_final": stop,
                     "atr_1h": atr,
@@ -1502,7 +1576,7 @@ async def process_symbol(symbol):
                             "exit": "",
                             "price": price,
                             "pnl_pct": gain,
-                            "position_pct": trades[symbol].get("position_pct", position_pct),
+                            "position_pct": trades[symbol].get("position_pct", ""),
                             "sl_initial": trades[symbol].get("sl_initial", ""),
                             "sl_final": trades[symbol]["stop"],
                             "atr_1h": atr,
@@ -1545,7 +1619,7 @@ async def process_symbol(symbol):
                     "exit": price,
                     "price": price,
                     "pnl_pct": gain,
-                    "position_pct": trades[symbol].get("position_pct", position_pct),
+                    "position_pct": trades[symbol].get("position_pct", ""),
                     "sl_initial": trades[symbol].get("sl_initial", ""),
                     "sl_final": trades[symbol]["stop"],
                     "atr_1h": atr,
@@ -1741,6 +1815,32 @@ async def process_symbol_aggressive(symbol):
         if price is None:
             log_refusal(symbol, "API prix indisponible")
             return
+
+        # --- Volume 1h anormalement faible vs médiane 30j (si dispo) ---
+        try:
+            vol_now_1h = float(klines[-1][7])  # volume quote de la bougie 1h
+
+            k1h_30d  = get_cached(symbol, '1h', limit=750) or []
+            vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30 jours
+
+            if len(vols_hist) >= 200:
+                med_30d = float(np.median(vols_hist[:-1]))  # médiane sans la bougie en cours
+                if med_30d > 0 and vol_now_1h < 0.40 * med_30d:
+                    log_refusal(symbol, f"Volume 1h anormalement faible ({vol_now_1h:.0f} < 0.40×med30j {med_30d:.0f})")
+                    return
+            else:
+                if vol_now_1h < MIN_VOLUME:
+                    log_refusal(symbol, f"Volume 1h trop faible ({vol_now_1h:.0f} < {MIN_VOLUME})")
+                    return
+        except Exception:
+            try:
+                vol_now_1h = float(klines[-1][7])
+                if vol_now_1h < MIN_VOLUME:
+                    log_refusal(symbol, f"Volume 1h trop faible ({vol_now_1h:.0f} < {MIN_VOLUME})")
+                    return
+            except Exception:
+                pass
+
         # ---- Indicateurs (versions TradingView) ----
         rsi = rsi_tv(closes, period=14)
         macd, signal = compute_macd(closes)
@@ -1752,8 +1852,11 @@ async def process_symbol_aggressive(symbol):
         macd_prev, signal_prev = compute_macd(closes[:-1])
 
         # ---- Garde-fous ----
-        if len(trades) >= MAX_TRADES:
+        slots = allowed_trade_slots()
+        if len(trades) >= slots:
+            log_refusal(symbol, f"Nombre max de trades atteint dynamiquement ({len(trades)}/{slots})")
             return
+            
         ok_session, _sess = is_active_liquidity_session()
         if not ok_session:
             log_refusal(symbol, "Low-liquidity session")
