@@ -996,12 +996,26 @@ async def process_symbol(symbol):
                     ema25_now = ema_tv(closes_now, 25)
                     st_ok = compute_supertrend(k1h)
 
+                    # --- critères supplémentaires (timeout soft) ---
+                    # 1) Sous-performance vs BTC sur 6h
+                    underperf = False
+                    if market_cache.get("BTCUSDT") and len(closes_now) >= 7 and len(market_cache["BTCUSDT"]) >= 7:
+                        btc_closes = [float(k[4]) for k in market_cache["BTCUSDT"]]
+                        alt_pct_6h = ((closes_now[-1] - closes_now[-7]) / max(closes_now[-7], 1e-9)) * 100.0
+                        btc_pct_6h = ((btc_closes[-1] - btc_closes[-7]) / max(btc_closes[-7], 1e-9)) * 100.0
+                        underperf = (alt_pct_6h < (btc_pct_6h - 1.0)) and (adx_now < 15)
+
+                    # 2) Volatilité qui s’éteint
+                    atr_curr = atr_tv(k1h, 14)
+                    vol_fade = ((atr_curr / max(price, 1e-9)) < 0.004) and (macd_now < signal_now)
+
                     should_close_soft = (
-                        (gain <= 0.0 and (rsi_now < 50 or macd_now < signal_now)) or
-                        (gain < 0.5 and (rsi_now < 48 or macd_now < signal_now) and adx_now < 18) or
-                        (closes_now[-1] < ema25_now and not st_ok)
-                    )
-                    force_close = (elapsed_h >= AUTO_CLOSE_HARD_H)
+                        (gain <= 0.0 and (rsi_now < 50 or macd_now < signal_now))
+                        or (gain < 0.5 and (rsi_now < 48 or macd_now < signal_now) and adx_now < 18)
+                        or (closes_now[-1] < ema25_now and not st_ok)
+                        or underperf
+                        or vol_fade
+                    ) 
 
                     if should_close_soft or force_close:
                         trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
@@ -1602,12 +1616,29 @@ async def process_symbol_aggressive(symbol):
                     ema25_now = ema_tv(closes_now, 25)
                     st_ok = compute_supertrend(k1h)
 
-                    # un peu PLUS TOLÉRANT que la standard
+                    # --- critères supplémentaires (timeout soft, aggressive) ---
+
+                    # 1) Sous-performance vs BTC sur 6h
+                    underperf = False
+                    if market_cache.get("BTCUSDT") and len(closes_now) >= 7 and len(market_cache["BTCUSDT"]) >= 7:
+                        btc_closes = [float(k[4]) for k in market_cache["BTCUSDT"]]
+                        alt_pct_6h = ((closes_now[-1] - closes_now[-7]) / max(closes_now[-7], 1e-9)) * 100.0
+                        btc_pct_6h = ((btc_closes[-1] - btc_closes[-7]) / max(btc_closes[-7], 1e-9)) * 100.0
+                        underperf = (alt_pct_6h < (btc_pct_6h - 1.0)) and (adx_now < 15)
+
+                    # 2) Volatilité qui s’éteint
+                    atr_curr = atr_tv(k1h, 14)
+                    vol_fade = ((atr_curr / max(price, 1e-9)) < 0.004) and (macd_now < signal_now)
+
+                    # — remplace ta définition actuelle de should_close_soft par ceci —
                     should_close_soft = (
                         (gain <= -0.2 and (rsi_now < 48 or macd_now < signal_now)) or
                         (gain < 0.3 and (rsi_now < 46 or macd_now < signal_now) and adx_now < 16) or
-                        (closes_now[-1] < ema25_now * 0.997 and not st_ok)
+                        (closes_now[-1] < ema25_now * 0.997 and not st_ok) or
+                        underperf or
+                        vol_fade
                     )
+
                     force_close = (elapsed_h >= AUTO_CLOSE_HARD_H)
 
                     if should_close_soft or force_close:
