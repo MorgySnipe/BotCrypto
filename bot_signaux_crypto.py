@@ -1306,8 +1306,6 @@ async def process_symbol(symbol):
                     
             if tendance_soft_notes:
                 reasons += [f"Avertissements tendance: {', '.join(tendance_soft_notes)}"]
-
-                )
                 return
 
 
