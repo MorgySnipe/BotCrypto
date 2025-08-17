@@ -324,6 +324,19 @@ def kline_vol_quote(k):  # k[7] = quote asset volume (ex: USDT)
 def volumes_series(klines, quote=True):
     return [kline_vol_quote(k) for k in klines] if quote else [float(k[5]) for k in klines]
 
+def median_volume(symbol, interval="1h", days=30):
+    """
+    Calcule la médiane des volumes sur les X derniers jours (par défaut 30j)
+    en utilisant les bougies 1h.
+    """
+    klines = get_cached(symbol, interval)
+    if not klines or len(klines) < 24 * days:
+        return 0.0
+
+    # Le volume se trouve en position [5] dans chaque kline
+    volumes = [float(k[5]) for k in klines]
+    return float(np.median(volumes[-24*days:]))
+
 def is_hourly_volume_anomalously_low(k1h, factor=0.5, min_lookback=50):
     """
     Retourne (too_low: bool, last_vol: float, median_ref: float, lookback_used: int)
