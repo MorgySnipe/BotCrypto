@@ -1691,11 +1691,11 @@ async def process_symbol_aggressive(symbol):
                 # Les sorties se feront via SMART_TIMEOUT / momentum cassé / fast-exit 5m / trailing stop.
                 pass
 
-                    else:
-                        # agressif = on laisse respirer, pas de remontée forcée du stop ici
-                        trailing_stop_advanced(symbol, price)
-                        await tg_send(f"⏳ {symbol} — {elapsed_h:.1f}h: trade agressif maintenu (gain {gain:.2f}%, momentum OK).")
-                        return
+            else:
+                # agressif = on laisse respirer, pas de remontée forcée du stop ici
+                trailing_stop_advanced(symbol, price)
+                await tg_send(f"⏳ {symbol} — {elapsed_h:.1f}h: trade agressif maintenu (gain {gain:.2f}%, momentum OK).")
+                return
 
         # ---- Analyse agressive ----
         klines = get_cached(symbol, '1h')
