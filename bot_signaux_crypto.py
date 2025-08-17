@@ -1682,27 +1682,27 @@ async def process_symbol(symbol):
 
 async def process_symbol_aggressive(symbol):
     try:
-       # ---- Auto-close SOUPLE (aggressive) ----
-       if symbol in trades and trades[symbol].get("strategy") == "aggressive":
-           entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-           elapsed_h = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
+        # ---- Auto-close SOUPLE (aggressive) ----
+        if symbol in trades and trades[symbol].get("strategy") == "aggressive":
+            entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+            elapsed_h = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
 
-           if elapsed_h >= AUTO_CLOSE_MIN_H:
-               # On ne force plus une clôture horaire ici.
-               # Les vraies sorties seront gérées plus bas (SMART_TIMEOUT / momentum cassé / fast-exit 5m / trailing).
-               pass
+            if elapsed_h >= AUTO_CLOSE_MIN_H:
+                # On ne force plus une clôture horaire ici.
+                # Les vraies sorties seront gérées plus bas (SMART_TIMEOUT / momentum cassé / fast-exit 5m / trailing).
+                pass
 
+        # ---- Analyse agressive ----
+        klines = get_cached(symbol, '1h')
+        if not klines or len(klines) < 50:
+            log_refusal(symbol, "Données 1h insuffisantes")
+            return
 
-            # ---- Analyse agressive ----
-            klines = get_cached(symbol, '1h')
-            if not klines or len(klines) < 50:
-                log_refusal(symbol, "Données 1h insuffisantes")
-                return
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
         lows = [float(k[3]) for k in klines]
         volumes = volumes_series(klines, quote=True)
-        vol5  = float(np.mean(volumes[-5:]))  if len(volumes)  >= 5  else 0.0
+        vol5 = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
         vol20 = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
         volume_ok = (vol5 > vol20) and (vol5 > 0.0)
 
