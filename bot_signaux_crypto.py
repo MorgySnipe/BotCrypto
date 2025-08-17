@@ -1303,7 +1303,9 @@ async def process_symbol(symbol):
                 log_refusal(
                     symbol,
                     f"Entrée limit BRK: prix {price:.4f} > EMA25*1.015 ({ema25*1.015:.4f})"
-                    
+                )
+                return
+                
             if tendance_soft_notes:
                 reasons += [f"Avertissements tendance: {', '.join(tendance_soft_notes)}"]
                 return
