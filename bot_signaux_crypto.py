@@ -1795,6 +1795,14 @@ async def process_symbol_aggressive(symbol):
             indicators_soft_penalty += 1
             tendance_soft_notes.append("Prix ~ sous EMA200(1h)")
 
+        # Vérification volume (aggressive)
+        vol_now_1h = float(klines[-1][5])
+        med_30d = median_volume(symbol)
+        volume_ok = (
+            symbol == "BTCUSDT"
+            or (med_30d > 0 and vol_now_1h >= VOL_MED_MULT * med_30d)
+        )
+
         # assouplir le gate principal : on ne bloque plus uniquement sur above_ema200
         if not (supertrend_ok and adx_value >= 18 and volume_ok):
             return
