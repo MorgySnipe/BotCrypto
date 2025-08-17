@@ -1693,11 +1693,11 @@ async def process_symbol_aggressive(symbol):
                pass
 
 
-        # ---- Analyse agressive ----
-        klines = get_cached(symbol, '1h')
-        if not klines or len(klines) < 50:
-            log_refusal(symbol, "Données 1h insuffisantes")
-            return
+            # ---- Analyse agressive ----
+            klines = get_cached(symbol, '1h')
+            if not klines or len(klines) < 50:
+                log_refusal(symbol, "Données 1h insuffisantes")
+                return
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
         lows = [float(k[3]) for k in klines]
