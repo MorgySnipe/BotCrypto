@@ -92,6 +92,7 @@ SLEEP_SECONDS = 300
 MAX_TRADES = 7
 MIN_VOLUME = 1000000
 COOLDOWN_HOURS = 4
+VOL_MED_MULT = 0.15  # Tolérance volume vs médiane 30j (était 0.25)
 VOL_CONFIRM_TF = "15m"
 VOL_CONFIRM_LOOKBACK = 20
 VOL_CONFIRM_MULT = 1.5
@@ -551,16 +552,31 @@ def is_volume_increasing(klines):
     return np.mean(volumes[-5:]) > np.mean(volumes[-10:-5]) and np.mean(volumes[-5:]) > MIN_VOLUME
 
 def is_market_bullish():
+    """
+    Momentum global: OK si BTC OU ETH montrent du tonus (RSI>50 ou MACD>signal).
+    Si le cache n'est pas encore prêt, on NE bloque pas.
+    """
     try:
-        btc_prices = [float(k[4]) for k in market_cache.get('BTCUSDT', [])]
-        eth_prices = [float(k[4]) for k in market_cache.get('ETHUSDT', [])]
-        if not btc_prices or not eth_prices:
-            return False
-        return is_uptrend(btc_prices) and is_uptrend(eth_prices)
+        btc = [float(k[4]) for k in market_cache.get('BTCUSDT', [])]
+        eth = [float(k[4]) for k in market_cache.get('ETHUSDT', [])]
+        if not btc or not eth:
+            return True  # pas de données -> on ne bloque pas
+
+        rsi_btc = rsi_tv(btc, 14); macd_btc, sig_btc = compute_macd(btc)
+        rsi_eth = rsi_tv(eth, 14); macd_eth, sig_eth = compute_macd(eth)
+
+        btc_ok = (rsi_btc > 50) or (macd_btc > sig_btc)
+        eth_ok = (rsi_eth  > 50) or (macd_eth > sig_eth)
+        return btc_ok or eth_ok
     except Exception:
-        return False
+        return True
 
 def btc_regime_blocked():
+    """
+    Filtre 'panic only' : on bloque les alts seulement lors de chutes franches du BTC.
+    -1h ≤ -1.5% OU -3h ≤ -3.5%.
+    Cooldown levé si petit rebond (≥ +0.5% sur 1h).
+    """
     global btc_block_until, btc_block_reason
 
     k1h = market_cache.get("BTCUSDT", [])
@@ -569,27 +585,17 @@ def btc_regime_blocked():
 
     closes = [float(k[4]) for k in k1h]
     drop1h = (closes[-1] - closes[-2]) / max(closes[-2], 1e-9) * 100.0
-    drop3h = (closes[-1] - closes[-4]) / max(closes[-4], 1e-9) * 100.0 if len(closes) >= 4 else 0.0
+    drop3h = ((closes[-1] - closes[-4]) / max(closes[-4], 1e-9) * 100.0) if len(closes) >= 4 else 0.0
 
-    rsi  = rsi_tv(closes, 14)
-    adx  = adx_tv(k1h, 14)
-    macd, sig = compute_macd(closes)
-    st_ok = compute_supertrend(k1h)
-    ema25 = ema_tv(closes, 25)
-
-    bear_now = (
-        drop1h <= -BTC_1H_DROP_PCT
-        or drop3h <= -BTC_3H_DROP_PCT
-        or ((rsi < BTC_RSI_FLOOR or macd < sig) and adx < BTC_ADX_WEAK)
-        or (not st_ok and closes[-1] < ema25)
-    )
+    # --- PANIC ONLY ---
+    bear_now = (drop1h <= -1.5) or (drop3h <= -3.5)
 
     now = datetime.now(timezone.utc)
 
-    # --- Safety valve: si on était en cooldown mais conditions redevenues OK -> on lève le blocage
+    # Si en cooldown, lever si rebond clair
     if btc_block_until and now < btc_block_until:
-        quick_unblock = (rsi > 50) and (macd > sig) and st_ok
-        if quick_unblock:
+        rebound = drop1h >= 0.5  # +0.5% sur 1h -> on lève
+        if rebound and not bear_now:
             btc_block_until = None
             btc_block_reason = ""
             return False, ""
@@ -599,12 +605,10 @@ def btc_regime_blocked():
 
     if bear_now:
         btc_block_until  = now + timedelta(minutes=BTC_REGIME_BLOCK_MIN)
-        btc_block_reason = (f"BTC -{drop1h:.2f}%/1h, -{drop3h:.2f}%/3h, "
-                            f"RSI {rsi:.1f}, ADX {adx:.1f}, ST={st_onoff(st_ok)}")
+        btc_block_reason = f"BTC {drop1h:.2f}%/1h, {drop3h:.2f}%/3h (panic)"
         return True, btc_block_reason
 
     return False, ""
-
 
 
 def in_active_session():
@@ -1066,81 +1070,10 @@ async def process_symbol(symbol):
             elapsed_h = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
 
             if elapsed_h >= AUTO_CLOSE_MIN_H:
-                entry = trades[symbol]['entry']
-                price = get_last_price(symbol)
-                if price is None:
-                    log_refusal(symbol, "API prix indisponible")
-                    return
-                gain = ((price - entry) / entry) * 100
+                # On ne force plus une clôture horaire.
+                # Les sorties se feront via SMART_TIMEOUT / momentum cassé / fast-exit 5m / trailing stop.
+                pass
 
-                k1h = get_cached(symbol, '1h')
-                if not k1h or len(k1h) < 50:
-                    await tg_send(f"⚠️ {symbol} — {elapsed_h:.1f}h: données 1h insuffisantes, trade maintenu (gain {gain:.2f}%).")
-                else:
-                    closes_now = [float(k[4]) for k in k1h]
-                    rsi_now = rsi_tv(closes_now, 14)
-                    macd_now, signal_now = compute_macd(closes_now)
-                    adx_now = adx_tv(k1h, 14)
-                    ema25_now = ema_tv(closes_now, 25)
-                    st_ok = compute_supertrend(k1h)
-
-                    # --- critères supplémentaires (timeout soft) ---
-                    # 1) Sous-performance vs BTC sur 6h
-                    underperf = False
-                    if market_cache.get("BTCUSDT") and len(closes_now) >= 7 and len(market_cache["BTCUSDT"]) >= 7:
-                        btc_closes = [float(k[4]) for k in market_cache["BTCUSDT"]]
-                        alt_pct_6h = ((closes_now[-1] - closes_now[-7]) / max(closes_now[-7], 1e-9)) * 100.0
-                        btc_pct_6h = ((btc_closes[-1] - btc_closes[-7]) / max(btc_closes[-7], 1e-9)) * 100.0
-                        underperf = (alt_pct_6h < (btc_pct_6h - 1.0)) and (adx_now < 15)
-
-                    # 2) Volatilité qui s’éteint
-                    atr_curr = atr_tv(k1h, 14)
-                    vol_fade = ((atr_curr / max(price, 1e-9)) < 0.004) and (macd_now < signal_now)
-
-                    should_close_soft = (
-                        (gain <= 0.0 and (rsi_now < 50 or macd_now < signal_now)) or
-                        (gain < 0.5 and (rsi_now < 48 or macd_now < signal_now) and adx_now < 18) or
-                        (closes_now[-1] < ema25_now and not st_ok) or
-                        underperf or
-                        vol_fade
-                    )
-
-                    # Forçage hard après un timeout (ex: 24h)
-                    force_close = (elapsed_h >= AUTO_CLOSE_HARD_H)
-
-                    if should_close_soft or force_close:
-                        trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
-                        mode = "hard" if force_close else "soft"
-                        msg = format_autoclose_msg(symbol, trade_id, price, gain, mode)
-                        await tg_send(msg)
-
-                        vol_ser = volumes_series(k1h, quote=True)
-                        vol5 = float(np.mean(vol_ser[-5:])) if len(vol_ser) >= 5 else 0.0
-                        vol20 = float(np.mean(vol_ser[-20:])) if len(vol_ser) >= 20 else 0.0
-
-                        log_trade_csv({
-                            "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                            "trade_id": trade_id, "symbol": symbol,
-                            "event": "AUTO_CLOSE" if force_close else "AUTO_CLOSE_SOFT",
-                            "strategy": "standard", "version": BOT_VERSION,
-                            "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
-                            "position_pct": trades[symbol].get("position_pct", ""),
-                            "sl_initial": trades[symbol].get("sl_initial", ""),
-                            "sl_final": trades[symbol].get("stop", ""),
-                            "atr_1h": atr_tv(k1h, 14), "atr_mult_at_entry": "",
-                            "rsi_1h": rsi_now, "macd": macd_now, "signal": signal_now, "adx_1h": adx_now,
-                            "supertrend_on": st_ok, "ema25_1h": ema25_now, "ema200_1h": ema_tv(closes_now, 200),
-                            "ema50_4h": "", "ema200_4h": "",
-                            "vol_ma5": vol5 if vol5 else "", "vol_ma20": vol20 if vol20 else "",
-                            "vol_ratio": (vol5 / max(vol20, 1e-9)) if (vol5 and vol20) else "",
-                            "btc_uptrend": "", "eth_uptrend": "",
-                            "reason_entry": trades[symbol].get("reason_entry", ""),
-                            "reason_exit": "timeout > 24h (sécurité)" if force_close else "timeout > 12h (momentum faible)"
-                        })
-
-                        log_trade(symbol, "SELL", price, gain)
-                        _delete_trade(symbol)
-                        return
 
                     else:
                         # on laisse courir : sécuriser au moins à BE si possible
@@ -1167,9 +1100,13 @@ async def process_symbol(symbol):
             if len(vols_hist) >= 200:
                 med_30d = float(np.median(vols_hist[:-1]))  # médiane sans la bougie en cours
                 # ⛔ filtre ignoré pour BTCUSDT + seuil assoupli 25%
-                if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < 0.25 * med_30d:
-                    log_refusal(symbol, f"Volume 1h anormalement faible ({vol_now_1h:.0f} < 0.25×med30j {med_30d:.0f})")
+                if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < VOL_MED_MULT * med_30d:
+                    log_refusal(
+                        symbol,
+                        f"Volume 1h anormalement faible ({vol_now_1h:.0f} < {VOL_MED_MULT:.2f}×med30j {med_30d:.0f})"
+                    )
                     return
+
             else:
                 if vol_now_1h < MIN_VOLUME:
                     log_refusal(symbol, f"Volume 1h trop faible ({vol_now_1h:.0f} < {MIN_VOLUME})")
@@ -1219,15 +1156,21 @@ async def process_symbol(symbol):
             log_refusal(symbol, "Marché global baissier (BTC/ETH pas en uptrend)")
             return
         # Filtres de tendance avec log    
+        # --- Tendance en 'soft' (on n'interdit plus)
+        tendance_soft_notes = []
         if price < ema200:
-           log_refusal(symbol, "Prix < EMA200 (1h)")
-           return
+            tendance_soft_notes.append("Prix < EMA200(1h)")
         if closes_4h[-1] < ema200_4h:
-           log_refusal(symbol, "Clôture 4h < EMA200(4h)")
-           return
+            tendance_soft_notes.append("Close4h < EMA200(4h)")
         if closes_4h[-1] < ema50_4h:
-           log_refusal(symbol, "Clôture 4h < EMA50(4h)")
-           return
+            tendance_soft_notes.append("Close4h < EMA50(4h)")
+
+        # pénalité de score (au lieu d'un refus dur)
+        indicators_soft_penalty = 0
+        if price < ema200:          indicators_soft_penalty += 1
+        if closes_4h[-1] < ema50_4h: indicators_soft_penalty += 1
+        if closes_4h[-1] < ema200_4h: indicators_soft_penalty += 1
+
         if rsi_4h < 50:
             log_refusal(symbol, f"RSI 4h {rsi_4h:.1f} < 50")
             return
@@ -1323,7 +1266,7 @@ async def process_symbol(symbol):
             "volume_ok": volume_ok,
             "above_ema200": price > ema200,
         }
-        confidence = compute_confidence_score(indicators)
+        confidence = max(0, compute_confidence_score(indicators) - indicators_soft_penalty)
         label_conf = label_confidence(confidence)
 
         # --- Stop provisoire pour le sizing (même logique que l'entrée) ---
@@ -1362,6 +1305,10 @@ async def process_symbol(symbol):
                 log_refusal(
                     symbol,
                     f"Entrée limit BRK: prix {price:.4f} > EMA25*1.015 ({ema25*1.015:.4f})"
+                    
+            if tendance_soft_notes:
+                reasons += [f"Avertissements tendance: {', '.join(tendance_soft_notes)}"]
+
                 )
                 return
 
@@ -1742,97 +1689,10 @@ async def process_symbol_aggressive(symbol):
             elapsed_h = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
 
             if elapsed_h >= AUTO_CLOSE_MIN_H:
-                entry = trades[symbol]['entry']
-                price = get_last_price(symbol)
-                if price is None:
-                    log_refusal(symbol, "API prix indisponible")
-                    return
-                gain = ((price - entry) / entry) * 100
+                # On ne force plus une clôture horaire.
+                # Les sorties se feront via SMART_TIMEOUT / momentum cassé / fast-exit 5m / trailing stop.
+                pass
 
-                k1h = get_cached(symbol, '1h')
-                if not k1h or len(k1h) < 50:
-                    await tg_send(f"⚠️ {symbol} — {elapsed_h:.1f}h: données 1h insuffisantes, trade maintenu (gain {gain:.2f}%).")
-                    return
-                else:
-                    closes_now = [float(k[4]) for k in k1h]
-                    rsi_now = rsi_tv(closes_now, 14)
-                    macd_now, signal_now = compute_macd(closes_now)
-                    adx_now = adx_tv(k1h, 14)
-                    ema25_now = ema_tv(closes_now, 25)
-                    st_ok = compute_supertrend(k1h)
-
-                    # --- critères supplémentaires (timeout soft, aggressive) ---
-
-                    # 1) Sous-performance vs BTC sur 6h
-                    underperf = False
-                    if symbol != "BTCUSDT" and market_cache.get("BTCUSDT") and len(closes_now) >= 7 and len(market_cache["BTCUSDT"]) >= 7:
-                        btc_closes = [float(k[4]) for k in market_cache["BTCUSDT"]]
-                        alt_pct_6h = ((closes_now[-1] - closes_now[-7]) / max(closes_now[-7], 1e-9)) * 100.0
-                        btc_pct_6h = ((btc_closes[-1] - btc_closes[-7]) / max(btc_closes[-7], 1e-9)) * 100.0
-                        underperf = (alt_pct_6h < (btc_pct_6h - 1.0)) and (adx_now < 15)
-
-                    # 2) Volatilité qui s’éteint
-                    atr_curr = atr_tv(k1h, 14)
-                    vol_fade = ((atr_curr / max(price, 1e-9)) < 0.004) and (macd_now < signal_now)
-
-                    # — remplace ta définition actuelle de should_close_soft par ceci —
-                    should_close_soft = (
-                        (gain <= -0.2 and (rsi_now < 48 or macd_now < signal_now)) or
-                        (gain < 0.3 and (rsi_now < 46 or macd_now < signal_now) and adx_now < 16) or
-                        (closes_now[-1] < ema25_now * 0.997 and not st_ok) or
-                        underperf or
-                        vol_fade
-                    )
-
-                    force_close = (elapsed_h >= AUTO_CLOSE_HARD_H)
-
-                    if should_close_soft or force_close:
-                        trade_id = trades[symbol].get("trade_id", make_trade_id(symbol))
-                        mode = "hard" if force_close else "soft"
-                        msg = format_autoclose_msg(symbol, trade_id, price, gain, mode)
-                        await tg_send(msg)
-
-                        vol_ser = volumes_series(k1h, quote=True)
-                        vol5 = float(np.mean(vol_ser[-5:])) if len(vol_ser) >= 5 else 0.0
-                        vol20 = float(np.mean(vol_ser[-20:])) if len(vol_ser) >= 20 else 0.0
-
-                        log_trade_csv({
-                            "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                            "trade_id": trade_id,
-                            "symbol": symbol,
-                            "event": "AUTO_CLOSE" if force_close else "AUTO_CLOSE_SOFT",
-                            "strategy": "aggressive",
-                            "version": BOT_VERSION,
-                            "entry": entry,
-                            "exit": price,
-                            "price": price,
-                            "pnl_pct": gain,
-                            "position_pct": trades[symbol].get("position_pct", ""),
-                            "sl_initial": trades[symbol].get("sl_initial", ""),
-                            "sl_final": trades[symbol].get("stop", ""),
-                            "atr_1h": atr_tv(k1h, 14),
-                            "atr_mult_at_entry": "",
-                            "rsi_1h": rsi_now,
-                            "macd": macd_now,
-                            "signal": signal_now,
-                            "adx_1h": adx_now,
-                            "supertrend_on": st_ok,
-                            "ema25_1h": ema25_now,
-                            "ema200_1h": ema_tv(closes_now, 200),
-                            "ema50_4h": "",
-                            "ema200_4h": "",
-                            "vol_ma5": vol5,
-                            "vol_ma20": vol20,
-                            "vol_ratio": (vol5 / max(vol20, 1e-9)) if vol20 > 0 else "",
-                            "btc_uptrend": "",
-                            "eth_uptrend": "",
-                            "reason_entry": trades[symbol].get("reason_entry", ""),
-                            "reason_exit": "timeout > 24h (sécurité)" if force_close else "timeout > 12h (momentum faible)"
-                        })
-
-                        log_trade(symbol, "SELL", price, gain)
-                        _delete_trade(symbol)
-                        return
                     else:
                         # agressif = on laisse respirer, pas de remontée forcée du stop ici
                         trailing_stop_advanced(symbol, price)
@@ -1865,10 +1725,13 @@ async def process_symbol_aggressive(symbol):
                 # médiane sur les 30j SANS la bougie en cours
                 med_30d = float(np.median(vols_hist[:-1]))
                 # ⛔ filtre ignoré pour BTCUSDT + seuil assoupli 25%
-                if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < 0.25 * med_30d:
-                    log_refusal(symbol, f"Volume 1h anormalement faible ({vol_now_1h:.0f} < 0.25×med30j {med_30d:.0f})")
+                if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < VOL_MED_MULT * med_30d:
+                    log_refusal(
+                        symbol,
+                        f"Volume 1h anormalement faible ({vol_now_1h:.0f} < {VOL_MED_MULT:.2f}×med30j {med_30d:.0f})"
+                    )
                     return
-            else:
+
                 # Fallback si on n'a pas 30j : garder le garde-fou MIN_VOLUME
                 if vol_now_1h < MIN_VOLUME:
                     log_refusal(symbol, f"Volume 1h trop faible ({vol_now_1h:.0f} < {MIN_VOLUME})")
@@ -1924,17 +1787,19 @@ async def process_symbol_aggressive(symbol):
                 return
 
         # ---- Conditions confluence ----
-        supertrend_ok = compute_supertrend(klines)     # basé sur atr_tv
-        above_ema200  = price >= ema200 * 0.98                # ema200 calculé plus haut
+        supertrend_ok = compute_supertrend(klines)
+        above_ema200  = price >= ema200 * 0.98
 
-        vol5   = np.mean(volumes[-5:])
-        vol20  = np.mean(volumes[-20:])
-        volume_ok = (vol5 > vol20 * 1.1) and (vol5 > MIN_VOLUME)  # assoupli, en USDT
+        # soft penalty si sous l’EMA200 (même logique)
+        indicators_soft_penalty = 0
+        tendance_soft_notes = []
+        if not above_ema200:
+            indicators_soft_penalty += 1
+            tendance_soft_notes.append("Prix ~ sous EMA200(1h)")
 
-
-        if not (supertrend_ok and adx_value >= 18 and above_ema200 and volume_ok):
+        # assouplir le gate principal : on ne bloque plus uniquement sur above_ema200
+        if not (supertrend_ok and adx_value >= 18 and volume_ok):
             return
-
 
         # Momentum MACD vs bougie précédente
         if not (macd > signal and (macd - signal) > (macd_prev - signal_prev)):
@@ -2036,7 +1901,7 @@ async def process_symbol_aggressive(symbol):
             "volume_ok": volume_ok,
             "above_ema200": above_ema200,
         }
-        score = compute_confidence_score(indicators)
+        score = max(0, score - indicators_soft_penalty)
         label_conf = label_confidence(score)
         if score < 7:
             return
