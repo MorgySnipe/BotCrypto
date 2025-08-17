@@ -1168,30 +1168,22 @@ async def process_symbol(symbol):
 
         # --- Volume 1h anormalement faible vs médiane 30j (si dispo) ---
         try:
-            vol_now_1h = float(klines[-1][7])  # quote volume de la bougie 1h en cours
+            vol_now_1h = float(klines[-1][7])  # volume quote de la bougie 1h
 
-            # On tente de charger ~30 jours (720 bougies 1h). Si l'endpoint refuse, on tombera au fallback.
-            k1h_30d = get_cached(symbol, '1h', limit=750) or []
-            vols_hist = volumes_series(k1h_30d, quote=True)
-            vols_hist = vols_hist[-721:]  # ~30j + bougie courante
+            k1h_30d  = get_cached(symbol, '1h', limit=750) or []
+            vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30 jours
 
             if len(vols_hist) >= 200:
-                # médiane sur les 30j SANS la bougie en cours
-                med_30d = float(np.median(vols_hist[:-1]))
-                # seuil “anormalement faible” = 40% de la médiane 30j
-                if med_30d > 0 and vol_now_1h < 0.40 * med_30d:
-                    log_refusal(
-                        symbol,
-                        f"Volume 1h anormalement faible ({vol_now_1h:.0f} < 0.40×med30j {med_30d:.0f})"
-                    )
+                med_30d = float(np.median(vols_hist[:-1]))  # médiane sans la bougie en cours
+                # ⛔ filtre ignoré pour BTCUSDT + seuil assoupli 25%
+                if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < 0.25 * med_30d:
+                    log_refusal(symbol, f"Volume 1h anormalement faible ({vol_now_1h:.0f} < 0.25×med30j {med_30d:.0f})")
                     return
             else:
-                # Fallback si on n'a pas 30j : garder le garde-fou MIN_VOLUME
                 if vol_now_1h < MIN_VOLUME:
                     log_refusal(symbol, f"Volume 1h trop faible ({vol_now_1h:.0f} < {MIN_VOLUME})")
                     return
         except Exception:
-            # En cas d’erreur réseau ou autre, fallback MIN_VOLUME
             try:
                 vol_now_1h = float(klines[-1][7])
                 if vol_now_1h < MIN_VOLUME:
@@ -1199,6 +1191,7 @@ async def process_symbol(symbol):
                     return
             except Exception:
                 pass
+
 
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
@@ -1865,19 +1858,24 @@ async def process_symbol_aggressive(symbol):
         try:
             vol_now_1h = float(klines[-1][7])  # volume quote de la bougie 1h
 
+            # On tente de charger ~30 jours (720 bougies 1h). Si l'endpoint refuse, on tombera au fallback.
             k1h_30d  = get_cached(symbol, '1h', limit=750) or []
-            vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30 jours
+            vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j + bougie courante
 
             if len(vols_hist) >= 200:
-                med_30d = float(np.median(vols_hist[:-1]))  # médiane sans la bougie en cours
-                if med_30d > 0 and vol_now_1h < 0.40 * med_30d:
-                    log_refusal(symbol, f"Volume 1h anormalement faible ({vol_now_1h:.0f} < 0.40×med30j {med_30d:.0f})")
+                # médiane sur les 30j SANS la bougie en cours
+                med_30d = float(np.median(vols_hist[:-1]))
+                # ⛔ filtre ignoré pour BTCUSDT + seuil assoupli 25%
+                if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < 0.25 * med_30d:
+                    log_refusal(symbol, f"Volume 1h anormalement faible ({vol_now_1h:.0f} < 0.25×med30j {med_30d:.0f})")
                     return
             else:
+                # Fallback si on n'a pas 30j : garder le garde-fou MIN_VOLUME
                 if vol_now_1h < MIN_VOLUME:
                     log_refusal(symbol, f"Volume 1h trop faible ({vol_now_1h:.0f} < {MIN_VOLUME})")
                     return
         except Exception:
+            # En cas d’erreur réseau ou autre, fallback MIN_VOLUME
             try:
                 vol_now_1h = float(klines[-1][7])
                 if vol_now_1h < MIN_VOLUME:
