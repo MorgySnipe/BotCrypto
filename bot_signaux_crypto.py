@@ -613,25 +613,16 @@ def in_active_session():
 
 def is_active_liquidity_session(now=None):
     """
-    Sessions actives (UTC) :
-      - EU : 07:00 → 15:00
-      - US : 13:00 → 21:00
-    + On conserve l'interdiction 00:00 → 06:00 (no-trade window).
-    Retourne (ok: bool, label: str)
+    N'interdit que la nuit UTC (00:00 → 06:00).
+    Retourne (ok: bool, label: str).
     """
     if now is None:
         now = datetime.now(timezone.utc)
     h = now.hour
-
-    # fenêtre interdite conservée
-    if 0 <= h < 6:
+    if 0 <= h < 6:  # Bloque seulement 00h–06h UTC
         return False, "blocked_00_06"
+    return True, "ANY"
 
-    eu = (7 <= h < 15)
-    us = (13 <= h < 21)
-    ok = eu or us
-    label = "EU" if eu and not us else ("US" if us and not eu else ("EU+US" if eu and us else "NONE"))
-    return ok, label
 
 def get_klines_4h(symbol, limit=100):
     return get_klines(symbol, interval='4h', limit=limit)
@@ -1287,9 +1278,9 @@ async def process_symbol(symbol):
                 log_refusal(symbol, f"Filtre régime BTC: {why}")
                 return
 
-        if price > ema25 * 1.02:
+        if price > ema25 * 1.03:
            dist = (price / max(ema25, 1e-9) - 1) * 100
-           log_refusal(symbol, "Prix trop éloigné de l'EMA25 (>+2%)", trigger=f"dist_ema25={dist:.2f}%")
+           log_refusal(symbol, "Prix trop éloigné de l'EMA25 (>+3%)", trigger=f"dist_ema25={dist:.2f}%")
            return
 
 
@@ -1367,9 +1358,13 @@ async def process_symbol(symbol):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > niveau de retest OU > EMA25(1h) ±0.1%")
                 return
 
-            if price > ema25 * 1.01:
-                log_refusal(symbol, f"Entrée limit: prix {price:.4f} > EMA25*1.01 ({ema25*1.01:.4f})")
+            if price > ema25 * 1.015:
+                log_refusal(
+                    symbol,
+                    f"Entrée limit BRK: prix {price:.4f} > EMA25*1.015 ({ema25*1.015:.4f})"
+                )
                 return
+
 
             buy = True
             label = "⚡ Breakout + Retest validé (1h) + Confluence"
@@ -1395,9 +1390,13 @@ async def process_symbol(symbol):
                     log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (PB)")
                     return
 
-                if price > ema25 * 1.01:
-                    log_refusal(symbol, f"Entrée limit (PB): prix {price:.4f} > EMA25*1.01 ({ema25*1.01:.4f})")
+                if price > ema25 * 1.015:
+                    log_refusal(
+                        symbol,
+                        f"Entrée limit PB: prix {price:.4f} > EMA25*1.015 ({ema25*1.015:.4f})"
+                    )
                     return
+
 
                 buy = True
                 label = "✅ Pullback EMA25 propre + Confluence"
@@ -2067,11 +2066,10 @@ async def process_symbol_aggressive(symbol):
             return
 
         # Entrée Limit resserrée
-        if price > ema25 * 1.01:
+        if price > ema25 * 1.015:
             log_refusal(
                 symbol,
-                "Entrée limit (aggressive)",
-                trigger=f"prix={price:.4f}, limite={ema25*1.01:.4f}"
+                f"Entrée limit aggressive: prix {price:.4f} > EMA25*1.015 ({ema25*1.015:.4f})"
             )
             return
 
