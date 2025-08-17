@@ -1074,13 +1074,11 @@ async def process_symbol(symbol):
                 # Les sorties se feront via SMART_TIMEOUT / momentum cassé / fast-exit 5m / trailing stop.
                 pass
 
-
-                    else:
-                        # on laisse courir : sécuriser au moins à BE si possible
-                        if "stop" in trades[symbol]:
-                            trades[symbol]["stop"] = max(trades[symbol]["stop"], entry)
-                        save_trades()
-                        await tg_send(f"⏳ {symbol} — {elapsed_h:.1f}h: trade maintenu (gain {gain:.2f}%, momentum OK).")
+                # on laisse courir : sécuriser au moins à BE si possible
+                if "stop" in trades[symbol]:
+                    trades[symbol]["stop"] = max(trades[symbol]["stop"], entry)
+                save_trades()
+                await tg_send(f"⏳ {symbol} — {elapsed_h:.1f}h: trade maintenu (gain {gain:.2f}%, momentum OK).")
 
         # ---------- Analyse standard ----------
         print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
