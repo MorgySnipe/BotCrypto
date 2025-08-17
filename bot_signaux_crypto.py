@@ -675,8 +675,8 @@ def position_pct_from_risk(entry_price: float, stop_price: float, score: int | N
     return float(_clamp(pos_pct, POS_MIN_PCT, POS_MAX_PCT))
 
 
-def compute_supertrend(klines, period=10, multiplier=3):
-    atr = atr_tv(klines, period)          # <- au lieu de compute_atr
+def supertrend_like_on_close(klines, period=10, multiplier=3):
+    atr = atr_tv(klines, period)
     highs  = np.array([float(k[2]) for k in klines])
     lows   = np.array([float(k[3]) for k in klines])
     closes = np.array([float(k[4]) for k in klines])
@@ -1071,14 +1071,13 @@ async def process_symbol(symbol):
 
             if elapsed_h >= AUTO_CLOSE_MIN_H:
                 # On ne force plus une clôture horaire.
-                # Les sorties se feront via SMART_TIMEOUT / momentum cassé / fast-exit 5m / trailing stop.
+                # Les sorties se feront via SMART_TIMEOUT / momentum cassé / fast-exit 5m / trailing.
                 pass
-
-                # on laisse courir : sécuriser au moins à BE si possible
+            else:
+                # On laisse courir : sécuriser au moins à BE si possible
                 if "stop" in trades[symbol]:
-                    trades[symbol]["stop"] = max(trades[symbol]["stop"], entry)
+                    trades[symbol]["stop"] = max(trades[symbol]["stop"], trades[symbol]["entry"])
                 save_trades()
-                await tg_send(f"⏳ {symbol} — {elapsed_h:.1f}h: trade maintenu (gain {gain:.2f}%, momentum OK).")
 
         # ---------- Analyse standard ----------
         print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
@@ -1123,6 +1122,9 @@ async def process_symbol(symbol):
         highs = [float(k[2]) for k in klines]
         lows = [float(k[3]) for k in klines]
         volumes = volumes_series(klines, quote=True)
+        # moyennes de volume 1h (USDT) – safe si série courte
+        vol5  = float(np.mean(volumes[-5:]))  if len(volumes)  >= 5  else 0.0
+        vol20 = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
         price = get_last_price(symbol)
         if price is None:
             log_refusal(symbol, "API prix indisponible")
@@ -1182,7 +1184,7 @@ async def process_symbol(symbol):
            log_refusal(symbol, f"Volatilité trop faible (ATR/price={volatility:.4f} < 0.005)")
            return
 
-        supertrend_signal = compute_supertrend(klines)
+        supertrend_signal = supertrend_like_on_close(klines)
         if adx_value < 20:
            log_refusal(symbol, "ADX 1h trop faible", trigger=f"adx={adx_value:.1f}")
            return
@@ -1308,7 +1310,6 @@ async def process_symbol(symbol):
                 
             if tendance_soft_notes:
                 reasons += [f"Avertissements tendance: {', '.join(tendance_soft_notes)}"]
-                return
 
 
             buy = True
@@ -1681,21 +1682,16 @@ async def process_symbol(symbol):
 
 async def process_symbol_aggressive(symbol):
     try:
-        # ---- Auto-close SOUPLE (aggressive) ----
-        if symbol in trades and trades[symbol].get("strategy") == "aggressive":
-            entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-            elapsed_h = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
+       # ---- Auto-close SOUPLE (aggressive) ----
+       if symbol in trades and trades[symbol].get("strategy") == "aggressive":
+           entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+           elapsed_h = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
 
-            if elapsed_h >= AUTO_CLOSE_MIN_H:
-                # On ne force plus une clôture horaire.
-                # Les sorties se feront via SMART_TIMEOUT / momentum cassé / fast-exit 5m / trailing stop.
-                pass
+           if elapsed_h >= AUTO_CLOSE_MIN_H:
+               # On ne force plus une clôture horaire ici.
+               # Les vraies sorties seront gérées plus bas (SMART_TIMEOUT / momentum cassé / fast-exit 5m / trailing).
+               pass
 
-            else:
-                # agressif = on laisse respirer, pas de remontée forcée du stop ici
-                trailing_stop_advanced(symbol, price)
-                await tg_send(f"⏳ {symbol} — {elapsed_h:.1f}h: trade agressif maintenu (gain {gain:.2f}%, momentum OK).")
-                return
 
         # ---- Analyse agressive ----
         klines = get_cached(symbol, '1h')
@@ -1706,6 +1702,10 @@ async def process_symbol_aggressive(symbol):
         highs = [float(k[2]) for k in klines]
         lows = [float(k[3]) for k in klines]
         volumes = volumes_series(klines, quote=True)
+        vol5  = float(np.mean(volumes[-5:]))  if len(volumes)  >= 5  else 0.0
+        vol20 = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+        volume_ok = (vol5 > vol20) and (vol5 > 0.0)
+
         price = get_last_price(symbol)
         if price is None:
             log_refusal(symbol, "API prix indisponible")
@@ -1785,7 +1785,7 @@ async def process_symbol_aggressive(symbol):
                 return
 
         # ---- Conditions confluence ----
-        supertrend_ok = compute_supertrend(klines)
+        supertrend_ok = supertrend_like_on_close(klines)
         above_ema200  = price >= ema200 * 0.98
 
         # soft penalty si sous l’EMA200 (même logique)
@@ -1907,6 +1907,7 @@ async def process_symbol_aggressive(symbol):
             "volume_ok": volume_ok,
             "above_ema200": above_ema200,
         }
+        score = compute_confidence_score(indicators)
         score = max(0, score - indicators_soft_penalty)
         label_conf = label_confidence(score)
         if score < 7:
