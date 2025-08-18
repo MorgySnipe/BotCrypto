@@ -566,23 +566,25 @@ def is_volume_increasing(klines):
 
 def is_market_bullish():
     """
-    Momentum global: OK si BTC OU ETH montrent du tonus (RSI>50 ou MACD>signal).
-    Si le cache n'est pas encore prêt, on NE bloque pas.
+    Ne bloque que si BTC **et** ETH sont franchement mous :
+    RSI < 45, MACD <= signal, et ADX < 18 simultanément.
+    Sinon on laisse passer (hors panique BTC gérée ailleurs).
     """
     try:
         btc = [float(k[4]) for k in market_cache.get('BTCUSDT', [])]
         eth = [float(k[4]) for k in market_cache.get('ETHUSDT', [])]
         if not btc or not eth:
-            return True  # pas de données -> on ne bloque pas
+            return True
 
-        rsi_btc = rsi_tv(btc, 14); macd_btc, sig_btc = compute_macd(btc)
-        rsi_eth = rsi_tv(eth, 14); macd_eth, sig_eth = compute_macd(eth)
+        rsi_btc = rsi_tv(btc, 14); macd_btc, sig_btc = compute_macd(btc); adx_btc = adx_tv(market_cache['BTCUSDT'], 14)
+        rsi_eth = rsi_tv(eth, 14); macd_eth, sig_eth = compute_macd(eth); adx_eth = adx_tv(market_cache['ETHUSDT'], 14)
 
-        btc_ok = (rsi_btc > 50) or (macd_btc > sig_btc)
-        eth_ok = (rsi_eth  > 50) or (macd_eth > sig_eth)
-        return btc_ok or eth_ok
+        bad_btc = (rsi_btc < 45) and (macd_btc <= sig_btc) and (adx_btc < 18)
+        bad_eth = (rsi_eth < 45) and (macd_eth <= sig_eth) and (adx_eth < 18)
+        return not (bad_btc and bad_eth)
     except Exception:
         return True
+
 
 def btc_regime_blocked():
     """
@@ -628,18 +630,16 @@ def in_active_session():
     hour = datetime.now(timezone.utc).hour
     return not (0 <= hour < 6)
 
-def is_active_liquidity_session(now=None):
+def is_active_liquidity_session(now=None, symbol=None):
     """
-    N'interdit que la nuit UTC (00:00 → 06:00).
-    Retourne (ok: bool, label: str).
+    Bloque uniquement 01:00–04:00 UTC, et jamais pour BTC/ETH.
     """
     if now is None:
         now = datetime.now(timezone.utc)
     h = now.hour
-    if 0 <= h < 6:  # Bloque seulement 00h–06h UTC
-        return False, "blocked_00_06"
+    if 1 <= h < 4 and symbol not in ("BTCUSDT", "ETHUSDT"):
+        return False, "blocked_01_04"
     return True, "ANY"
-
 
 def get_klines_4h(symbol, limit=100):
     return get_klines(symbol, interval='4h', limit=limit)
@@ -1222,7 +1222,7 @@ async def process_symbol(symbol):
             return
 
 
-        ok_session, _sess = is_active_liquidity_session()
+        ok_session, _sess = is_active_liquidity_session(symbol=symbol)
         if not ok_session:
             log_refusal(symbol, "Low-liquidity session")
             return
@@ -1774,7 +1774,7 @@ async def process_symbol_aggressive(symbol):
             log_refusal(symbol, f"Nombre max de trades atteint dynamiquement ({len(trades)}/{slots})")
             return
             
-        ok_session, _sess = is_active_liquidity_session()
+        ok_session, _sess = is_active_liquidity_session(symbol=symbol)
         if not ok_session:
             log_refusal(symbol, "Low-liquidity session")
             return
