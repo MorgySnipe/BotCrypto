@@ -90,14 +90,14 @@ INTERVAL = '1h'
 LIMIT = 100
 SLEEP_SECONDS = 300
 MAX_TRADES = 7
-MIN_VOLUME = 1000000
+MIN_VOLUME = 600000
 COOLDOWN_HOURS = 4
-VOL_MED_MULT = 0.15  # Tolérance volume vs médiane 30j (était 0.25)
+VOL_MED_MULT = 0.10  # Tolérance volume vs médiane 30j (était 0.25)
 VOL_CONFIRM_TF = "15m"
 VOL_CONFIRM_LOOKBACK = 20
-VOL_CONFIRM_MULT = 1.5
-ANTI_SPIKE_UP_STD = 1.0   # % max d'extension de la bougie d'entrée (stratégie standard)
-ANTI_SPIKE_UP_AGR = 1.2   # % max d'extension (stratégie agressive)
+VOL_CONFIRM_MULT = 1.25
+ANTI_SPIKE_UP_STD = 1.4   # % max d'extension de la bougie d'entrée (stratégie standard)
+ANTI_SPIKE_UP_AGR = 1.6   # % max d'extension (stratégie agressive)
 # --- Trailing stop harmonisé (ATR TV) ---
 TRAIL_TIERS = [
     (2.0, 0.8),  # gain >= 2%  -> stop = P - 0.8 * ATR
@@ -1234,7 +1234,7 @@ async def process_symbol(symbol):
                 log_refusal(symbol, f"Filtre régime BTC: {why}")
                 return
 
-        if price > ema25 * 1.03:
+        if price > ema25 * 1.04:
            dist = (price / max(ema25, 1e-9) - 1) * 100
            log_refusal(symbol, "Prix trop éloigné de l'EMA25 (>+3%)", trigger=f"dist_ema25={dist:.2f}%")
            return
