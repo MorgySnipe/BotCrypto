@@ -328,7 +328,6 @@ def median_volume(symbol, interval="1h", days=30):
     klines = get_cached(symbol, interval)
     if not klines or len(klines) < 24 * days:
         return 0.0
-    # quote asset volume : k[7]
     volumes = [float(k[7]) for k in klines]
     return float(np.median(volumes[-24*days:]))
 
