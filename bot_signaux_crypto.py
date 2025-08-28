@@ -94,9 +94,9 @@ MIN_VOLUME = 600000
 COOLDOWN_HOURS = 4
 VOL_MED_MULT = 0.10  # Tolérance volume vs médiane 30j (était 0.25)
 VOL_CONFIRM_TF = "15m"
-VOL_CONFIRM_LOOKBACK = 20
-VOL_CONFIRM_MULT = 1.25
-ANTI_SPIKE_UP_STD = 1.4   # % max d'extension de la bougie d'entrée (stratégie standard)
+VOL_CONFIRM_LOOKBACK = 12
+VOL_CONFIRM_MULT = 1.10
+ANTI_SPIKE_UP_STD = 1.8   # % max d'extension de la bougie d'entrée (stratégie standard)
 ANTI_SPIKE_UP_AGR = 1.6   # % max d'extension (stratégie agressive)
 # --- Trailing stop harmonisé (ATR TV) ---
 TRAIL_TIERS = [
@@ -1183,9 +1183,10 @@ async def process_symbol(symbol):
         if closes_4h[-1] < ema50_4h: indicators_soft_penalty += 1
         if closes_4h[-1] < ema200_4h: indicators_soft_penalty += 1
 
-        if rsi_4h < 50:
-            log_refusal(symbol, f"RSI 4h {rsi_4h:.1f} < 50")
+        if rsi_4h < 48:
+            log_refusal(symbol, f"RSI 4h {rsi_4h:.1f} < 48")
             return
+        rsi4h_penalty = 1 if rsi_4h < 52 else 0
         if is_market_range(closes_4h):
             await tg_send(f"⚠️ Marché en range sur {symbol} → Trade bloqué")
             return
@@ -1268,6 +1269,40 @@ async def process_symbol(symbol):
         volume_ok   = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
         trend_ok    = (price > ema200) and supertrend_signal and (adx_value >= 22)
         momentum_ok = (macd > signal) and (rsi >= 55)
+
+        tendance_soft_notes = []
+        if price < ema200:
+            tendance_soft_notes.append("Prix < EMA200(1h)")
+        if closes_4h[-1] < ema50_4h:
+            tendance_soft_notes.append("Close4h < EMA50(4h)")
+        if closes_4h[-1] < ema200_4h:
+            tendance_soft_notes.append("Close4h < EMA200(4h)")
+
+        # ---- Pénalités "soft" ----
+        indicators_soft_penalty = 0
+
+        if price < ema200:             indicators_soft_penalty += 1
+        if closes_4h[-1] < ema50_4h:   indicators_soft_penalty += 1
+        if closes_4h[-1] < ema200_4h:  indicators_soft_penalty += 1
+
+        # RSI 4h
+        if rsi_4h < 48:
+            log_refusal(symbol, f"RSI 4h {rsi_4h:.1f} < 48")
+            return
+        rsi4h_penalty = 1 if 48 <= rsi_4h < 52 else 0
+        indicators_soft_penalty += rsi4h_penalty
+
+        # ADX
+        if adx_value < 13:
+            log_refusal(symbol, "ADX 1h très faible", trigger=f"adx={adx_value:.1f}")
+            return
+        adx_penalty = 1 if adx_value < 18 else 0
+        indicators_soft_penalty += adx_penalty
+
+        # supertrend reste obligatoire
+        if not supertrend_signal:
+            log_refusal(symbol, "Supertrend 1h non haussier (signal=False)")
+            return
 
         indicators = {
             "rsi": rsi,
