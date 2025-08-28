@@ -98,6 +98,9 @@ VOL_CONFIRM_LOOKBACK = 12
 VOL_CONFIRM_MULT = 1.10
 ANTI_SPIKE_UP_STD = 1.8   # % max d'extension de la bougie d'entrée (stratégie standard)
 ANTI_SPIKE_UP_AGR = 1.6   # % max d'extension (stratégie agressive)
+# --- Anti-spike adaptatif (bonus) ---
+ANTI_SPIKE_ATR_MULT = 1.30   # autorise une extension ≈ 1.3 × ATR% (par rapport à l'open)
+ANTI_SPIKE_MAX_PCT  = 2.40   # plafond de sécurité (en %)
 # --- Trailing stop harmonisé (ATR TV) ---
 TRAIL_TIERS = [
     (2.0, 0.8),  # gain >= 2%  -> stop = P - 0.8 * ATR
@@ -520,6 +523,22 @@ def is_wick_hunt_1h(kline_1h_last) -> bool:
     rng = max(h - l, 1e-9)
     return ((h - c) / rng) > 0.6
 
+def anti_spike_check_std(klines, price, atr_period=14):
+    """
+    Retourne: (ok: bool, spike_pct: float, limit_pct: float)
+    - calcule l’extension de la bougie 1h en cours vs l’open (en %)
+    - seuil dynamique = max(ANTI_SPIKE_UP_STD, ANTI_SPIKE_ATR_MULT * ATR%)
+      puis plafonné à ANTI_SPIKE_MAX_PCT
+    """
+    open_now = float(klines[-1][1])
+    high_now = float(klines[-1][2])
+    spike_pct = ((max(high_now, price) - open_now) / max(open_now, 1e-9)) * 100.0
+
+    atr_val  = atr_tv(klines, period=atr_period)
+    atr_pct  = (atr_val / max(open_now, 1e-9)) * 100.0
+
+    dyn_limit = min(ANTI_SPIKE_MAX_PCT, max(ANTI_SPIKE_UP_STD, ANTI_SPIKE_ATR_MULT * atr_pct))
+    return (spike_pct <= dyn_limit), float(spike_pct), float(dyn_limit)
 
 def confirm_15m_after_signal(k15, breakout_level=None, ema25_1h=None, tol=0.001) -> bool:
     """
@@ -1183,10 +1202,22 @@ async def process_symbol(symbol):
         if closes_4h[-1] < ema50_4h: indicators_soft_penalty += 1
         if closes_4h[-1] < ema200_4h: indicators_soft_penalty += 1
 
+        # --- ADX soft + hard floor ---
+        if adx_value < 13:
+            log_refusal(symbol, "ADX 1h trop faible (hard)", trigger=f"adx={adx_value:.1f}")
+            return
+        elif adx_value < 18:
+            indicators_soft_penalty += 1
+
         if rsi_4h < 48:
             log_refusal(symbol, f"RSI 4h {rsi_4h:.1f} < 48")
             return
+            
         rsi4h_penalty = 1 if rsi_4h < 52 else 0
+        if rsi4h_penalty:
+            indicators_soft_penalty += rsi4h_penalty
+            tendance_soft_notes.append(f"RSI 4h {rsi_4h:.1f} < 52")
+
         if is_market_range(closes_4h):
             await tg_send(f"⚠️ Marché en range sur {symbol} → Trade bloqué")
             return
@@ -1198,12 +1229,20 @@ async def process_symbol(symbol):
            return
 
         supertrend_signal = supertrend_like_on_close(klines)
-        if adx_value < 20:
-           log_refusal(symbol, "ADX 1h trop faible", trigger=f"adx={adx_value:.1f}")
-           return
+
+        # --- ADX (standard) : soft + hard bas ---
+        if adx_value < 13:
+            # HARD: momentum vraiment trop faible → on refuse
+            log_refusal(symbol, "ADX 1h très faible", trigger=f"adx={adx_value:.1f}")
+            return
+        elif adx_value < 18:
+            # SOFT: on laisse passer mais on pénalise le score
+            indicators_soft_penalty += 1
+
+        # Supertrend reste obligatoire
         if not supertrend_signal:
-           log_refusal(symbol, "Supertrend 1h non haussier (signal=False)")
-           return
+            log_refusal(symbol, "Supertrend 1h non haussier (signal=False)")
+            return
 
         if symbol in last_trade_time:
             cooldown_left_h = COOLDOWN_HOURS - (datetime.now(timezone.utc) - last_trade_time[symbol]).total_seconds() / 3600
@@ -1234,22 +1273,24 @@ async def process_symbol(symbol):
                 log_refusal(symbol, f"Filtre régime BTC: {why}")
                 return
 
-        if price > ema25 * 1.04:
-           dist = (price / max(ema25, 1e-9) - 1) * 100
-           log_refusal(symbol, "Prix trop éloigné de l'EMA25 (>+3%)", trigger=f"dist_ema25={dist:.2f}%")
-           return
+        # — Pré-filtre: prix trop loin de l’EMA25 (plus strict)
+        EMA25_PREFILTER_STD = 1.015  # +1.5%
+        if price > ema25 * EMA25_PREFILTER_STD:
+            dist = (price / max(ema25, 1e-9) - 1) * 100
+            log_refusal(
+                symbol,
+                f"Prix trop éloigné de l'EMA25 (>+{(EMA25_PREFILTER_STD-1)*100:.0f}%)",
+                trigger=f"dist_ema25={dist:.2f}%"
+            )
+            return
 
 
         # [#anti-spike-standard]
-        open_now = float(klines[-1][1])
-        high_now = float(klines[-1][2])
-        # on prend le pire des deux: extension jusqu'au plus haut OU jusqu'au prix actuel
-        spike_up_pct = ((max(high_now, price) - open_now) / max(open_now, 1e-9)) * 100.0
-        if spike_up_pct > ANTI_SPIKE_UP_STD:
-            log_refusal(symbol, "Anti-spike 1h", trigger=f"spike={spike_up_pct:.2f}%")
+        ok_spike, spike_up_pct, limit_pct = anti_spike_check_std(klines, price)
+        if not ok_spike:
+            log_refusal(symbol, "Anti-spike 1h (std)", trigger=f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}%")
             return
-
-            
+      
         # [#volume-confirm-standard]
         k15 = get_cached(symbol, VOL_CONFIRM_TF, limit=max(25, VOL_CONFIRM_LOOKBACK + 5))
         vols15 = volumes_series(k15, quote=True)
@@ -1266,9 +1307,9 @@ async def process_symbol(symbol):
             return
 
         # === Confluence & scoring (recréés) ===
-        volume_ok   = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
-        trend_ok    = (price > ema200) and supertrend_signal and (adx_value >= 22)
-        momentum_ok = (macd > signal) and (rsi >= 55)
+        volume_ok  = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
+        trend_ok   = (price > ema200) and supertrend_signal     # ⬅️ on retire ADX ici
+        momentum_ok = (macd > signal) and (rsi >= 55)           # (on allègera pour le PB plus bas)
 
         tendance_soft_notes = []
         if price < ema200:
@@ -1348,7 +1389,7 @@ async def process_symbol(symbol):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > niveau de retest OU > EMA25(1h) ±0.1%")
                 return
 
-            if price > ema25 * 1.015:
+            if price > ema25 * 1.01:  # +1.0% max
                 log_refusal(
                     symbol,
                     f"Entrée limit BRK: prix {price:.4f} > EMA25*1.015 ({ema25*1.015:.4f})"
@@ -1364,8 +1405,13 @@ async def process_symbol(symbol):
             reasons = [label, f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
 
         elif trend_ok and momentum_ok and volume_ok:
-            near_ema25 = price <= ema25 * 1.01
-            candle_ok = (abs(highs[-1] - lows[-1]) / max(lows[-1], 1e-9)) <= 0.03
+            # Bande "retest" serrée autour de l'EMA25 (±0.2%)
+            RETEST_BAND_STD = 0.002
+            near_ema25 = (abs(price - ema25) / max(ema25, 1e-9)) <= RETEST_BAND_STD
+
+            # On garde le contrôle de bougie, mais un peu plus permissif (3.5% au lieu de 3%)
+            candle_ok = (abs(highs[-1] - lows[-1]) / max(lows[-1], 1e-9)) <= 0.035
+
             if near_ema25 and candle_ok:
                 # Filtre 15m sans niveau de breakout
                 ok15, det15 = check_15m_filter(k15, breakout_level=None)
@@ -1383,7 +1429,7 @@ async def process_symbol(symbol):
                     log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (PB)")
                     return
 
-                if price > ema25 * 1.015:
+                if price > ema25 * 1.01:  # +1.0% max
                     log_refusal(
                         symbol,
                         f"Entrée limit PB: prix {price:.4f} > EMA25*1.015 ({ema25*1.015:.4f})"
@@ -1887,16 +1933,16 @@ async def process_symbol_aggressive(symbol):
             log_refusal(symbol, f"Mouvement 3 bougies trop fort (+{last3_change*100:.2f}%)")
             return
 
-        # retest valide = proche du niveau de breakout OU proche de l'EMA25
-        near_level = abs(price - last10_high) / last10_high <= retest_tolerance
-        near_ema25 = abs(price - ema25) / ema25 <= retest_tolerance
+        # Retest valide = breakout OU rebond EMA25 ±0.3%
+        RETEST_BAND_AGR = 0.003
+        near_level = abs(price - last10_high) / last10_high <= RETEST_BAND_AGR
+        near_ema25  = abs(price - ema25)      / ema25      <= RETEST_BAND_AGR
 
         # éviter d’acheter trop loin de l’EMA25
-        too_far_from_ema25 = price >= ema25 * 1.02
+        too_far_from_ema25 = price >= ema25 * 1.008
         if too_far_from_ema25:
-            log_refusal(symbol, f"Prix trop éloigné de l'EMA25 (+2%) (prix={price}, ema25={ema25})")
+            log_refusal(symbol, f"Prix trop éloigné de l'EMA25 (+0.8%) (prix={price}, ema25={ema25})")
             return
-
         # si le prix n'est proche ni du niveau de breakout ni de l'EMA25
         if not (near_level or near_ema25):
             log_refusal(symbol, "Pas de retest valide (ni proche breakout, ni proche EMA25)")
@@ -1969,7 +2015,7 @@ async def process_symbol_aggressive(symbol):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (aggressive)")
             return
 
-        if price > ema25 * 1.015:
+        if price > ema25 * 1.01:  # +1.0% max
             log_refusal(symbol, f"Entrée limit aggressive: prix {price:.4f} > EMA25*1.015 ({ema25*1.015:.4f})")
             return
 
