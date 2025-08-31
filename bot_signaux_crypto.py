@@ -1263,19 +1263,17 @@ async def process_symbol(symbol):
         if detect_rsi_divergence(closes, rsi_series): return
 
         volatility = get_volatility(atr, price)
-        if volatility < 0.005:
-           log_refusal(symbol, f"Volatilité trop faible (ATR/price={volatility:.4f} < 0.005)")
+        if volatility < 0.003:
+           log_refusal(symbol, f"Volatilité trop faible (ATR/price={volatility:.4f} < 0.003)")
            return
 
         supertrend_signal = supertrend_like_on_close(klines)
 
-        # --- ADX (standard) : soft + hard bas ---
-        if adx_value < 13:
-            # HARD: momentum vraiment trop faible → on refuse
+        # --- ADX (standard) assoupli ---
+        if adx_value < 10:
             log_refusal(symbol, "ADX 1h très faible", trigger=f"adx={adx_value:.1f}")
             return
-        elif adx_value < 18:
-            # SOFT: on laisse passer mais on pénalise le score
+        elif adx_value < 15:
             indicators_soft_penalty += 1
 
         # Supertrend reste obligatoire
@@ -1347,13 +1345,13 @@ async def process_symbol(symbol):
             return
 
         # APRÈS (standard) — MA12 + seuil 1.10
-        # --- volume-confirm-standard (MA12 + seuil 1.10) ---
-        vol_now = float(k15[-2][7])  # dernière bougie COMPLÈTE
-        vol_ma12 = float(np.mean(vols15[-13:-1]))  # moyenne sur 12 bougies
+        # --- volume-confirm-standard (MA12 + seuil 1.00) ---
+        vol_now = float(k15[-2][7])
+        vol_ma12 = float(np.mean(vols15[-13:-1]))
         vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
 
-        if vol_ratio_15m < 1.10:
-            log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 1.10")
+        if vol_ratio_15m < 1.00:
+            log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 1.00")
             return
 
         # === Confluence & scoring (final) ===
@@ -1793,7 +1791,7 @@ async def process_symbol(symbol):
 async def process_symbol_aggressive(symbol):
     try:
         # --- Paramètres VOLUME (aggressive) ---
-        MIN_VOLUME_LOCAL = 250_000          # fallback local si pas de médiane 30j
+        MIN_VOLUME_LOCAL = 150_000          # fallback local si pas de médiane 30j
         VOL_MED_MULT_AGR = 0.05             # 5% de la médiane 30j (au lieu de 10%)
         VOL_CONFIRM_MULT_AGR = 1.10         # 15m: 1.10x (au lieu de 1.25x)
         VOL_CONFIRM_LOOKBACK_AGR = 12       # 15m: MA12 (au lieu de 20)
@@ -1992,15 +1990,15 @@ async def process_symbol_aggressive(symbol):
             return
 
         # APRÈS (agressif) — MA10 + seuil 1.05
-        # [#volume-confirm-aggressive] — MA12 + seuil 1.05
-        vol_now = float(k15[-2][7])  # dernière bougie 15m COMPLÈTE
+        # [#volume-confirm-aggressive] — MA12 + seuil 0.95
+        vol_now = float(k15[-2][7])
         vol_ma12 = float(np.mean(vols15[-13:-1]))
         vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
 
-        if vol_ratio_15m < 1.05:
-            log_refusal(symbol, "Volume 15m insuffisant (aggressive)", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 1.05")
+        if vol_ratio_15m < 0.95:
+            log_refusal(symbol, "Volume 15m insuffisant (aggressive)", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 0.95")
             return
-            
+           
         # --- Filtre structure 15m (aggressive) ---
         if near_level:
             ok15, det15 = check_15m_filter(k15, breakout_level=last10_high)
