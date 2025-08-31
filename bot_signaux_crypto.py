@@ -96,7 +96,7 @@ VOL_MED_MULT = 0.10  # Tolérance volume vs médiane 30j (était 0.25)
 VOL_CONFIRM_TF = "15m"
 VOL_CONFIRM_LOOKBACK = 12
 VOL_CONFIRM_MULT = 1.00
-ANTI_SPIKE_UP_STD = 1.8   # % max d'extension de la bougie d'entrée (stratégie standard)
+ANTI_SPIKE_UP_STD = 0.8   # 0.8% mini (std)
 ANTI_SPIKE_UP_AGR = 1.6   # % max d'extension (stratégie agressive)
 # --- Anti-spike adaptatif (bonus) ---
 ANTI_SPIKE_ATR_MULT = 1.30   # autorise une extension ≈ 1.3 × ATR% (par rapport à l'open)
@@ -247,6 +247,11 @@ def get_cached(symbol, tf="1h", limit=LIMIT, force: bool = False):
 
 # ====== META / HELPERS POUR MESSAGES & IDs ======
 BOT_VERSION = "v1.0.0"
+# === Contexte marché global (pré-calcul BTC/ETH pour perf) ===
+MARKET_STATE = {
+    "btc": {"rsi": None, "macd": None, "signal": None, "adx": None, "up": None},
+    "eth": {"rsi": None, "macd": None, "signal": None, "adx": None, "up": None},
+}
 
 def utc_now_str():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -331,13 +336,8 @@ def median_volume(symbol, interval="1h", days=30):
     klines = get_cached(symbol, interval)
     if not klines or len(klines) < 24 * days:
         return 0.0
-    volumes = [float(k[7]) for k in klines]
-    return float(np.median(volumes[-24*days:]))
-
-
-    # Le volume se trouve en position [5] dans chaque kline
-    volumes = [float(k[7]) for k in klines]
-    return float(np.median(volumes[-24*days:]))
+    vols = [float(k[7]) for k in klines]
+    return float(np.median(vols[-24*days:]))
 
 def is_hourly_volume_anomalously_low(k1h, factor=0.5, min_lookback=50):
     """
@@ -584,21 +584,22 @@ def is_volume_increasing(klines):
 
 def is_market_bullish():
     """
-    Ne bloque que si BTC **et** ETH sont franchement mous :
-    RSI < 45, MACD <= signal, et ADX < 18 simultanément.
-    Sinon on laisse passer (hors panique BTC gérée ailleurs).
+    Version ultra simple & rapide : on lit le pré-calcul (MARKET_STATE).
+    On bloque SEULEMENT si BTC **et** ETH sont tous les deux "mous":
+      RSI < 45, MACD <= signal, ADX < 18.
+    Sinon on laisse passer.
     """
     try:
-        btc = [float(k[4]) for k in market_cache.get('BTCUSDT', [])]
-        eth = [float(k[4]) for k in market_cache.get('ETHUSDT', [])]
-        if not btc or not eth:
+        b = MARKET_STATE["btc"]
+        e = MARKET_STATE["eth"]
+
+        # si pas encore pré-rempli, on est permissif
+        if any(v is None for v in (b["rsi"], b["macd"], b["signal"], b["adx"],
+                                   e["rsi"], e["macd"], e["signal"], e["adx"])):
             return True
 
-        rsi_btc = rsi_tv(btc, 14); macd_btc, sig_btc = compute_macd(btc); adx_btc = adx_tv(market_cache['BTCUSDT'], 14)
-        rsi_eth = rsi_tv(eth, 14); macd_eth, sig_eth = compute_macd(eth); adx_eth = adx_tv(market_cache['ETHUSDT'], 14)
-
-        bad_btc = (rsi_btc < 45) and (macd_btc <= sig_btc) and (adx_btc < 18)
-        bad_eth = (rsi_eth < 45) and (macd_eth <= sig_eth) and (adx_eth < 18)
+        bad_btc = (b["rsi"] < 45) and (b["macd"] <= b["signal"]) and (b["adx"] < 18)
+        bad_eth = (e["rsi"] < 45) and (e["macd"] <= e["signal"]) and (e["adx"] < 18)
         return not (bad_btc and bad_eth)
     except Exception:
         return True
@@ -663,7 +664,7 @@ def is_active_liquidity_session(now=None, symbol=None):
 def get_klines_4h(symbol, limit=100):
     return get_klines(symbol, interval='4h', limit=limit)
 
-def is_market_range(prices, threshold=0.01):
+def is_market_range(prices, threshold=0.015):  # 1.5% au lieu de 1.0%
     return (max(prices[-20:]) - min(prices[-20:])) / min(prices[-20:]) < threshold
 
 def get_volatility(atr, price):
@@ -857,6 +858,31 @@ def adx_tv(klines, period=14):
     finite = adx_series[~np.isnan(adx_series)]
     return float(finite[-1]) if finite.size else 0.0
 
+# === Cache ATR par symbole/période/dernière bougie (évite de recalculer sans raison) ===
+ATR_CACHE = {}  # key: (symbol, period, last_close_ts) -> value: atr
+
+def _last_close_ts_ms(klines):
+    try:
+        return int(klines[-1][6])  # timestamp de close de la bougie en cours (ms)
+    except Exception:
+        return None
+
+def atr_tv_cached(symbol, klines, period=14):
+    """Retourne l'ATR-TV en lisant un cache si la bougie n'a pas changé."""
+    try:
+        last_ts = _last_close_ts_ms(klines)
+        if last_ts is None:
+            return atr_tv(klines, period)
+        key = (symbol, int(period), last_ts)
+        if key in ATR_CACHE:
+            return ATR_CACHE[key]
+        val = atr_tv(klines, period)
+        ATR_CACHE[key] = val
+        return val
+    except Exception:
+        # en cas de pépin, on retombe sur le calcul direct
+        return atr_tv(klines, period)
+
 
 # [#fast-exit-5m]
 def _last_two_finite(values):
@@ -1015,6 +1041,10 @@ def log_refusal(symbol: str, reason: str, trigger: str = "", cooldown_left_min: 
             "cooldown_left_min": "" if cooldown_left_min is None else int(cooldown_left_min),
         })
 
+def log_info(symbol: str, reason: str, trigger: str = ""):
+    # log "neutre" (juste en console) pour info/diagnostic
+    print(f"[INFO] {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} {symbol} | {reason} | {trigger}")
+
 def log_trade_csv(row: dict):
     """Écrit/append une ligne dans trade_audit.csv avec l'en-tête s'il manque."""
     import os, csv
@@ -1030,7 +1060,7 @@ def log_trade_csv(row: dict):
             clean["ts_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         w.writerow(clean)
 # ====== /CSV détaillé ======
-def trailing_stop_advanced(symbol, current_price, atr_period=14):
+def trailing_stop_advanced(symbol, current_price, atr_value=None, atr_period=14):
     """
     Trailing stop harmonisé ATR (version TradingView).
     - tiers de gain -> multiplicateurs d'ATR
@@ -1046,7 +1076,8 @@ def trailing_stop_advanced(symbol, current_price, atr_period=14):
     k1h = get_cached(symbol, "1h")
     if not k1h:
         return
-    atr_val = atr_tv(k1h, period=atr_period)
+    atr_val = atr_value if (atr_value is not None) else atr_tv_cached(symbol, k1h, period=atr_period)
+
 
     prev_stop = float(trades[symbol].get("stop", trades[symbol].get("sl_initial", entry)))
     new_stop = prev_stop
@@ -1073,7 +1104,7 @@ def compute_confidence_score(indicators):
     if indicators["rsi"] > 50 and indicators["rsi"] < 70: score += 2
     if indicators["macd"] > indicators["signal"]: score += 2
     if indicators["supertrend"]: score += 2
-    if indicators["adx"] > 25: score += 2
+    if indicators["adx"] > 22: score += 2
     if indicators["volume_ok"]: score += 1
     if indicators["above_ema200"]: score += 1
     return min(score, 10)
@@ -1093,6 +1124,29 @@ def get_last_price(symbol):
         return float(data["price"])
     except Exception:
         return None
+
+# === Pré-calcul des indicateurs BTC/ETH pour booster les perfs ===
+def update_market_state():
+    try:
+        for sym, key in (("BTCUSDT", "btc"), ("ETHUSDT", "eth")):
+            k = market_cache.get(sym, [])
+            if not k or len(k) < 30:
+                # pas de données -> on met des None
+                MARKET_STATE[key].update({"rsi": None, "macd": None, "signal": None, "adx": None, "up": None})
+                continue
+
+            closes = [float(x[4]) for x in k]
+            rsi    = rsi_tv(closes, 14)
+            macd, signal = compute_macd(closes)
+            adx    = adx_tv(k, 14)
+            up     = is_uptrend(closes)
+
+            MARKET_STATE[key].update({
+                "rsi": rsi, "macd": macd, "signal": signal, "adx": adx, "up": up
+            })
+    except Exception:
+        # en cas de pépin, on ne bloque pas le bot
+        pass
 
 async def process_symbol(symbol):
     try:
@@ -1203,22 +1257,6 @@ async def process_symbol(symbol):
         if closes_4h[-1] < ema50_4h: indicators_soft_penalty += 1
         if closes_4h[-1] < ema200_4h: indicators_soft_penalty += 1
 
-        # --- ADX soft + hard floor ---
-        if adx_value < 10:
-            log_refusal(symbol, "ADX 1h trop faible (hard)", trigger=f"adx={adx_value:.1f}")
-            return
-        elif adx_value < 15:
-            indicators_soft_penalty += 1
-
-        if rsi_4h < 48:
-            log_refusal(symbol, f"RSI 4h {rsi_4h:.1f} < 48")
-            return
-            
-        rsi4h_penalty = 1 if rsi_4h < 52 else 0
-        if rsi4h_penalty:
-            indicators_soft_penalty += rsi4h_penalty
-            tendance_soft_notes.append(f"RSI 4h {rsi_4h:.1f} < 52")
-
         if is_market_range(closes_4h):
             await tg_send(f"⚠️ Marché en range sur {symbol} → Trade bloqué")
             return
@@ -1309,53 +1347,20 @@ async def process_symbol(symbol):
             return
 
         # APRÈS (standard) — MA12 + seuil 1.10
-        vol_now = float(k15[-1][7])
-        vol_ma12 = float(np.mean(vols15[-13:-1]))  # 12 bougies complètes (on exclut la bougie en cours)
+        # --- volume-confirm-standard (MA12 + seuil 1.10) ---
+        vol_now = float(k15[-2][7])  # dernière bougie COMPLÈTE
+        vol_ma12 = float(np.mean(vols15[-13:-1]))  # moyenne sur 12 bougies
         vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
 
         if vol_ratio_15m < 1.10:
-            log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f}")
+            log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 1.10")
             return
 
+        # === Confluence & scoring (final) ===
+        volume_ok   = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
+        trend_ok    = (price > ema200) and supertrend_signal
+        momentum_ok = (macd > signal) and (rsi >= 55)
 
-        # === Confluence & scoring (recréés) ===
-        volume_ok  = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
-        trend_ok   = (price > ema200) and supertrend_signal     # ⬅️ on retire ADX ici
-        momentum_ok = (macd > signal) and (rsi >= 55)           # (on allègera pour le PB plus bas)
-
-        tendance_soft_notes = []
-        if price < ema200:
-            tendance_soft_notes.append("Prix < EMA200(1h)")
-        if closes_4h[-1] < ema50_4h:
-            tendance_soft_notes.append("Close4h < EMA50(4h)")
-        if closes_4h[-1] < ema200_4h:
-            tendance_soft_notes.append("Close4h < EMA200(4h)")
-
-        # ---- Pénalités "soft" ----
-        indicators_soft_penalty = 0
-
-        if price < ema200:             indicators_soft_penalty += 1
-        if closes_4h[-1] < ema50_4h:   indicators_soft_penalty += 1
-        if closes_4h[-1] < ema200_4h:  indicators_soft_penalty += 1
-
-        # RSI 4h
-        if rsi_4h < 48:
-            log_refusal(symbol, f"RSI 4h {rsi_4h:.1f} < 48")
-            return
-        rsi4h_penalty = 1 if 48 <= rsi_4h < 52 else 0
-        indicators_soft_penalty += rsi4h_penalty
-
-        # ADX
-        if adx_value < 13:
-            log_refusal(symbol, "ADX 1h très faible", trigger=f"adx={adx_value:.1f}")
-            return
-        adx_penalty = 1 if adx_value < 18 else 0
-        indicators_soft_penalty += adx_penalty
-
-        # supertrend reste obligatoire
-        if not supertrend_signal:
-            log_refusal(symbol, "Supertrend 1h non haussier (signal=False)")
-            return
 
         indicators = {
             "rsi": rsi,
@@ -1404,7 +1409,7 @@ async def process_symbol(symbol):
             if price > ema25 * 1.01:  # +1.0% max
                 log_refusal(
                     symbol,
-                    f"Entrée limit BRK: prix {price:.4f} > EMA25*1.015 ({ema25*1.015:.4f})"
+                    f"Entrée limit BRK: prix {price:.4f} > EMA25*1.01 ({ema25*1.01:.4f})"
                 )
                 return
                 
@@ -1444,7 +1449,7 @@ async def process_symbol(symbol):
                 if price > ema25 * 1.01:  # +1.0% max
                     log_refusal(
                         symbol,
-                        f"Entrée limit PB: prix {price:.4f} > EMA25*1.015 ({ema25*1.015:.4f})"
+                        f"Entrée limit PB: prix {price:.4f} > EMA25*1.01 ({ema25*1.01:.4f})"
                     )
                     return
 
@@ -1572,7 +1577,7 @@ async def process_symbol(symbol):
                 _delete_trade(symbol)
                 return
 
-            trailing_stop_advanced(symbol, price)
+            trailing_stop_advanced(symbol, price, atr_value=atr)
             stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN)))
 
 
@@ -1873,7 +1878,12 @@ async def process_symbol_aggressive(symbol):
             return
 
         # --- Low-liquidity session -> SOFT ---
+        # init pénalités/notes (doit être fait AVANT de s'en servir)
+        indicators_soft_penalty = 0
+        tendance_soft_notes = []
+
         ok_session, _sess = is_active_liquidity_session(symbol=symbol)
+
         if not ok_session:
             MAJORS = {"BTCUSDT", "ETHUSDT", "BNBUSDT"}
             if symbol in MAJORS:
@@ -1906,9 +1916,6 @@ async def process_symbol_aggressive(symbol):
         supertrend_ok = supertrend_like_on_close(klines)
         above_ema200  = price >= ema200 * 0.98  # soft
 
-        # soft penalty si sous l’EMA200
-        indicators_soft_penalty = 0
-        tendance_soft_notes = []
         if not above_ema200:
             indicators_soft_penalty += 1
             tendance_soft_notes.append("Prix ~ sous EMA200(1h)")
@@ -1985,14 +1992,15 @@ async def process_symbol_aggressive(symbol):
             return
 
         # APRÈS (agressif) — MA10 + seuil 1.05
-        vol_now_15 = float(k15[-1][7])
-        vol_ma10 = float(np.mean(vols15[-11:-1]))
-        vol_ratio_15m = vol_now_15 / max(vol_ma10, 1e-9)
+        # [#volume-confirm-aggressive] — MA12 + seuil 1.05
+        vol_now = float(k15[-2][7])  # dernière bougie 15m COMPLÈTE
+        vol_ma12 = float(np.mean(vols15[-13:-1]))
+        vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
 
         if vol_ratio_15m < 1.05:
-            log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 1.05")
+            log_refusal(symbol, "Volume 15m insuffisant (aggressive)", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 1.05")
             return
-
+            
         # --- Filtre structure 15m (aggressive) ---
         if near_level:
             ok15, det15 = check_15m_filter(k15, breakout_level=last10_high)
@@ -2491,7 +2499,7 @@ async def process_symbol_aggressive(symbol):
             return
 
         # ---- Trailing stop & HOLD ----
-        trailing_stop_advanced(symbol, price)
+        trailing_stop_advanced(symbol, price, atr_value=atr_val_current)
         log_trade(symbol, "HOLD", price)
 
     except Exception as e:
@@ -2580,6 +2588,26 @@ async def main_loop():
             # Contexte marché (on alimente market_cache avec le 1h préchargé)
             market_cache['BTCUSDT'] = symbol_cache.get('BTCUSDT', {}).get('1h', [])
             market_cache['ETHUSDT'] = symbol_cache.get('ETHUSDT', {}).get('1h', [])
+            update_market_state()
+
+            # Contexte marché (pré-calcul perf)
+            try:
+                for sym, key in [("BTCUSDT","btc"), ("ETHUSDT","eth")]:
+                    k = market_cache.get(sym, [])
+                    if k and len(k) >= 30:
+                        closes = [float(x[4]) for x in k]
+                        MARKET_STATE[key]["rsi"]    = rsi_tv(closes, 14)
+                        m, s = compute_macd(closes)
+                        MARKET_STATE[key]["macd"]   = m
+                        MARKET_STATE[key]["signal"] = s
+                        MARKET_STATE[key]["adx"]    = adx_tv(k, 14)
+                        MARKET_STATE[key]["up"]     = is_uptrend(closes)
+                    else:
+                        # valeurs neutres (ne bloquent pas)
+                        MARKET_STATE[key] = {"rsi":50, "macd":0, "signal":0, "adx":20, "up":True}
+            except Exception:
+                pass
+
 
             # Lancement des analyses
             # 1) D’abord la stratégie standard
