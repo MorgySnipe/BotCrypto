@@ -95,7 +95,7 @@ COOLDOWN_HOURS = 4
 VOL_MED_MULT = 0.10  # Tolérance volume vs médiane 30j (était 0.25)
 VOL_CONFIRM_TF = "15m"
 VOL_CONFIRM_LOOKBACK = 12
-VOL_CONFIRM_MULT = 1.10
+VOL_CONFIRM_MULT = 1.00
 ANTI_SPIKE_UP_STD = 1.8   # % max d'extension de la bougie d'entrée (stratégie standard)
 ANTI_SPIKE_UP_AGR = 1.6   # % max d'extension (stratégie agressive)
 # --- Anti-spike adaptatif (bonus) ---
@@ -649,14 +649,15 @@ def in_active_session():
     return not (0 <= hour < 6)
 
 def is_active_liquidity_session(now=None, symbol=None):
-    """
-    Bloque uniquement 01:00–04:00 UTC, et jamais pour BTC/ETH.
-    """
     if now is None:
         now = datetime.now(timezone.utc)
     h = now.hour
-    if 1 <= h < 4 and symbol not in ("BTCUSDT", "ETHUSDT"):
-        return False, "blocked_01_04"
+
+    HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
+
+    # On ne bloque que 01:00–02:00 UTC, et on NE bloque jamais les paires très liquides
+    if 1 <= h < 2 and symbol not in HIGH_LIQ:
+        return False, "blocked_01_02"
     return True, "ANY"
 
 def get_klines_4h(symbol, limit=100):
@@ -1203,10 +1204,10 @@ async def process_symbol(symbol):
         if closes_4h[-1] < ema200_4h: indicators_soft_penalty += 1
 
         # --- ADX soft + hard floor ---
-        if adx_value < 13:
+        if adx_value < 10:
             log_refusal(symbol, "ADX 1h trop faible (hard)", trigger=f"adx={adx_value:.1f}")
             return
-        elif adx_value < 18:
+        elif adx_value < 15:
             indicators_soft_penalty += 1
 
         if rsi_4h < 48:
@@ -1261,10 +1262,19 @@ async def process_symbol(symbol):
             return
 
 
+        # --- Low-liquidity session -> SOFT ---
         ok_session, _sess = is_active_liquidity_session(symbol=symbol)
         if not ok_session:
-            log_refusal(symbol, "Low-liquidity session")
-            return
+            MAJORS = {"BTCUSDT", "ETHUSDT", "BNBUSDT"}
+            if symbol in MAJORS:
+                # On laisse passer sans pénalité sur les majeures
+                log_info(symbol, "Low-liquidity session (tolérée sur major)")
+            else:
+                # Soft penalty sur les autres paires
+                indicators_soft_penalty += 1
+                tendance_soft_notes.append("Session à faible liquidité")
+                log_info(symbol, "Low-liquidity session (soft)")
+            # Pas de return: on continue le flux
             
         # --- Filtre régime BTC ---
         if symbol != "BTCUSDT":
@@ -1298,13 +1308,15 @@ async def process_symbol(symbol):
             log_refusal(symbol, "Données 15m insuffisantes (volume)")
             return
 
-        vol_now = float(k15[-1][7])  # volume quote de la bougie 15m en cours
-        vol_ma20 = float(np.mean(vols15[-(VOL_CONFIRM_LOOKBACK+1):-1]))  # 20 dernières complètes (on exclut la bougie en cours)
-        vol_ratio_15m = vol_now / max(vol_ma20, 1e-9)
+        # APRÈS (standard) — MA12 + seuil 1.10
+        vol_now = float(k15[-1][7])
+        vol_ma12 = float(np.mean(vols15[-13:-1]))  # 12 bougies complètes (on exclut la bougie en cours)
+        vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
 
-        if vol_ratio_15m < VOL_CONFIRM_MULT:
+        if vol_ratio_15m < 1.10:
             log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f}")
             return
+
 
         # === Confluence & scoring (recréés) ===
         volume_ok  = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
@@ -1860,10 +1872,19 @@ async def process_symbol_aggressive(symbol):
             log_refusal(symbol, f"Nombre max de trades atteint dynamiquement ({len(trades)}/{slots})")
             return
 
+        # --- Low-liquidity session -> SOFT ---
         ok_session, _sess = is_active_liquidity_session(symbol=symbol)
         if not ok_session:
-            log_refusal(symbol, "Low-liquidity session")
-            return
+            MAJORS = {"BTCUSDT", "ETHUSDT", "BNBUSDT"}
+            if symbol in MAJORS:
+                # On laisse passer sans pénalité sur les majeures
+                log_info(symbol, "Low-liquidity session (tolérée sur major)")
+            else:
+                # Soft penalty sur les autres paires
+                indicators_soft_penalty += 1
+                tendance_soft_notes.append("Session à faible liquidité")
+                log_info(symbol, "Low-liquidity session (soft)")
+            # Pas de return: on continue le flux
 
         if not is_market_bullish():
             return
@@ -1963,12 +1984,13 @@ async def process_symbol_aggressive(symbol):
             log_refusal(symbol, "Données 15m insuffisantes (volume)")
             return
 
-        vol_now_15 = float(k15[-1][7])  # volume 15m en cours
-        vol_ma_15  = float(np.mean(vols15[-(VOL_CONFIRM_LOOKBACK_AGR + 1):-1]))  # MA des X dernières complètes
-        vol_ratio_15m = vol_now_15 / max(vol_ma_15, 1e-9)
+        # APRÈS (agressif) — MA10 + seuil 1.05
+        vol_now_15 = float(k15[-1][7])
+        vol_ma10 = float(np.mean(vols15[-11:-1]))
+        vol_ratio_15m = vol_now_15 / max(vol_ma10, 1e-9)
 
-        if vol_ratio_15m < VOL_CONFIRM_MULT_AGR:
-            log_refusal(symbol, f"Volume 15m insuffisant ({vol_ratio_15m:.2f}x < {VOL_CONFIRM_MULT_AGR}x)")
+        if vol_ratio_15m < 1.05:
+            log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 1.05")
             return
 
         # --- Filtre structure 15m (aggressive) ---
