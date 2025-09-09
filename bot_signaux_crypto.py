@@ -166,27 +166,17 @@ BTC_REGIME_BLOCK_MIN = 90    # minutes de blocage des ALTS
 RISK_PER_TRADE   = 0.005   # 0.5% du capital par trade
 DAILY_MAX_LOSS   = -0.03   # -3% cumulé sur la journée (UTC)
 
-def allowed_trade_slots() -> int:
+def allowed_trade_slots(strategy: str | None = None) -> int:
     """
-    MAX_TRADES dynamique :
+    MAX_TRADES dynamique par stratégie (si 'strategy' fourni), sinon global.
     min(7, 1 + nb_trades_avec_score_>=8)
-    On compte les trades OUVERTS avec confidence >= 8.
     """
     try:
-        high = sum(1 for t in trades.values() if float(t.get("confidence", 0)) >= 8)
+        iterable = (t for t in trades.values() if (strategy is None or t.get("strategy") == strategy))
+        high = sum(1 for t in iterable if float(t.get("confidence", 0)) >= 8)
     except Exception:
         high = 0
     return min(7, 1 + high)
-
-def _parse_dt_flex(ts: str):
-    """Parser tolérant pour 'history' (SELL) : retourne un datetime UTC 'aware'."""
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
-        try:
-            # On force l'UTC 'aware'
-            return datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)
-        except Exception:
-            pass
-    return None
 
 def daily_pnl_pct_utc() -> float:
     """
@@ -1307,7 +1297,9 @@ async def process_symbol(symbol):
         if is_market_range(closes_4h):
             await tg_send(f"⚠️ Marché en range sur {symbol} → Trade bloqué")
             return
-        if detect_rsi_divergence(closes, rsi_series): return
+        if detect_rsi_divergence(closes, rsi_series):
+            log_refusal(symbol, "RSI divergence", trigger=f"price↑ & RSI↓ ({closes[-2]:.4f}->{closes[-1]:.4f} ; rsi {rsi_series[-2]:.1f}->{rsi_series[-1]:.1f})")
+            return
 
         volatility = get_volatility(atr, price)
         if volatility < 0.003:
@@ -1339,7 +1331,7 @@ async def process_symbol(symbol):
                 return
                 
         # ----- Garde-fous -----
-        slots = allowed_trade_slots()
+        slots = allowed_trade_slots("standard")
         if len(trades) >= slots:
             log_refusal(symbol, f"Nombre max de trades atteint dynamiquement ({len(trades)}/{slots})")
             return
@@ -1923,7 +1915,7 @@ async def process_symbol_aggressive(symbol):
         macd_prev, signal_prev = compute_macd(closes[:-1])
 
         # ---- Garde-fous ----
-        slots = allowed_trade_slots()
+        slots = allowed_trade_slots("aggressive")
         if len(trades) >= slots:
             log_refusal(symbol, f"Nombre max de trades atteint dynamiquement ({len(trades)}/{slots})")
             return
@@ -2666,25 +2658,6 @@ async def main_loop():
             market_cache['BTCUSDT'] = symbol_cache.get('BTCUSDT', {}).get('1h', [])
             market_cache['ETHUSDT'] = symbol_cache.get('ETHUSDT', {}).get('1h', [])
             update_market_state()
-
-            # Contexte marché (pré-calcul perf)
-            try:
-                for sym, key in [("BTCUSDT","btc"), ("ETHUSDT","eth")]:
-                    k = market_cache.get(sym, [])
-                    if k and len(k) >= 30:
-                        closes = [float(x[4]) for x in k]
-                        MARKET_STATE[key]["rsi"]    = rsi_tv(closes, 14)
-                        m, s = compute_macd(closes)
-                        MARKET_STATE[key]["macd"]   = m
-                        MARKET_STATE[key]["signal"] = s
-                        MARKET_STATE[key]["adx"]    = adx_tv(k, 14)
-                        MARKET_STATE[key]["up"]     = is_uptrend(closes)
-                    else:
-                        # valeurs neutres (ne bloquent pas)
-                        MARKET_STATE[key] = {"rsi":50, "macd":0, "signal":0, "adx":20, "up":True}
-            except Exception:
-                pass
-
 
             # Lancement des analyses
             # 1) D’abord la stratégie standard
