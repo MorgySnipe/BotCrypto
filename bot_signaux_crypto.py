@@ -76,6 +76,35 @@ def binance_get(path, params=None, max_tries=6):
             time.sleep(min(0.5 * (2 ** attempt), 5.0) + random.uniform(0.05, 0.25))
     return None
 
+# --- versions async (non bloquantes) ---
+def _binance_get_sync(path, params=None):
+    base = BINANCE_BASES[_base_idx]
+    url = f"{base}{path}"
+    return SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
+
+async def binance_get_async(path, params=None, max_tries=6):
+    for attempt in range(max_tries):
+        base = BINANCE_BASES[_base_idx]
+        url = f"{base}{path}"
+        try:
+            resp = await asyncio.to_thread(_binance_get_sync, path, params)
+            if resp.status_code in (418,429,403,500,502,503,504):
+                _rotate_base()
+                await asyncio.sleep(min(0.5 * (2 ** attempt), 5.0) + random.uniform(0.05, 0.25))
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException:
+            _rotate_base()
+            await asyncio.sleep(min(0.5 * (2 ** attempt), 5.0) + random.uniform(0.05, 0.25))
+    return None
+
+async def get_klines_async(symbol, interval='1h', limit=100):
+    return await binance_get_async(
+        "/api/v3/klines",
+        {"symbol": symbol, "interval": interval, "limit": limit}
+    ) or []
+
 
 TELEGRAM_TOKEN = '7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac'
 CHAT_ID = 969925512
@@ -219,6 +248,10 @@ def save_trades():
 
 # === Cache par itération pour limiter les requêtes ===
 symbol_cache = {}    # {"BTCUSDT": {"1h": [...], "4h": [...]}, ...}
+
+# === Buffer pour HOLD (anti-flood) ===
+hold_buffer: dict[str, list[str]] = {}
+HOLD_FLUSH_INTERVAL = 180  # secondes (3 minutes)
 
 def _delete_trade(symbol):
     if symbol in trades:
@@ -367,6 +400,14 @@ def safe_message(text):
 _tg_lock = asyncio.Lock()
 _tg_last_send_ts = 0.0  # horloge monotonic, ~1 msg/s par chat
 
+# === Batch HOLD (regroupe les messages d'état) ===
+HOLD_FLUSH_INTERVAL = 180  # toutes les 3 min
+hold_buffer: dict[str, list[str]] = {}
+
+async def buffer_hold(symbol: str, text: str):
+    # on stocke le message (tronqué proprement)
+    hold_buffer.setdefault(symbol, []).append(safe_message(text))
+
 async def tg_send(text: str, chat_id: int = CHAT_ID):
     """Envoi Telegram avec anti-flood + gestion RetryAfter/Timeout."""
     global _tg_last_send_ts
@@ -388,6 +429,12 @@ async def tg_send(text: str, chat_id: int = CHAT_ID):
             await bot.send_message(chat_id=chat_id, text=safe_message(text))
 
         _tg_last_send_ts = time.monotonic()
+
+# --- Buffer HOLD (anti-flood) ---
+async def buffer_hold(symbol: str, msg: str):
+    """Stocke un message HOLD dans le buffer au lieu d'envoyer direct."""
+    hold_buffer.setdefault(symbol, []).append(msg)
+
 # --- Envoi de fichier Telegram (anti-flood + retry) ---
 async def tg_send_doc(path: str, caption: str = "", chat_id: int = CHAT_ID):
     import os
@@ -1320,7 +1367,7 @@ async def process_symbol(symbol):
                 return
 
         # — Pré-filtre: prix trop loin de l’EMA25 (plus strict)
-        EMA25_PREFILTER_STD = 1.03   # +3% (au lieu de +1.5%)
+        EMA25_PREFILTER_STD = 1.03   # +3%
         if price > ema25 * EMA25_PREFILTER_STD:
             dist = (price / max(ema25, 1e-9) - 1) * 100
             log_refusal(
@@ -1735,6 +1782,11 @@ async def process_symbol(symbol):
 
             if not sell:
                 log_trade(symbol, "HOLD", price)
+                # on push un court statut dans le buffer (sera envoyé en batch)
+                await buffer_hold(
+                    symbol,
+                    f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}"
+                )
 
         # --- Circuit breaker JOUR (avant toute nouvelle entrée) ---
         if buy and symbol not in trades:
@@ -1794,7 +1846,7 @@ async def process_symbol_aggressive(symbol):
         # --- Paramètres VOLUME (aggressive) ---
         MIN_VOLUME_LOCAL = 150_000          # fallback local si pas de médiane 30j
         VOL_MED_MULT_AGR = 0.05             # 5% de la médiane 30j (au lieu de 10%)
-        VOL_CONFIRM_MULT_AGR = 1.10         # 15m: 1.10x (au lieu de 1.25x)
+        VOL_CONFIRM_MULT_AGR = 0.85         
         VOL_CONFIRM_LOOKBACK_AGR = 12       # 15m: MA12 (au lieu de 20)
 
         # ---- Auto-close SOUPLE (aggressive) ----
@@ -2500,6 +2552,11 @@ async def process_symbol_aggressive(symbol):
         # ---- Trailing stop & HOLD ----
         trailing_stop_advanced(symbol, price, atr_value=atr_val_current)
         log_trade(symbol, "HOLD", price)
+        # on push un court statut dans le buffer (sera envoyé en batch)
+        await buffer_hold(
+            symbol,
+            f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}"
+        )
 
     except Exception as e:
         print(f"❌ Erreur stratégie agressive {symbol}: {e}")
@@ -2535,8 +2592,19 @@ async def send_daily_summary():
     except Exception as e:
         await tg_send(f"⚠️ Échec d’envoi de trade_audit.csv : {e}")
 
+async def flush_hold_loop():
+    """Vide périodiquement le buffer HOLD et envoie les messages groupés."""
+    while True:
+        await asyncio.sleep(HOLD_FLUSH_INTERVAL)
+        for sym, msgs in list(hold_buffer.items()):
+            if msgs:
+                batched = "\n".join(msgs)
+                await tg_send(f"[HOLD batch {sym}]\n{batched}")
+                hold_buffer[sym] = []
+
 async def main_loop():
     await tg_send(f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+    asyncio.create_task(flush_hold_loop())
     global trades
     trades.update(load_trades())
     # Hydratation correcte de last_trade_time depuis les trades persistés (UTC aware)
