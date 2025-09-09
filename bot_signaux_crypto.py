@@ -2046,7 +2046,7 @@ async def process_symbol_aggressive(symbol):
 
         if price > ema25 * 1.03:
             log_refusal(symbol, f"Entrée limit aggressive: prix {price:.4f} > EMA25*1.03 ({ema25*1.03:.4f})")
-    r        eturn
+            return
 
         # --- Circuit breaker JOUR (aggressive) ---
         pnl_today = daily_pnl_pct_utc()
