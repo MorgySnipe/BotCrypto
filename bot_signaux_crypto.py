@@ -100,7 +100,7 @@ ANTI_SPIKE_UP_STD = 0.8   # 0.8% mini (std)
 ANTI_SPIKE_UP_AGR = 1.6   # % max d'extension (stratégie agressive)
 # --- Anti-spike adaptatif (bonus) ---
 ANTI_SPIKE_ATR_MULT = 1.30   # autorise une extension ≈ 1.3 × ATR% (par rapport à l'open)
-ANTI_SPIKE_MAX_PCT  = 2.40   # plafond de sécurité (en %)
+ANTI_SPIKE_MAX_PCT  = 4.00   # plafond std relevé à 4%
 # --- Trailing stop harmonisé (ATR TV) ---
 TRAIL_TIERS = [
     (2.0, 0.8),  # gain >= 2%  -> stop = P - 0.8 * ATR
@@ -1320,7 +1320,7 @@ async def process_symbol(symbol):
                 return
 
         # — Pré-filtre: prix trop loin de l’EMA25 (plus strict)
-        EMA25_PREFILTER_STD = 1.015  # +1.5%
+        EMA25_PREFILTER_STD = 1.03   # +3% (au lieu de +1.5%)
         if price > ema25 * EMA25_PREFILTER_STD:
             dist = (price / max(ema25, 1e-9) - 1) * 100
             log_refusal(
@@ -1350,8 +1350,8 @@ async def process_symbol(symbol):
         vol_ma12 = float(np.mean(vols15[-13:-1]))
         vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
 
-        if vol_ratio_15m < 1.00:
-            log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 1.00")
+        if vol_ratio_15m < 0.85:
+            log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 0.85")
             return
 
         # === Confluence & scoring (final) ===
@@ -1404,12 +1404,13 @@ async def process_symbol(symbol):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > niveau de retest OU > EMA25(1h) ±0.1%")
                 return
 
-            if price > ema25 * 1.01:  # +1.0% max
+            if price > ema25 * 1.03:  # +3.0% max
                 log_refusal(
                     symbol,
-                    f"Entrée limit BRK: prix {price:.4f} > EMA25*1.01 ({ema25*1.01:.4f})"
+                    f"Entrée limit BRK: prix {price:.4f} > EMA25*1.03 ({ema25*1.03:.4f})"
                 )
                 return
+
                 
             if tendance_soft_notes:
                 reasons += [f"Avertissements tendance: {', '.join(tendance_soft_notes)}"]
@@ -1444,10 +1445,10 @@ async def process_symbol(symbol):
                     log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (PB)")
                     return
 
-                if price > ema25 * 1.01:  # +1.0% max
+                if price > ema25 * 1.03:  # +1.0% max
                     log_refusal(
                         symbol,
-                        f"Entrée limit PB: prix {price:.4f} > EMA25*1.01 ({ema25*1.01:.4f})"
+                        f"Entrée limit PB: prix {price:.4f} > EMA25*1.01 ({ema25*1.03:.4f})"
                     )
                     return
 
@@ -1965,7 +1966,7 @@ async def process_symbol_aggressive(symbol):
         near_ema25  = abs(price - ema25)      / ema25      <= RETEST_BAND_AGR
 
         # éviter d’acheter trop loin de l’EMA25
-        too_far_from_ema25 = price >= ema25 * 1.008
+        too_far_from_ema25 = price >= ema25 * 1.03
         if too_far_from_ema25:
             log_refusal(symbol, f"Prix trop éloigné de l'EMA25 (+0.8%) (prix={price}, ema25={ema25})")
             return
@@ -1995,10 +1996,10 @@ async def process_symbol_aggressive(symbol):
         vol_ma12 = float(np.mean(vols15[-13:-1]))
         vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
 
-        if vol_ratio_15m < 0.95:
-            log_refusal(symbol, "Volume 15m insuffisant (aggressive)", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 0.95")
+        if vol_ratio_15m < 0.85:
+            log_refusal(symbol, "Volume 15m insuffisant (aggressive)", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 0.85")
             return
-           
+         
         # --- Filtre structure 15m (aggressive) ---
         if near_level:
             ok15, det15 = check_15m_filter(k15, breakout_level=last10_high)
@@ -2043,9 +2044,9 @@ async def process_symbol_aggressive(symbol):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (aggressive)")
             return
 
-        if price > ema25 * 1.01:  # +1.0% max
-            log_refusal(symbol, f"Entrée limit aggressive: prix {price:.4f} > EMA25*1.015 ({ema25*1.015:.4f})")
-            return
+        if price > ema25 * 1.03:
+            log_refusal(symbol, f"Entrée limit aggressive: prix {price:.4f} > EMA25*1.03 ({ema25*1.03:.4f})")
+    r        eturn
 
         # --- Circuit breaker JOUR (aggressive) ---
         pnl_today = daily_pnl_pct_utc()
