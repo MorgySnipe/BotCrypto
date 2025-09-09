@@ -2644,13 +2644,23 @@ async def main_loop():
                 await send_daily_summary()
                 last_summary_day = now.date()
                 
-            # --- Précharge 1h/4h pour tous les symboles (réduit les requêtes) ---                            
+            # --- Précharge 1h/4h pour tous les symboles (concurrent, non-bloquant) ---
             symbol_cache.clear()
+            tasks = []
             for s in SYMBOLS:
                 symbol_cache.setdefault(s, {})
-                symbol_cache[s]["1h"] = get_klines(s, interval="1h", limit=LIMIT)
-                symbol_cache[s]["4h"] = get_klines(s, interval="4h", limit=LIMIT)
-                await asyncio.sleep(0.08)  # ~80 ms entre requêtes
+                tasks.append(get_klines_async(s, "1h", LIMIT))
+                tasks.append(get_klines_async(s, "4h", LIMIT))
+
+            # lance toutes les requêtes en parallèle
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # range les résultats par paire (2 résultats par symbole: 1h, 4h)
+            for i, s in enumerate(SYMBOLS):
+                r1h  = results[2*i]
+                r4h  = results[2*i + 1]
+                symbol_cache[s]["1h"] = [] if isinstance(r1h, Exception) or r1h is None else r1h
+                symbol_cache[s]["4h"] = [] if isinstance(r4h, Exception) or r4h is None else r4h
 
             # Contexte marché (on alimente market_cache avec le 1h préchargé)
             market_cache['BTCUSDT'] = symbol_cache.get('BTCUSDT', {}).get('1h', [])
