@@ -1,6 +1,7 @@
-python-telegram-bot==20.3
+python-telegram-bot>=20,<21
+python-dotenv>=1.0
+httpx>=0.27
 requests
 numpy
 nest_asyncio
-
 
