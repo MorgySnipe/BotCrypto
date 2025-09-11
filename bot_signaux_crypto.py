@@ -121,15 +121,15 @@ SLEEP_SECONDS = 300
 MAX_TRADES = 7
 MIN_VOLUME = 600000
 COOLDOWN_HOURS = 4
-VOL_MED_MULT = 0.10  # Tolérance volume vs médiane 30j (était 0.25)
+VOL_MED_MULT = 0.07 # Tolérance volume vs médiane 30j (était 0.25)
 VOL_CONFIRM_TF = "15m"
 VOL_CONFIRM_LOOKBACK = 12
 VOL_CONFIRM_MULT = 1.00
 ANTI_SPIKE_UP_STD = 0.8   # 0.8% mini (std)
 ANTI_SPIKE_UP_AGR = 1.6   # % max d'extension (stratégie agressive)
 # --- Anti-spike adaptatif (bonus) ---
-ANTI_SPIKE_ATR_MULT = 1.30   # autorise une extension ≈ 1.3 × ATR% (par rapport à l'open)
-ANTI_SPIKE_MAX_PCT  = 4.00   # plafond std relevé à 4%
+ANTI_SPIKE_ATR_MULT = 1.60   # autorise une extension ≈ 1.3 × ATR% (par rapport à l'open)
+ANTI_SPIKE_MAX_PCT = 5.00   # plafond std relevé à 4%
 # --- Trailing stop harmonisé (ATR TV) ---
 TRAIL_TIERS = [
     (2.0, 0.8),  # gain >= 2%  -> stop = P - 0.8 * ATR
@@ -1309,7 +1309,7 @@ async def process_symbol(symbol):
         supertrend_signal = supertrend_like_on_close(klines)
 
         # --- ADX (standard) assoupli ---
-        if adx_value < 10:
+        if adx_value < 8:
             log_refusal(symbol, "ADX 1h très faible", trigger=f"adx={adx_value:.1f}")
             return
         elif adx_value < 15:
@@ -1359,7 +1359,7 @@ async def process_symbol(symbol):
                 return
 
         # — Pré-filtre: prix trop loin de l’EMA25 (plus strict)
-        EMA25_PREFILTER_STD = 1.03   # +3%
+        EMA25_PREFILTER_STD = 1.05   # +5%
         if price > ema25 * EMA25_PREFILTER_STD:
             dist = (price / max(ema25, 1e-9) - 1) * 100
             log_refusal(
@@ -1389,8 +1389,8 @@ async def process_symbol(symbol):
         vol_ma12 = float(np.mean(vols15[-13:-1]))
         vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
 
-        if vol_ratio_15m < 0.85:
-            log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 0.85")
+        if vol_ratio_15m < 0.70:
+            log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 0.70")
             return
 
         # === Confluence & scoring (final) ===
@@ -1443,10 +1443,10 @@ async def process_symbol(symbol):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > niveau de retest OU > EMA25(1h) ±0.1%")
                 return
 
-            if price > ema25 * 1.03:  # +3.0% max
+            if price > ema25 * 1.05:  # +5.0% max
                 log_refusal(
                     symbol,
-                    f"Entrée limit BRK: prix {price:.4f} > EMA25*1.03 ({ema25*1.03:.4f})"
+                    f"Entrée limit BRK: prix {price:.4f} > EMA25*1.05 ({ema25*1.05:.4f})"
                 )
                 return
 
@@ -1484,10 +1484,10 @@ async def process_symbol(symbol):
                     log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (PB)")
                     return
 
-                if price > ema25 * 1.03:  # +1.0% max
+                if price > ema25 * 1.05:  
                     log_refusal(
                         symbol,
-                        f"Entrée limit PB: prix {price:.4f} > EMA25*1.01 ({ema25*1.03:.4f})"
+                        f"Entrée limit PB: prix {price:.4f} > EMA25*1.05 ({ema25*1.05:.4f})"
                     )
                     return
 
@@ -1836,7 +1836,7 @@ async def process_symbol(symbol):
 async def process_symbol_aggressive(symbol):
     try:
         # --- Paramètres VOLUME (aggressive) ---
-        MIN_VOLUME_LOCAL = 150_000          # fallback local si pas de médiane 30j
+        MIN_VOLUME_LOCAL = 80_000       # fallback local si pas de médiane 30j
         VOL_MED_MULT_AGR = 0.05             # 5% de la médiane 30j (au lieu de 10%)
         VOL_CONFIRM_MULT_AGR = 0.85         
         VOL_CONFIRM_LOOKBACK_AGR = 12       # 15m: MA12 (au lieu de 20)
@@ -2040,8 +2040,8 @@ async def process_symbol_aggressive(symbol):
         vol_ma12 = float(np.mean(vols15[-13:-1]))
         vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
 
-        if vol_ratio_15m < 0.85:
-            log_refusal(symbol, "Volume 15m insuffisant (aggressive)", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 0.85")
+        if vol_ratio_15m < 0.70:
+            log_refusal(symbol, "Volume 15m insuffisant (aggressive)", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 0.70")
             return
          
         # --- Filtre structure 15m (aggressive) ---
@@ -2088,8 +2088,8 @@ async def process_symbol_aggressive(symbol):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (aggressive)")
             return
 
-        if price > ema25 * 1.03:
-            log_refusal(symbol, f"Entrée limit aggressive: prix {price:.4f} > EMA25*1.03 ({ema25*1.03:.4f})")
+        if price > ema25 * 1.05:
+            log_refusal(symbol, f"Entrée limit aggressive: prix {price:.4f} > EMA25*1.05 ({ema25*1.05:.4f})")
             return
 
         # --- Circuit breaker JOUR (aggressive) ---
