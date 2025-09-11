@@ -2,6 +2,30 @@ import asyncio
 import requests
 import numpy as np
 from datetime import datetime, timezone, timedelta
+# === Date parser tolérant (UTC-aware) ===
+def _parse_dt_flex(s: str):
+    """
+    Accepte 'YYYY-MM-DD HH:MM' ou 'YYYY-MM-DD HH:MM:SS' (naïf -> UTC),
+    ou ISO8601 avec/ss timezone. Retourne un datetime aware UTC, sinon None.
+    """
+    if not s:
+        return None
+    s = s.strip()
+    fmt_try = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"]
+    for fmt in fmt_try:
+        try:
+            dt = datetime.strptime(s, fmt)
+            return dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
 from telegram import Bot
 import nest_asyncio
 import traceback
@@ -126,7 +150,7 @@ VOL_CONFIRM_TF = "15m"
 VOL_CONFIRM_LOOKBACK = 12
 VOL_CONFIRM_MULT = 1.00
 ANTI_SPIKE_UP_STD = 0.8   # 0.8% mini (std)
-ANTI_SPIKE_UP_AGR = 1.6   # % max d'extension (stratégie agressive)
+ANTI_SPIKE_UP_AGR = 2.4   # % max d'extension (stratégie agressive)
 # --- Anti-spike adaptatif (bonus) ---
 ANTI_SPIKE_ATR_MULT = 1.60   # autorise une extension ≈ 1.3 × ATR% (par rapport à l'open)
 ANTI_SPIKE_MAX_PCT = 5.00   # plafond std relevé à 4%
@@ -238,10 +262,6 @@ def save_trades():
 
 # === Cache par itération pour limiter les requêtes ===
 symbol_cache = {}    # {"BTCUSDT": {"1h": [...], "4h": [...]}, ...}
-
-# === Buffer pour HOLD (anti-flood) ===
-hold_buffer: dict[str, list[str]] = {}
-HOLD_FLUSH_INTERVAL = 180  # secondes (3 minutes)
 
 def _delete_trade(symbol):
     if symbol in trades:
@@ -419,11 +439,6 @@ async def tg_send(text: str, chat_id: int = CHAT_ID):
             await bot.send_message(chat_id=chat_id, text=safe_message(text))
 
         _tg_last_send_ts = time.monotonic()
-
-# --- Buffer HOLD (anti-flood) ---
-async def buffer_hold(symbol: str, msg: str):
-    """Stocke un message HOLD dans le buffer au lieu d'envoyer direct."""
-    hold_buffer.setdefault(symbol, []).append(msg)
 
 # --- Envoi de fichier Telegram (anti-flood + retry) ---
 async def tg_send_doc(path: str, caption: str = "", chat_id: int = CHAT_ID):
@@ -1057,6 +1072,21 @@ CSV_AUDIT_FIELDS = [
 # ====== CSV refus d'entrée (diagnostic) ======
 REFUSAL_LOG_FILE = "refusal_log.csv"
 REFUSAL_FIELDS = ["ts_utc", "symbol", "reason", "trigger", "cooldown_left_min"]
+
+# — Création des CSV au démarrage si absents —
+import os
+import csv
+
+def _ensure_csv(path: str, header: list[str]):
+    if not os.path.exists(path):
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+
+# crée/refait l'en-tête si les fichiers n'existent pas
+_ensure_csv(CSV_AUDIT_FILE, CSV_AUDIT_FIELDS)
+_ensure_csv(REFUSAL_LOG_FILE, REFUSAL_FIELDS)
+
 
 def log_refusal(symbol: str, reason: str, trigger: str = "", cooldown_left_min: int | None = None):
     """Append une ligne dans refusal_log.csv (diagnostic des refus).
