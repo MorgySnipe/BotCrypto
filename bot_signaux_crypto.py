@@ -2676,12 +2676,6 @@ async def main_loop():
     except Exception as e:
         print(f"❌ Erreur envoi démarrage: {e}")
 
-    # Lancement des tâches background (si tu gardes flush_hold_loop)
-    try:
-        asyncio.create_task(flush_hold_loop())
-    except NameError:
-        print("ℹ️ flush_hold_loop() non défini — skip")
-
     # Charger les trades sauvegardés
     trades.update(load_trades())
 
