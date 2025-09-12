@@ -169,6 +169,15 @@ ANTI_SPIKE_UP_AGR = 2.4   # % max d'extension (stratégie agressive)
 # --- Anti-spike adaptatif (bonus) ---
 ANTI_SPIKE_ATR_MULT = 1.60   # autorise une extension ≈ 1.3 × ATR% (par rapport à l'open)
 ANTI_SPIKE_MAX_PCT = 5.00   # plafond std relevé à 4%
+# ===== Learning phase (assouplissements) =====
+LEARNING_MODE = True
+
+ADX_MIN = 15                 # au lieu de 18/22
+RSI_MIN = 50                 # RSI >= 50 accepté
+RSI_MAX = 65                 # RSI <= 65 accepté
+VOL15M_MIN_RATIO = 0.80      # au lieu de 1.0 strict
+ANTI_SPIKE_OPEN_MAX = 0.035  # 3.5% max vs open (1h)
+
 # --- Trailing stop harmonisé (ATR TV) ---
 TRAIL_TIERS = [
     (2.0, 0.8),  # gain >= 2%  -> stop = P - 0.8 * ATR
@@ -207,15 +216,21 @@ DAILY_MAX_LOSS   = -0.03   # -3% cumulé sur la journée (UTC)
 
 def allowed_trade_slots(strategy: str | None = None) -> int:
     """
-    MAX_TRADES dynamique par stratégie (si 'strategy' fourni), sinon global.
-    min(7, 1 + nb_trades_avec_score_>=8)
+    Nombre de positions autorisées en parallèle.
+    - base = 3 (au lieu de 1)
+    - +1 slot pour chaque trade "confiant" (confidence >= 8), max 7.
+    - si `strategy` est fourni, on ne compte que cette stratégie.
     """
+    base = 3
     try:
-        iterable = (t for t in trades.values() if (strategy is None or t.get("strategy") == strategy))
-        high = sum(1 for t in iterable if float(t.get("confidence", 0)) >= 8)
+        high = sum(
+            1 for t in trades.values()
+            if (strategy is None or t.get("strategy") == strategy)
+            and float(t.get("confidence", 0)) >= 8
+        )
     except Exception:
         high = 0
-    return min(7, 1 + high)
+    return min(7, base + high)
 
 def daily_pnl_pct_utc() -> float:
     """
@@ -1334,11 +1349,19 @@ async def process_symbol(symbol):
         if closes_4h[-1] < ema200_4h: indicators_soft_penalty += 1
 
         if is_market_range(closes_4h):
-            await tg_send(f"⚠️ Marché en range sur {symbol} → Trade bloqué")
-            return
+            await tg_send(f"⚠️ Marché en range sur {symbol} → pénalité appliquée")
+            indicators_soft_penalty += 1   # au lieu de return
+
+        # Supertrend 1h non haussier (avant: return)
+        if not st_up_1h:
+            await tg_send(f"⚠️ Supertrend 1h non haussier → pénalité appliquée")
+            indicators_soft_penalty += 1   # pénalité au lieu de return
+
         if detect_rsi_divergence(closes, rsi_series):
-            log_refusal(symbol, "RSI divergence", trigger=f"price↑ & RSI↓ ({closes[-2]:.4f}->{closes[-1]:.4f} ; rsi {rsi_series[-2]:.1f}->{rsi_series[-1]:.1f})")
-            return
+            log_refusal(symbol, "RSI divergence (soft)", trigger=f"price↑ & RSI↓ ({closes[-2]:.4f}->{closes[-1]:.4f} ; rsi {rsi_series[-2]:.1f}->{rsi_series[-1]:.1f})")
+            reasons += ["⚠️ RSI divergence détectée (soft)"]
+            # pas de return -> on continue
+
 
         volatility = get_volatility(atr, price)
         if volatility < 0.003:
@@ -1348,11 +1371,11 @@ async def process_symbol(symbol):
         supertrend_signal = supertrend_like_on_close(klines)
 
         # --- ADX (standard) assoupli ---
-        if adx_value < 8:
-            log_refusal(symbol, "ADX 1h très faible", trigger=f"adx={adx_value:.1f}")
-            return
-        elif adx_value < 15:
-            indicators_soft_penalty += 1
+        if adx_value < (ADX_MIN if LEARNING_MODE else 18):
+            log_refusal(symbol, f"ADX trop faible (soft): {adx_value:.1f}")
+            reasons += [f"⚠️ ADX {adx_value:.1f} (soft)"]
+            # pas de return -> on continue
+
 
         # Supertrend reste obligatoire
         if not supertrend_signal:
@@ -1428,9 +1451,10 @@ async def process_symbol(symbol):
         vol_ma12 = float(np.mean(vols15[-13:-1]))
         vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
 
-        if vol_ratio_15m < 0.55:
-            log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 0.55")
-            return
+        if vol_ratio_15m < VOL15M_MIN_RATIO:
+            log_refusal(symbol, f"Vol 15m faible (soft): {vol_ratio_15m:.2f}")
+            reasons += [f"⚠️ Vol15m {vol_ratio_15m:.2f} (soft)"]
+            # pas de return -> on continue
 
         # === Confluence & scoring (final) ===
         volume_ok   = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
@@ -1482,14 +1506,11 @@ async def process_symbol(symbol):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > niveau de retest OU > EMA25(1h) ±0.1%")
                 return
 
-            if price > ema25 * 1.05:  # +5.0% max
-                log_refusal(
-                    symbol,
-                    f"Entrée limit BRK: prix {price:.4f} > EMA25*1.05 ({ema25*1.05:.4f})"
-                )
-                return
-
-                
+            if price > ema25 * 1.05:
+                log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
+                reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
+                # pas de return -> on continue
+            
             if tendance_soft_notes:
                 reasons += [f"Avertissements tendance: {', '.join(tendance_soft_notes)}"]
 
@@ -1515,21 +1536,20 @@ async def process_symbol(symbol):
 
                 # --- Anti-chasse & confirmation 15m ---
                 if is_wick_hunt_1h(klines[-1]):
-                    log_refusal(symbol, "Anti-chasse: mèche haute dominante sur la bougie 1h d'entrée (PB)")
-                    return
+                    log_refusal(symbol, "Anti-chasse mèche 1h dominante (soft)")
+                    reasons += ["⚠️ Mèche 1h dominante (soft)"]
+                    # pas de return -> on continue
+
 
                 # pour PB: on exige close 15m > EMA25(1h) ±0.1%
                 if not confirm_15m_after_signal(k15, breakout_level=None, ema25_1h=ema25, tol=0.001):
                     log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (PB)")
                     return
 
-                if price > ema25 * 1.05:  
-                    log_refusal(
-                        symbol,
-                        f"Entrée limit PB: prix {price:.4f} > EMA25*1.05 ({ema25*1.05:.4f})"
-                    )
-                    return
-
+                if price > ema25 * 1.05:
+                    log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
+                    reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
+                    # pas de return -> on continue
 
                 buy = True
                 label = "✅ Pullback EMA25 propre + Confluence"
@@ -2079,9 +2099,11 @@ async def process_symbol_aggressive(symbol):
         vol_ma12 = float(np.mean(vols15[-13:-1]))
         vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
 
-        if vol_ratio_15m < 0.55:
-            log_refusal(symbol, "Volume 15m insuffisant (aggressive)", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 0.55")
-            return
+        if vol_ratio_15m < VOL15M_MIN_RATIO:
+            log_refusal(symbol, f"Vol 15m faible (soft): {vol_ratio_15m:.2f}")
+            reasons += [f"⚠️ Vol15m {vol_ratio_15m:.2f} (soft)"]
+            # pas de return -> on continue
+
       
         # --- Filtre structure 15m (aggressive) ---
         if near_level:
@@ -2116,8 +2138,10 @@ async def process_symbol_aggressive(symbol):
 
         # Anti-chasse (wick 1h) + confirmation 15m + entrée limit
         if is_wick_hunt_1h(klines[-1]):
-            log_refusal(symbol, "Anti-chasse: mèche haute dominante sur la bougie 1h d'entrée (aggressive)")
-            return
+            log_refusal(symbol, "Anti-chasse mèche 1h dominante (soft)")
+            reasons += ["⚠️ Mèche 1h dominante (soft)"]
+            # pas de return -> on continue
+
 
         br_level_for_check = last10_high if near_level else None
         if not confirm_15m_after_signal(k15, breakout_level=br_level_for_check, ema25_1h=ema25, tol=0.001):
@@ -2128,8 +2152,10 @@ async def process_symbol_aggressive(symbol):
             return
 
         if price > ema25 * 1.05:
-            log_refusal(symbol, f"Entrée limit aggressive: prix {price:.4f} > EMA25*1.05 ({ema25*1.05:.4f})")
-            return
+            log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
+            reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
+            # pas de return -> on continue
+
 
         # --- Circuit breaker JOUR (aggressive) ---
         pnl_today = daily_pnl_pct_utc()
