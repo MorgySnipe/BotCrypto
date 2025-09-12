@@ -145,7 +145,7 @@ SLEEP_SECONDS = 300
 MAX_TRADES = 7
 MIN_VOLUME = 600000
 COOLDOWN_HOURS = 4
-VOL_MED_MULT = 0.07 # Tolérance volume vs médiane 30j (était 0.25)
+VOL_MED_MULT = 0.05 # Tolérance volume vs médiane 30j (était 0.25)
 VOL_CONFIRM_TF = "15m"
 VOL_CONFIRM_LOOKBACK = 12
 VOL_CONFIRM_MULT = 1.00
@@ -1419,8 +1419,8 @@ async def process_symbol(symbol):
         vol_ma12 = float(np.mean(vols15[-13:-1]))
         vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
 
-        if vol_ratio_15m < 0.70:
-            log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 0.70")
+        if vol_ratio_15m < 0.55:
+            log_refusal(symbol, "Volume 15m insuffisant", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 0.55")
             return
 
         # === Confluence & scoring (final) ===
@@ -1866,7 +1866,7 @@ async def process_symbol(symbol):
 async def process_symbol_aggressive(symbol):
     try:
         # --- Paramètres VOLUME (aggressive) ---
-        MIN_VOLUME_LOCAL = 80_000       # fallback local si pas de médiane 30j
+        MIN_VOLUME_LOCAL = 50_000       # fallback local si pas de médiane 30j
         VOL_MED_MULT_AGR = 0.05             # 5% de la médiane 30j (au lieu de 10%)
         VOL_CONFIRM_MULT_AGR = 0.85         
         VOL_CONFIRM_LOOKBACK_AGR = 12       # 15m: MA12 (au lieu de 20)
@@ -2070,10 +2070,10 @@ async def process_symbol_aggressive(symbol):
         vol_ma12 = float(np.mean(vols15[-13:-1]))
         vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
 
-        if vol_ratio_15m < 0.70:
-            log_refusal(symbol, "Volume 15m insuffisant (aggressive)", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 0.70")
+        if vol_ratio_15m < 0.55:
+            log_refusal(symbol, "Volume 15m insuffisant (aggressive)", trigger=f"vol15_ratio={vol_ratio_15m:.2f} < 0.55")
             return
-         
+      
         # --- Filtre structure 15m (aggressive) ---
         if near_level:
             ok15, det15 = check_15m_filter(k15, breakout_level=last10_high)
