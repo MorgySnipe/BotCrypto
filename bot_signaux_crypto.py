@@ -441,6 +441,18 @@ async def buffer_hold(symbol: str, text: str):
     # on stocke le message (tronqué proprement)
     hold_buffer.setdefault(symbol, []).append(safe_message(text))
 
+def safe_message(text) -> str:
+    """
+    Raccourcit proprement les messages trop longs pour Telegram.
+    Telegram limite ≈ 4096 caractères pour le champ 'text'.
+    """
+    try:
+        s = str(text)
+    except Exception:
+        s = repr(text)
+    return s if len(s) < 4000 else s[:3900] + "\n... (tronqué)"
+
+
 async def tg_send(text: str, chat_id: int = CHAT_ID):
     """Envoi Telegram simple et bourrin (5 tentatives)."""
     text = safe_message(text)
