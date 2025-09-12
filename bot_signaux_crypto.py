@@ -511,7 +511,6 @@ async def tg_send(text: str, chat_id: int = CHAT_ID):
                 _tg_snooze_until = time.monotonic() + 60.0
                 return
 
-
 # --- Envoi de fichier Telegram (anti-flood + retry) ---
 async def tg_send_doc(path: str, caption: str = "", chat_id: int = CHAT_ID):
     """Envoi de document robuste (ne plante jamais la boucle)."""
