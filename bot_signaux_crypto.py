@@ -40,6 +40,16 @@ from telegram.error import RetryAfter, TimedOut, NetworkError
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from dotenv import load_dotenv
+import os
+
+# Charger les variables depuis .env
+load_dotenv()
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = int(os.getenv("CHAT_ID", "0"))
+DATA_DIR = os.getenv("DATA_DIR", "./data")
+
 nest_asyncio.apply()
 
 # [#http-session]
@@ -130,8 +140,6 @@ async def get_klines_async(symbol, interval='1h', limit=100):
     ) or []
 
 
-TELEGRAM_TOKEN = '7831038886:AAE1kESVsdtZyJ3AtZXIUy-rMTSlDBGlkac'
-CHAT_ID = 969925512
 SYMBOLS = [
     'BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT',
     'ADAUSDT','DOGEUSDT','AVAXUSDT','MATICUSDT','DOTUSDT',
