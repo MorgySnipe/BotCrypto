@@ -454,6 +454,14 @@ async def buffer_hold(symbol: str, text: str):
 _tg_lock = asyncio.Lock()
 _tg_last_send_ts = 0.0
 _tg_snooze_until = 0.0  # horloge monotonic : on coupe les tentatives pendant un moment après gros échec
+# === Anti-flood Telegram (1 msg/s + RetryAfter/Timeout) ===
+_tg_lock = asyncio.Lock()
+_tg_last_send_ts = 0.0  # horloge monotonic, ~1 msg/s par chat
+_tg_last_text = ""
+_tg_last_text_ts = 0.0
+
+# Flag pour éviter les doublons de message "Bot démarré"
+START_MSG_SENT = False
 
 async def tg_send(text: str, chat_id: int = CHAT_ID):
     """Envoi Telegram robuste: rate-limit, retries, snooze après échec; ne plante jamais."""
@@ -461,6 +469,10 @@ async def tg_send(text: str, chat_id: int = CHAT_ID):
     global _tg_last_send_ts, _tg_snooze_until
 
     now_mono = time.monotonic()
+    # anti-doublon : si même texte envoyé il y a < 120s, on skip
+    if text == _tg_last_text and (now_mono - _tg_last_text_ts) < 120:
+        return
+
     # si on a eu une panne récemment, on attend le "snooze"
     if now_mono < _tg_snooze_until:
         # on ignore proprement l'envoi (ou tu peux logguer en debug)
@@ -480,6 +492,9 @@ async def tg_send(text: str, chat_id: int = CHAT_ID):
                 try:
                     await bot.send_message(chat_id=chat_id, text=safe_message(text))
                     _tg_last_send_ts = time.monotonic()
+                    _tg_last_text = text
+                    _tg_last_text_ts = time.monotonic()
+
                     return
                 except RetryAfter as e:
                     await asyncio.sleep(e.retry_after + 1)
@@ -520,6 +535,8 @@ async def tg_send_doc(path: str, caption: str = "", chat_id: int = CHAT_ID):
                     with open(path, "rb") as f:
                         await bot.send_document(chat_id=chat_id, document=f, caption=safe_message(caption)[:1024])
                     _tg_last_send_ts = time.monotonic()
+                    _tg_last_text = text
+                    _tg_last_text_ts = time.monotonic()
                     return
                 except RetryAfter as e:
                     await asyncio.sleep(e.retry_after + 1)
@@ -2700,7 +2717,11 @@ async def flush_hold_loop():
                 hold_buffer[sym] = []
 
 async def main_loop():
-    await tg_send(f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+    global START_MSG_SENT
+    if not START_MSG_SENT:
+        START_MSG_SENT = True
+        await tg_send(f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+
     asyncio.create_task(flush_hold_loop())
     global trades
     trades.update(load_trades())
