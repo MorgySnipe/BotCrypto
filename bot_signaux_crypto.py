@@ -437,137 +437,35 @@ def is_hourly_volume_anomalously_low(k1h, factor=0.5, min_lookback=50):
     return bool(too_low), last_vol, ref, lookback
 
 # ====== /HELPERS ======
-
-def safe_message(text):
-    return text if len(text) < 4000 else text[:3900] + "\n... (tronqué)"
-
-# --- Anti-flood Telegram (1 msg/s + RetryAfter/Timeout) ---
-_tg_lock = asyncio.Lock()
-_tg_snooze_until = 0.0  # horloge monotonic : on coupe les tentatives pendant un moment après gros échec
-_tg_last_send_ts = 0.0  # horloge monotonic, ~1 msg/s par chat
-_tg_last_text = ""
-_tg_last_text_ts = 0.0
-
-# Flag pour éviter les doublons de message "Bot démarré"
-START_MSG_SENT = False
-
-# === Batch HOLD (regroupe les messages d'état) ===
-HOLD_FLUSH_INTERVAL = 180  # toutes les 3 min
-hold_buffer: dict[str, list[str]] = {}
-
 async def buffer_hold(symbol: str, text: str):
     # on stocke le message (tronqué proprement)
     hold_buffer.setdefault(symbol, []).append(safe_message(text))
 
-DEBUG_TG = True
-
-async def tg_send(text: str, chat_id: int = CHAT_ID) -> bool:
-    """Envoi Telegram avec anti-flood/anti-doublon + retries. Retourne True si envoyé."""
-    global _tg_last_send_ts, _tg_last_text, _tg_last_text_ts, _tg_snooze_until
-
+async def tg_send(text: str, chat_id: int = CHAT_ID):
+    """Envoi Telegram simple et bourrin (5 tentatives)."""
     text = safe_message(text)
-    now_mono = time.monotonic()
-
-    # 0) si on sort d'une série d'échecs, on “snooze”
-    if now_mono < _tg_snooze_until:
-        if DEBUG_TG: print(f"[tg_send] snooze actif {(_tg_snooze_until-now_mono):.1f}s → skip")
-        return False
-
-    async with _tg_lock:
-        # 1) anti-doublon basique (évite spam du même texte <120s)
-        if _tg_last_text == text and (now_mono - _tg_last_text_ts) < 120:
-            if DEBUG_TG: print("[tg_send] doublon détecté <120s → skip")
-            return False
-
-        # 2) respecter ~1 msg / seconde
-        wait = max(0.0, 1.05 - (now_mono - _tg_last_send_ts))
-        if wait > 0:
-            await asyncio.sleep(wait)
-
+    for attempt in range(5):
         try:
             await bot.send_message(chat_id=chat_id, text=text)
-            _tg_last_send_ts = time.monotonic()
-            _tg_last_text = text
-            _tg_last_text_ts = _tg_last_send_ts
-            _tg_snooze_until = 0.0
-            if DEBUG_TG: print("[tg_send] ✅ envoyé (try#1)")
             return True
-
-        except RetryAfter as e:
-            # Telegram nous dit d'attendre
-            delay = float(getattr(e, "retry_after", 1)) + 1.0
-            if DEBUG_TG: print(f"[tg_send] RetryAfter {delay:.1f}s")
-            await asyncio.sleep(delay)
-            try:
-                await bot.send_message(chat_id=chat_id, text=text)
-                _tg_last_send_ts = time.monotonic()
-                _tg_last_text = text
-                _tg_last_text_ts = _tg_last_send_ts
-                _tg_snooze_until = 0.0
-                if DEBUG_TG: print("[tg_send] ✅ envoyé (retry)")
-                return True
-            except Exception as e2:
-                if DEBUG_TG: print(f"[tg_send] ❌ retry fail: {e2}")
-                _tg_snooze_until = time.monotonic() + 60.0
-                return False
-
-        except (TimedOut, NetworkError) as e:
-            if DEBUG_TG: print(f"[tg_send] {type(e).__name__} → petite pause")
-            await asyncio.sleep(2.0)
-            try:
-                await bot.send_message(chat_id=chat_id, text=text)
-                _tg_last_send_ts = time.monotonic()
-                _tg_last_text = text
-                _tg_last_text_ts = _tg_last_send_ts
-                _tg_snooze_until = 0.0
-                if DEBUG_TG: print("[tg_send] ✅ envoyé (retry after timeout)")
-                return True
-            except Exception as e2:
-                if DEBUG_TG: print(f"[tg_send] ❌ gros échec: {e2} → snooze 60s")
-                _tg_snooze_until = time.monotonic() + 60.0
-                return False
-
         except Exception as e:
-            if DEBUG_TG: print(f"[tg_send] ❌ unexpected: {e}")
-            return False
+            print(f"[tg_send] tentative {attempt+1}/5 échouée: {e}")
+            await asyncio.sleep(1 + attempt)  # backoff: 1s,2s,3s...
+    print("[tg_send] échec après 5 tentatives")
+    return False
 
 
-# --- Envoi de fichier Telegram (anti-flood + retry) ---
 async def tg_send_doc(path: str, caption: str = "", chat_id: int = CHAT_ID):
-    """Envoi de document robuste (ne plante jamais la boucle)."""
-    import os, asyncio
-    global _tg_last_send_ts
-
+    """Envoi simple de fichier Telegram (sans anti-flood)."""
     try:
         if not os.path.exists(path) or os.path.getsize(path) == 0:
             await tg_send(f"ℹ️ Fichier introuvable ou vide: {path}")
             return
-
-        async with _tg_lock:
-            now = time.monotonic()
-            wait = max(0.0, 1.05 - (now - _tg_last_send_ts))
-            if wait > 0:
-                await asyncio.sleep(wait)
-
-            for attempt in range(3):
-                try:
-                    with open(path, "rb") as f:
-                        await bot.send_document(chat_id=chat_id, document=f, caption=safe_message(caption)[:1024])
-                    _tg_last_send_ts = time.monotonic()
-                    _tg_last_text = caption
-                    _tg_last_text_ts = time.monotonic()
-                    return
-                except RetryAfter as e:
-                    await asyncio.sleep(e.retry_after + 1)
-                except (TimedOut, NetworkError, asyncio.TimeoutError):
-                    await asyncio.sleep(2 + attempt)
-                except Exception as e:
-                    print(f"tg_send_doc unexpected error: {e}")
-                    return
-
-            print("tg_send_doc: all retries failed (TimedOut/NetworkError)")
+        with open(path, "rb") as f:
+            await bot.send_document(chat_id=chat_id, document=f, caption=safe_message(caption)[:1024])
     except Exception as e:
-        print(f"tg_send_doc wrapper error: {e}")
+        print(f"❌ tg_send_doc error: {e}")
+
 
 async def ensure_tg_ready(max_wait_s: int = 120) -> bool:
     """
@@ -2753,85 +2651,30 @@ async def send_daily_summary():
     except Exception as e:
         await tg_send(f"⚠️ Échec d’envoi de trade_audit.csv : {e}")
 
-async def flush_hold_loop():
-    """Vide périodiquement le buffer HOLD et envoie les messages groupés."""
-    while True:
-        await asyncio.sleep(HOLD_FLUSH_INTERVAL)
-        for sym, msgs in list(hold_buffer.items()):
-            if msgs:
-                batched = "\n".join(msgs)
-                await tg_send(f"[HOLD batch {sym}]\n{batched}")
-                hold_buffer[sym] = []
-
-async def send_startup_messages():
-    """Warm-up Telegram + ping direct, puis message officiel via tg_send avec backoff."""
-    # petit warm-up
-    await asyncio.sleep(0.5)
-
-    # 0) Vérifie le token / réchauffe la connexion
-    try:
-        me = await bot.get_me()
-        print(f"✅ get_me OK: @{getattr(me, 'username', 'unknown')}")
-    except Exception as e:
-        print(f"❌ get_me a échoué: {e}")
-
-    # 1) Ping direct (hors anti-flood) pour lever tout doute
-    try:
-        await bot.send_message(chat_id=CHAT_ID, text=f"🧪 Ping {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
-        print("✅ Ping direct envoyé")
-    except Exception as e:
-        print(f"❌ Ping direct échoué: {e}")
-
-    # 2) Message officiel avec 3 tentatives espacées si nécessaire
-    msg = f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
-    for i in range(3):
-        try:
-            await tg_send(msg)
-            print("✅ Message de démarrage envoyé")
-            return
-        except Exception as e:
-            print(f"❌ Envoi démarrage tentative {i+1}/3: {e}")
-        await asyncio.sleep(3.0 + i * 2.0)
-
-    print("⚠️ Message de démarrage non confirmé après 3 tentatives")
-
 async def main_loop():
-    global START_MSG_SENT, trades   # ✅ on déclare ici les globaux utilisés
+    await asyncio.sleep(0.5)  # petit warm-up
 
-    # (1) Petit warm-up réseau
-    await asyncio.sleep(0.5)
+    # Message de démarrage direct (pas de doublon, pas de retry)
+    try:
+        await bot.send_message(
+            chat_id=CHAT_ID,
+            text=f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
+        )
+        print("✅ Message de démarrage envoyé")
+    except Exception as e:
+        print(f"❌ Erreur envoi démarrage: {e}")
 
-    # (2) Amorçage/validation du canal Telegram (réessaie quelques fois)
-    await ensure_tg_ready(max_wait_s=120)
-
-    # (3) Message de démarrage – protégé contre les doublons
-    if not START_MSG_SENT:
-        START_MSG_SENT = True
-        try:
-            await tg_send(f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
-            print("✅ Message de démarrage demandé")
-        except Exception as e:
-            # fallback direct si tg_send lève
-            try:
-                await bot.send_message(
-                    chat_id=CHAT_ID,
-                    text=f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
-                )
-                print("✅ Message de démarrage (fallback direct)")
-            except Exception as e2:
-                print(f"⚠️ Impossible d'envoyer le message de démarrage: {e2}")
-
-    # (4) Démarrage des tâches “background”
-    asyncio.create_task(flush_hold_loop())
-
-    # (5) Charge l’état persistant
-    trades.update(load_trades())
-
-    # lance le flush des HOLD si ta fonction existe
+    # Lancement des tâches background
     try:
         asyncio.create_task(flush_hold_loop())
     except NameError:
         print("ℹ️ flush_hold_loop() non défini — skip")
+
+    # Charger les trades sauvegardés
+    global trades
+    trades.update(load_trades())
+
+    # … puis tu continues ton code comme avant (boucle while True etc.)
 
     # charge l'état persistant
     global trades
