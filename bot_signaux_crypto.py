@@ -255,7 +255,12 @@ def daily_pnl_pct_utc() -> float:
                 pass
     return total
 
-bot = Bot(token=TELEGRAM_TOKEN)
+from telegram.request import HTTPXRequest
+
+# timeouts plus larges pour éviter les faux "TimedOut"
+_tg_request = HTTPXRequest(connect_timeout=10, read_timeout=30, pool_timeout=10)
+bot = Bot(token=TELEGRAM_TOKEN, request=_tg_request)
+
 trades = {}
 history = []
 market_cache = {}
@@ -445,40 +450,51 @@ async def buffer_hold(symbol: str, text: str):
     # on stocke le message (tronqué proprement)
     hold_buffer.setdefault(symbol, []).append(safe_message(text))
 
+# --- Anti-flood Telegram (1 msg/s + RetryAfter/Timeout) ---
+_tg_lock = asyncio.Lock()
+_tg_last_send_ts = 0.0
+_tg_snooze_until = 0.0  # horloge monotonic : on coupe les tentatives pendant un moment après gros échec
+
 async def tg_send(text: str, chat_id: int = CHAT_ID):
-    """Envoi Telegram robuste: rate-limit, retries, et jamais de crash."""
-    import asyncio
-    global _tg_last_send_ts
+    """Envoi Telegram robuste: rate-limit, retries, snooze après échec; ne plante jamais."""
+    import asyncio, time
+    global _tg_last_send_ts, _tg_snooze_until
+
+    now_mono = time.monotonic()
+    # si on a eu une panne récemment, on attend le "snooze"
+    if now_mono < _tg_snooze_until:
+        # on ignore proprement l'envoi (ou tu peux logguer en debug)
+        return
 
     try:
         async with _tg_lock:
             # 1) respecter ~1 msg / seconde
-            now = time.monotonic()
-            wait = max(0.0, 1.05 - (now - _tg_last_send_ts))
+            now_mono = time.monotonic()
+            wait = max(0.0, 1.05 - (now_mono - _tg_last_send_ts))
             if wait > 0:
                 await asyncio.sleep(wait)
 
-            # 2) jusqu’à 3 tentatives
-            for attempt in range(3):
+            # 2) tentatives avec backoff plus long
+            backoffs = [2, 4, 8, 16, 32, 60]  # ~2min max
+            for i, delay in enumerate(backoffs):
                 try:
                     await bot.send_message(chat_id=chat_id, text=safe_message(text))
                     _tg_last_send_ts = time.monotonic()
                     return
                 except RetryAfter as e:
-                    # Télégram demande d’attendre
                     await asyncio.sleep(e.retry_after + 1)
                 except (TimedOut, NetworkError, asyncio.TimeoutError):
-                    # petit backoff progressif puis on retente
-                    await asyncio.sleep(2 + attempt)
+                    if i < len(backoffs) - 1:
+                        await asyncio.sleep(delay)
+                    else:
+                        # trop d’échecs → on active un “snooze” de 5 minutes
+                        _tg_snooze_until = time.monotonic() + 300
+                        print("tg_send: all retries failed (TimedOut/NetworkError) — snooze 5 min")
+                        return
                 except Exception as e:
-                    # on log en console et on abandonne proprement
                     print(f"tg_send unexpected error: {e}")
                     return
-
-            # si on a épuisé les tentatives: on log mais on ne plante pas
-            print("tg_send: all retries failed (TimedOut/NetworkError)")
     except Exception as e:
-        # ce catch global empêche tout crash de la boucle
         print(f"tg_send wrapper error: {e}")
 
 
