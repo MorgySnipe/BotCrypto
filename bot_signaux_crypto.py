@@ -1333,6 +1333,10 @@ async def process_symbol(symbol):
         if not is_market_bullish():
             log_refusal(symbol, "Marché global baissier (BTC/ETH pas en uptrend)")
             return
+
+        supertrend_signal = supertrend_like_on_close(klines)
+        indicators_soft_penalty = 0
+        reasons = []
         # Filtres de tendance avec log    
         # --- Tendance en 'soft' (on n'interdit plus)
         tendance_soft_notes = []
@@ -1344,7 +1348,6 @@ async def process_symbol(symbol):
             tendance_soft_notes.append("Close4h < EMA50(4h)")
 
         # pénalité de score (au lieu d'un refus dur)
-        indicators_soft_penalty = 0
         if price < ema200:          indicators_soft_penalty += 1
         if closes_4h[-1] < ema50_4h: indicators_soft_penalty += 1
         if closes_4h[-1] < ema200_4h: indicators_soft_penalty += 1
