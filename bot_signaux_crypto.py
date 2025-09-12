@@ -456,6 +456,8 @@ async def buffer_hold(symbol: str, text: str):
     # on stocke le message (tronqué proprement)
     hold_buffer.setdefault(symbol, []).append(safe_message(text))
 
+DEBUG_TG = True 
+
 async def tg_send(text: str, chat_id: int = CHAT_ID):
     """Envoi Telegram avec anti-flood, anti-doublon, et gestion RetryAfter/Timeout."""
     global _tg_last_send_ts, _tg_last_text, _tg_last_text_ts, _tg_snooze_until
