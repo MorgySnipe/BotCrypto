@@ -1352,10 +1352,10 @@ async def process_symbol(symbol):
             await tg_send(f"⚠️ Marché en range sur {symbol} → pénalité appliquée")
             indicators_soft_penalty += 1   # au lieu de return
 
-        # Supertrend 1h non haussier (avant: return)
-        if not st_up_1h:
-            await tg_send(f"⚠️ Supertrend 1h non haussier → pénalité appliquée")
-            indicators_soft_penalty += 1   # pénalité au lieu de return
+        # Supertrend 1h non haussier (pénalité)
+        if not supertrend_signal:
+            await tg_send("⚠️ Supertrend 1h non haussier → pénalité appliquée")
+            indicators_soft_penalty += 1
 
         if detect_rsi_divergence(closes, rsi_series):
             log_refusal(symbol, "RSI divergence (soft)", trigger=f"price↑ & RSI↓ ({closes[-2]:.4f}->{closes[-1]:.4f} ; rsi {rsi_series[-2]:.1f}->{rsi_series[-1]:.1f})")
