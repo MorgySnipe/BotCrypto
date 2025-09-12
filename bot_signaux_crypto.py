@@ -456,10 +456,10 @@ async def buffer_hold(symbol: str, text: str):
     # on stocke le message (tronqué proprement)
     hold_buffer.setdefault(symbol, []).append(safe_message(text))
 
-DEBUG_TG = True  # tu l’avais mis, on l’utilise vraiment ici
+DEBUG_TG = True
 
-async def tg_send(text: str, chat_id: int = CHAT_ID):
-    """Envoi Telegram avec anti-flood, anti-doublon, gestion RetryAfter/Timeout + logs visibles."""
+async def tg_send(text: str, chat_id: int = CHAT_ID) -> bool:
+    """Envoi Telegram avec anti-flood/anti-doublon + retries. Retourne True si envoyé."""
     global _tg_last_send_ts, _tg_last_text, _tg_last_text_ts, _tg_snooze_until
 
     text = safe_message(text)
@@ -467,53 +467,49 @@ async def tg_send(text: str, chat_id: int = CHAT_ID):
 
     # 0) si on sort d'une série d'échecs, on “snooze”
     if now_mono < _tg_snooze_until:
-        if DEBUG_TG:
-            print(f"[tg_send] snooze actif encore {(_tg_snooze_until - now_mono):.1f}s → skip '{text[:40]}...'")
-        return
+        if DEBUG_TG: print(f"[tg_send] snooze actif {(_tg_snooze_until-now_mono):.1f}s → skip")
+        return False
 
     async with _tg_lock:
-        # 1) anti-doublon basique (évite spam "Bot démarré")
+        # 1) anti-doublon basique (évite spam du même texte <120s)
         if _tg_last_text == text and (now_mono - _tg_last_text_ts) < 120:
-            if DEBUG_TG:
-                print("[tg_send] doublon <120s → skip")
-            return
+            if DEBUG_TG: print("[tg_send] doublon détecté <120s → skip")
+            return False
 
         # 2) respecter ~1 msg / seconde
         wait = max(0.0, 1.05 - (now_mono - _tg_last_send_ts))
         if wait > 0:
-            if DEBUG_TG:
-                print(f"[tg_send] rate-limit: sleep {wait:.2f}s")
             await asyncio.sleep(wait)
 
         try:
-            if DEBUG_TG:
-                print("[tg_send] envoi direct…")
             await bot.send_message(chat_id=chat_id, text=text)
             _tg_last_send_ts = time.monotonic()
             _tg_last_text = text
             _tg_last_text_ts = _tg_last_send_ts
             _tg_snooze_until = 0.0
-            if DEBUG_TG:
-                print("[tg_send] ✅ envoyé")
-            return
+            if DEBUG_TG: print("[tg_send] ✅ envoyé (try#1)")
+            return True
 
         except RetryAfter as e:
-            ra = float(getattr(e, "retry_after", 1))
-            if DEBUG_TG:
-                print(f"[tg_send] RetryAfter {ra:.1f}s")
-            await asyncio.sleep(ra + 1.0)
-            await bot.send_message(chat_id=chat_id, text=text)
-            _tg_last_send_ts = time.monotonic()
-            _tg_last_text = text
-            _tg_last_text_ts = _tg_last_send_ts
-            _tg_snooze_until = 0.0
-            if DEBUG_TG:
-                print("[tg_send] ✅ envoyé après RetryAfter")
-            return
+            # Telegram nous dit d'attendre
+            delay = float(getattr(e, "retry_after", 1)) + 1.0
+            if DEBUG_TG: print(f"[tg_send] RetryAfter {delay:.1f}s")
+            await asyncio.sleep(delay)
+            try:
+                await bot.send_message(chat_id=chat_id, text=text)
+                _tg_last_send_ts = time.monotonic()
+                _tg_last_text = text
+                _tg_last_text_ts = _tg_last_send_ts
+                _tg_snooze_until = 0.0
+                if DEBUG_TG: print("[tg_send] ✅ envoyé (retry)")
+                return True
+            except Exception as e2:
+                if DEBUG_TG: print(f"[tg_send] ❌ retry fail: {e2}")
+                _tg_snooze_until = time.monotonic() + 60.0
+                return False
 
         except (TimedOut, NetworkError) as e:
-            if DEBUG_TG:
-                print(f"[tg_send] 1er TimedOut/NetworkError: {e} → retry court")
+            if DEBUG_TG: print(f"[tg_send] {type(e).__name__} → petite pause")
             await asyncio.sleep(2.0)
             try:
                 await bot.send_message(chat_id=chat_id, text=text)
@@ -521,20 +517,17 @@ async def tg_send(text: str, chat_id: int = CHAT_ID):
                 _tg_last_text = text
                 _tg_last_text_ts = _tg_last_send_ts
                 _tg_snooze_until = 0.0
-                if DEBUG_TG:
-                    print("[tg_send] ✅ envoyé après petit retry")
-                return
+                if DEBUG_TG: print("[tg_send] ✅ envoyé (retry after timeout)")
+                return True
             except Exception as e2:
+                if DEBUG_TG: print(f"[tg_send] ❌ gros échec: {e2} → snooze 60s")
                 _tg_snooze_until = time.monotonic() + 60.0
-                if DEBUG_TG:
-                    print(f"[tg_send] ❌ échec après retry: snooze 60s ({e2})")
-                return
+                return False
 
         except Exception as e:
-            # logge l’exception (ne pas faire return silencieux)
-            print(f"[tg_send] ❌ exception inattendue: {e}")
-            _tg_snooze_until = time.monotonic() + 15.0
-            return
+            if DEBUG_TG: print(f"[tg_send] ❌ unexpected: {e}")
+            return False
+
 
 # --- Envoi de fichier Telegram (anti-flood + retry) ---
 async def tg_send_doc(path: str, caption: str = "", chat_id: int = CHAT_ID):
@@ -2774,13 +2767,34 @@ async def send_startup_messages():
 async def main_loop():
     global START_MSG_SENT
 
-    # laisse le réseau/dns/loop se stabiliser un chouïa
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(0.5)  # petit warm-up réseau
 
-    # envoi unique des messages de démarrage (avec retries)
+    # Envoi de démarrage (avec confirmation)
     if not START_MSG_SENT:
-        await send_startup_messages()
-        START_MSG_SENT = True
+        # ping direct hors anti-flood pour valider le canal
+        try:
+            await bot.send_message(chat_id=CHAT_ID, text=f"🧪 Ping {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+            print("✅ Ping direct envoyé")
+        except Exception as e:
+            print(f"❌ Ping direct échoué: {e}")
+
+        msg = f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
+        ok = await tg_send(msg)
+        if not ok:
+            # 2 autres tentatives espacées
+            for i in range(2):
+                await asyncio.sleep(3 + 2*i)
+                if await tg_send(msg):
+                    ok = True
+                    break
+        if ok:
+            START_MSG_SENT = True
+            print("✅ Message de démarrage confirmé")
+        else:
+            print("⚠️ Message de démarrage non confirmé")
+
+    # (le reste de ta boucle ensuite…)
+
 
     # lance le flush des HOLD si ta fonction existe
     try:
