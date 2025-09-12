@@ -1364,12 +1364,11 @@ async def process_symbol(symbol):
         if closes_4h[-1] < ema200_4h: indicators_soft_penalty += 1
 
         if is_market_range(closes_4h):
-            await tg_send(f"⚠️ Marché en range sur {symbol} → pénalité appliquée")
-            indicators_soft_penalty += 1   # au lieu de return
-
+            log_info(symbol, "Marché en range (soft) → pénalité")
+            indicators_soft_penalty += 1
         # Supertrend 1h non haussier (pénalité)
         if not supertrend_signal:
-            await tg_send("⚠️ Supertrend 1h non haussier → pénalité appliquée")
+            log_info(symbol, "Supertrend 1h non haussier (soft) → pénalité")
             indicators_soft_penalty += 1
 
         if detect_rsi_divergence(closes, rsi_series):
