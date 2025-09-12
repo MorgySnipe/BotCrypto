@@ -2652,9 +2652,10 @@ async def send_daily_summary():
         await tg_send(f"⚠️ Échec d’envoi de trade_audit.csv : {e}")
 
 async def main_loop():
-    await asyncio.sleep(0.5)  # petit warm-up
+    global trades  # ✅ déclaré dès le début
 
-    # Message de démarrage direct (pas de doublon, pas de retry)
+    await asyncio.sleep(0.5)
+
     try:
         await bot.send_message(
             chat_id=CHAT_ID,
@@ -2664,21 +2665,15 @@ async def main_loop():
     except Exception as e:
         print(f"❌ Erreur envoi démarrage: {e}")
 
-    # Lancement des tâches background
+    # Lancement des tâches background (si tu gardes flush_hold_loop)
     try:
         asyncio.create_task(flush_hold_loop())
     except NameError:
         print("ℹ️ flush_hold_loop() non défini — skip")
 
     # Charger les trades sauvegardés
-    global trades
     trades.update(load_trades())
 
-    # … puis tu continues ton code comme avant (boucle while True etc.)
-
-    # charge l'état persistant
-    global trades
-    trades.update(load_trades())
 
     # hydrater last_trade_time depuis le disque
     for _sym, _t in trades.items():
