@@ -273,6 +273,9 @@ market_cache = {}
 last_trade_time = {}
 btc_block_until  = None   # datetime UTC jusqu’à laquelle on bloque les alts
 btc_block_reason = ""     # mémo de la raison (pour logs)
+# === Cache par itération pour limiter les requêtes ===
+symbol_cache = {}  # {"BTCUSDT": {"1h": [...], "4h": [...], "15m": [...], "5m": [...]} }
+
 
 def load_trades():
     try:
