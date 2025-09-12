@@ -456,10 +456,10 @@ async def buffer_hold(symbol: str, text: str):
     # on stocke le message (tronqué proprement)
     hold_buffer.setdefault(symbol, []).append(safe_message(text))
 
-DEBUG_TG = True 
+DEBUG_TG = True  # tu l’avais mis, on l’utilise vraiment ici
 
 async def tg_send(text: str, chat_id: int = CHAT_ID):
-    """Envoi Telegram avec anti-flood, anti-doublon, et gestion RetryAfter/Timeout."""
+    """Envoi Telegram avec anti-flood, anti-doublon, gestion RetryAfter/Timeout + logs visibles."""
     global _tg_last_send_ts, _tg_last_text, _tg_last_text_ts, _tg_snooze_until
 
     text = safe_message(text)
@@ -467,39 +467,53 @@ async def tg_send(text: str, chat_id: int = CHAT_ID):
 
     # 0) si on sort d'une série d'échecs, on “snooze”
     if now_mono < _tg_snooze_until:
+        if DEBUG_TG:
+            print(f"[tg_send] snooze actif encore {(_tg_snooze_until - now_mono):.1f}s → skip '{text[:40]}...'")
         return
 
     async with _tg_lock:
         # 1) anti-doublon basique (évite spam "Bot démarré")
         if _tg_last_text == text and (now_mono - _tg_last_text_ts) < 120:
+            if DEBUG_TG:
+                print("[tg_send] doublon <120s → skip")
             return
 
         # 2) respecter ~1 msg / seconde
         wait = max(0.0, 1.05 - (now_mono - _tg_last_send_ts))
         if wait > 0:
+            if DEBUG_TG:
+                print(f"[tg_send] rate-limit: sleep {wait:.2f}s")
             await asyncio.sleep(wait)
 
         try:
+            if DEBUG_TG:
+                print("[tg_send] envoi direct…")
             await bot.send_message(chat_id=chat_id, text=text)
-            # succès → on met à jour les marqueurs
             _tg_last_send_ts = time.monotonic()
             _tg_last_text = text
             _tg_last_text_ts = _tg_last_send_ts
             _tg_snooze_until = 0.0
+            if DEBUG_TG:
+                print("[tg_send] ✅ envoyé")
             return
 
         except RetryAfter as e:
-            # Telegram nous dit d'attendre
-            await asyncio.sleep(float(getattr(e, "retry_after", 1)) + 1.0)
+            ra = float(getattr(e, "retry_after", 1))
+            if DEBUG_TG:
+                print(f"[tg_send] RetryAfter {ra:.1f}s")
+            await asyncio.sleep(ra + 1.0)
             await bot.send_message(chat_id=chat_id, text=text)
             _tg_last_send_ts = time.monotonic()
             _tg_last_text = text
             _tg_last_text_ts = _tg_last_send_ts
             _tg_snooze_until = 0.0
+            if DEBUG_TG:
+                print("[tg_send] ✅ envoyé après RetryAfter")
             return
 
-        except (TimedOut, NetworkError):
-            # petit retry simple
+        except (TimedOut, NetworkError) as e:
+            if DEBUG_TG:
+                print(f"[tg_send] 1er TimedOut/NetworkError: {e} → retry court")
             await asyncio.sleep(2.0)
             try:
                 await bot.send_message(chat_id=chat_id, text=text)
@@ -507,11 +521,20 @@ async def tg_send(text: str, chat_id: int = CHAT_ID):
                 _tg_last_text = text
                 _tg_last_text_ts = _tg_last_send_ts
                 _tg_snooze_until = 0.0
+                if DEBUG_TG:
+                    print("[tg_send] ✅ envoyé après petit retry")
                 return
-            except Exception:
-                # gros échec → on “snooze” 60s
+            except Exception as e2:
                 _tg_snooze_until = time.monotonic() + 60.0
+                if DEBUG_TG:
+                    print(f"[tg_send] ❌ échec après retry: snooze 60s ({e2})")
                 return
+
+        except Exception as e:
+            # logge l’exception (ne pas faire return silencieux)
+            print(f"[tg_send] ❌ exception inattendue: {e}")
+            _tg_snooze_until = time.monotonic() + 15.0
+            return
 
 # --- Envoi de fichier Telegram (anti-flood + retry) ---
 async def tg_send_doc(path: str, caption: str = "", chat_id: int = CHAT_ID):
@@ -535,7 +558,7 @@ async def tg_send_doc(path: str, caption: str = "", chat_id: int = CHAT_ID):
                     with open(path, "rb") as f:
                         await bot.send_document(chat_id=chat_id, document=f, caption=safe_message(caption)[:1024])
                     _tg_last_send_ts = time.monotonic()
-                    _tg_last_text = text
+                    _tg_last_text = caption
                     _tg_last_text_ts = time.monotonic()
                     return
                 except RetryAfter as e:
@@ -2716,69 +2739,93 @@ async def flush_hold_loop():
                 await tg_send(f"[HOLD batch {sym}]\n{batched}")
                 hold_buffer[sym] = []
 
+async def send_startup_messages():
+    """Warm-up Telegram + ping direct, puis message officiel via tg_send avec backoff."""
+    # petit warm-up
+    await asyncio.sleep(0.5)
+
+    # 0) Vérifie le token / réchauffe la connexion
+    try:
+        me = await bot.get_me()
+        print(f"✅ get_me OK: @{getattr(me, 'username', 'unknown')}")
+    except Exception as e:
+        print(f"❌ get_me a échoué: {e}")
+
+    # 1) Ping direct (hors anti-flood) pour lever tout doute
+    try:
+        await bot.send_message(chat_id=CHAT_ID, text=f"🧪 Ping {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+        print("✅ Ping direct envoyé")
+    except Exception as e:
+        print(f"❌ Ping direct échoué: {e}")
+
+    # 2) Message officiel avec 3 tentatives espacées si nécessaire
+    msg = f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
+    for i in range(3):
+        try:
+            await tg_send(msg)
+            print("✅ Message de démarrage envoyé")
+            return
+        except Exception as e:
+            print(f"❌ Envoi démarrage tentative {i+1}/3: {e}")
+        await asyncio.sleep(3.0 + i * 2.0)
+
+    print("⚠️ Message de démarrage non confirmé après 3 tentatives")
+
 async def main_loop():
     global START_MSG_SENT
 
-    # petite pause pour laisser le réseau/dns/loop se stabiliser
+    # laisse le réseau/dns/loop se stabiliser un chouïa
     await asyncio.sleep(0.5)
 
-    # ping brut pour debug (ne passe pas par tg_send)
-    try:
-        await bot.send_message(chat_id=CHAT_ID, text=f"🧪 Ping direct {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
-        print("✅ Ping direct envoyé")
-    except Exception as e:
-        print("❌ Ping direct échoué:", e)
-
-    # message officiel de démarrage (protégé contre doublon)
+    # envoi unique des messages de démarrage (avec retries)
     if not START_MSG_SENT:
-        try:
-            await tg_send(f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
-            START_MSG_SENT = True
-            print("✅ Message de démarrage envoyé")
-        except Exception as e:
-            print("❌ Erreur envoi démarrage:", e)
+        await send_startup_messages()
+        START_MSG_SENT = True
 
-    asyncio.create_task(flush_hold_loop())
+    # lance le flush des HOLD si ta fonction existe
+    try:
+        asyncio.create_task(flush_hold_loop())
+    except NameError:
+        print("ℹ️ flush_hold_loop() non défini — skip")
+
+    # charge l'état persistant
     global trades
     trades.update(load_trades())
-    # Hydratation correcte de last_trade_time depuis les trades persistés (UTC aware)
+
+    # hydrater last_trade_time depuis le disque
     for _sym, _t in trades.items():
         try:
-            ts = _t.get("time")  # ex: "2025-02-14 13:47"
+            ts = _t.get("time")
             if not ts:
                 continue
-            # 1) essaie parse tolérant (aware UTC grâce au patch de _parse_dt_flex)
             dt = _parse_dt_flex(ts)
-            # 2) sinon tente ISO
             if dt is None:
                 dt = datetime.fromisoformat(ts)
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
-            # 3) stocke en UTC
             last_trade_time[_sym] = dt.astimezone(timezone.utc)
         except Exception:
-            # ignore les timestamps illisibles
             pass
 
     last_heartbeat = None
     last_summary_day = None
-    last_audit_day = None   
+    last_audit_day = None
 
     while True:
         try:
             now = datetime.now(timezone.utc)
 
-            # ✅ Message de vie toutes les heures
+            # ✅ heartbeat horaire
             if last_heartbeat != now.hour:
                 await tg_send(f"✅ Bot actif {now.strftime('%H:%M')}")
                 last_heartbeat = now.hour
 
-            # ✅ Résumé quotidien à 23h UTC
+            # ✅ résumé quotidien 23:00 UTC
             if now.hour == 23 and (last_summary_day is None or last_summary_day != now.date()):
                 await send_daily_summary()
                 last_summary_day = now.date()
-                
-            # --- Précharge 1h/4h pour tous les symboles (concurrent, non-bloquant) ---
+
+            # --- préchargement 1h/4h ---
             symbol_cache.clear()
             tasks = []
             for s in SYMBOLS:
@@ -2786,35 +2833,27 @@ async def main_loop():
                 tasks.append(get_klines_async(s, "1h", LIMIT))
                 tasks.append(get_klines_async(s, "4h", LIMIT))
 
-            # lance toutes les requêtes en parallèle
             results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # range les résultats par paire (2 résultats par symbole: 1h, 4h)
             for i, s in enumerate(SYMBOLS):
-                r1h  = results[2*i]
-                r4h  = results[2*i + 1]
+                r1h = results[2*i]
+                r4h = results[2*i + 1]
                 symbol_cache[s]["1h"] = [] if isinstance(r1h, Exception) or r1h is None else r1h
                 symbol_cache[s]["4h"] = [] if isinstance(r4h, Exception) or r4h is None else r4h
 
-            # Contexte marché (on alimente market_cache avec le 1h préchargé)
             market_cache['BTCUSDT'] = symbol_cache.get('BTCUSDT', {}).get('1h', [])
             market_cache['ETHUSDT'] = symbol_cache.get('ETHUSDT', {}).get('1h', [])
             update_market_state()
 
-            # Lancement des analyses
-            # 1) D’abord la stratégie standard
+            # analyses
             await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
-            # 2) Ensuite la stratégie agressive, mais seulement si pas déjà en trade
             await asyncio.gather(*(process_symbol_aggressive(s) for s in SYMBOLS if s not in trades))
 
             print("✔️ Itération terminée", flush=True)
-
 
         except Exception as e:
             await tg_send(f"⚠️ Erreur : {e}")
 
         await asyncio.sleep(SLEEP_SECONDS)
-
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
