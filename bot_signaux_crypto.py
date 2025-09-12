@@ -311,6 +311,26 @@ def log_trade_csv(row: dict):
                 clean["ts_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             w.writerow(clean)
 
+async def send_refusal_top(n_minutes=60, topk=8):
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=n_minutes)
+        counts = {}
+        if not os.path.exists(REFUSAL_LOG_FILE):
+            return
+        with open(REFUSAL_LOG_FILE) as f:
+            r = csv.DictReader(f)
+            for row in r:
+                ts = _parse_dt_flex(row.get("ts_utc", ""))
+                if ts and ts >= cutoff:
+                    key = row.get("reason", "")
+                    counts[key] = counts.get(key, 0) + 1
+        if counts:
+            top = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:topk]
+            lines = [f"• {k}: {v}" for k, v in top]
+            await tg_send("🧪 Top refus (dernière heure):\n" + "\n".join(lines))
+    except Exception as e:
+        print("top refus err:", e)
+
 def _delete_trade(symbol):
     if symbol in trades:
         del trades[symbol]
@@ -2688,6 +2708,7 @@ async def main_loop():
             # ✅ heartbeat horaire
             if last_heartbeat != now.hour:
                 await tg_send(f"✅ Bot actif {now.strftime('%H:%M')}")
+                await send_refusal_top(60, 8)
                 last_heartbeat = now.hour
 
             # ✅ résumé quotidien 23:00 UTC
