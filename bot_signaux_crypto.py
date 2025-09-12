@@ -40,15 +40,22 @@ from telegram.error import RetryAfter, TimedOut, NetworkError
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from dotenv import load_dotenv
-import os
+import os, json, csv
 
-# Charger les variables depuis .env
-load_dotenv()
+# Récupérer les variables depuis Render (Environment Variables)
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+CHAT_ID = int(os.environ["CHAT_ID"])
+DATA_DIR = os.getenv("DATA_DIR", "/var/data")
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = int(os.getenv("CHAT_ID", "0"))
-DATA_DIR = os.getenv("DATA_DIR", "./data")
+# S’assurer que le dossier existe (utile avec Render Disks)
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# Fichiers persistants
+PERSIST_FILE     = os.path.join(DATA_DIR, "trades_state.json")
+CSV_AUDIT_FILE   = os.path.join(DATA_DIR, "trade_audit.csv")
+REFUSAL_LOG_FILE = os.path.join(DATA_DIR, "refusal_log.csv")
+LOG_FILE         = os.path.join(DATA_DIR, "trade_log.csv")
+
 
 nest_asyncio.apply()
 
