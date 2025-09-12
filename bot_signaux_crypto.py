@@ -2796,36 +2796,36 @@ async def send_startup_messages():
     print("⚠️ Message de démarrage non confirmé après 3 tentatives")
 
 async def main_loop():
-    global START_MSG_SENT
+    global START_MSG_SENT, trades   # ✅ on déclare ici les globaux utilisés
 
     # (1) Petit warm-up réseau
     await asyncio.sleep(0.5)
 
     # (2) Amorçage/validation du canal Telegram (réessaie quelques fois)
-    # -> tu dois avoir défini build_tg_bot() et ensure_tg_ready() comme indiqué.
     await ensure_tg_ready(max_wait_s=120)
 
     # (3) Message de démarrage – protégé contre les doublons
     if not START_MSG_SENT:
-        START_MSG_SENT = True  # on arme d'abord le flag pour éviter tout double envoi
+        START_MSG_SENT = True
         try:
             await tg_send(f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
             print("✅ Message de démarrage demandé")
         except Exception as e:
-            # Par sécurité: on tente un envoi direct brut si tg_send lève (rare)
+            # fallback direct si tg_send lève
             try:
-                await bot.send_message(chat_id=CHAT_ID, text=f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+                await bot.send_message(
+                    chat_id=CHAT_ID,
+                    text=f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
+                )
                 print("✅ Message de démarrage (fallback direct)")
             except Exception as e2:
                 print(f"⚠️ Impossible d'envoyer le message de démarrage: {e2}")
 
-    # (4) Démarrage des tâches “background” inchangées
+    # (4) Démarrage des tâches “background”
     asyncio.create_task(flush_hold_loop())
 
-    # --- le reste de ta main_loop reste identique à partir d'ici ---
-    global trades
+    # (5) Charge l’état persistant
     trades.update(load_trades())
-    # ... (suite de ton code existant)
 
     # lance le flush des HOLD si ta fonction existe
     try:
