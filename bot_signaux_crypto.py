@@ -31,6 +31,7 @@ import nest_asyncio
 import traceback
 import csv
 import os, json
+import threading
 # [#imports-retry]
 # [#imports-ratelimit]
 import time
@@ -53,6 +54,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # Fichiers persistants
 PERSIST_FILE     = os.path.join(DATA_DIR, "trades_state.json")
 CSV_AUDIT_FILE   = os.path.join(DATA_DIR, "trade_audit.csv")
+file_lock = threading.Lock()
 REFUSAL_LOG_FILE = os.path.join(DATA_DIR, "refusal_log.csv")
 LOG_FILE         = os.path.join(DATA_DIR, "trade_log.csv")
 
@@ -282,22 +284,29 @@ def load_trades():
 
 def save_trades():
     try:
-        # on ne sérialise que des types simples
-        serializable = {}
-        for sym, t in trades.items():
-            d = dict(t)
-            # tp_times contient des datetimes -> on peut les omettre ou str()
-            if "tp_times" in d:
-                d["tp_times"] = {k: str(v) for k, v in d["tp_times"].items()}
-            serializable[sym] = d
-        with open(PERSIST_FILE, "w") as f:
-            json.dump(serializable, f)
+        with file_lock:
+            serializable = {}
+            for sym, t in trades.items():
+                d = dict(t)
+                if "tp_times" in d:
+                    d["tp_times"] = {k: str(v) for k,v in d["tp_times"].items()}
+                serializable[sym] = d
+            with open(PERSIST_FILE, "w") as f:
+                json.dump(serializable, f)
     except Exception as e:
         print(f"⚠️ save_trades: {e}")
 
-
-# === Cache par itération pour limiter les requêtes ===
-symbol_cache = {}    # {"BTCUSDT": {"1h": [...], "4h": [...]}, ...}
+def log_trade_csv(row: dict):
+    header_needed = (not os.path.exists(CSV_AUDIT_FILE) or os.path.getsize(CSV_AUDIT_FILE) == 0)
+    with file_lock:
+        with open(CSV_AUDIT_FILE, "a", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=CSV_AUDIT_FIELDS)
+            if header_needed: 
+                w.writeheader()
+            clean = {k: row.get(k, "") for k in CSV_AUDIT_FIELDS}
+            if not clean.get("ts_utc"):
+                clean["ts_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            w.writerow(clean)
 
 def _delete_trade(symbol):
     if symbol in trades:
@@ -1131,20 +1140,6 @@ def log_info(symbol: str, reason: str, trigger: str = ""):
     # log "neutre" (juste en console) pour info/diagnostic
     print(f"[INFO] {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} {symbol} | {reason} | {trigger}")
 
-def log_trade_csv(row: dict):
-    """Écrit/append une ligne dans trade_audit.csv avec l'en-tête s'il manque."""
-    import os, csv
-    header_needed = (not os.path.exists(CSV_AUDIT_FILE)
-                     or os.path.getsize(CSV_AUDIT_FILE) == 0)
-    with open(CSV_AUDIT_FILE, "a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=CSV_AUDIT_FIELDS)
-        if header_needed:
-            w.writeheader()
-        clean = {k: row.get(k, "") for k in CSV_AUDIT_FIELDS}
-        # si l'appelant n'a pas fourni ts_utc, on le remplit proprement en UTC
-        if not clean.get("ts_utc"):
-            clean["ts_utc"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        w.writerow(clean)
 # ====== /CSV détaillé ======
 def trailing_stop_advanced(symbol, current_price, atr_value=None, atr_period=14):
     """
