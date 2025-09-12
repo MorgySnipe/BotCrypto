@@ -446,56 +446,77 @@ async def buffer_hold(symbol: str, text: str):
     hold_buffer.setdefault(symbol, []).append(safe_message(text))
 
 async def tg_send(text: str, chat_id: int = CHAT_ID):
-    """Envoi Telegram avec anti-flood + gestion RetryAfter/Timeout."""
+    """Envoi Telegram robuste: rate-limit, retries, et jamais de crash."""
+    import asyncio
     global _tg_last_send_ts
-    async with _tg_lock:
-        # 1) respecter ~1 msg / seconde
-        now = time.monotonic()
-        wait = max(0.0, 1.05 - (now - _tg_last_send_ts))  # petite marge
-        if wait > 0:
-            await asyncio.sleep(wait)
 
-        # 2) envoi + reprises simples
-        try:
-            await bot.send_message(chat_id=chat_id, text=safe_message(text))
-        except RetryAfter as e:
-            await asyncio.sleep(e.retry_after + 1)
-            await bot.send_message(chat_id=chat_id, text=safe_message(text))
-        except (TimedOut, NetworkError):
-            await asyncio.sleep(2)
-            await bot.send_message(chat_id=chat_id, text=safe_message(text))
+    try:
+        async with _tg_lock:
+            # 1) respecter ~1 msg / seconde
+            now = time.monotonic()
+            wait = max(0.0, 1.05 - (now - _tg_last_send_ts))
+            if wait > 0:
+                await asyncio.sleep(wait)
 
-        _tg_last_send_ts = time.monotonic()
+            # 2) jusqu’à 3 tentatives
+            for attempt in range(3):
+                try:
+                    await bot.send_message(chat_id=chat_id, text=safe_message(text))
+                    _tg_last_send_ts = time.monotonic()
+                    return
+                except RetryAfter as e:
+                    # Télégram demande d’attendre
+                    await asyncio.sleep(e.retry_after + 1)
+                except (TimedOut, NetworkError, asyncio.TimeoutError):
+                    # petit backoff progressif puis on retente
+                    await asyncio.sleep(2 + attempt)
+                except Exception as e:
+                    # on log en console et on abandonne proprement
+                    print(f"tg_send unexpected error: {e}")
+                    return
+
+            # si on a épuisé les tentatives: on log mais on ne plante pas
+            print("tg_send: all retries failed (TimedOut/NetworkError)")
+    except Exception as e:
+        # ce catch global empêche tout crash de la boucle
+        print(f"tg_send wrapper error: {e}")
+
 
 # --- Envoi de fichier Telegram (anti-flood + retry) ---
 async def tg_send_doc(path: str, caption: str = "", chat_id: int = CHAT_ID):
-    import os
+    """Envoi de document robuste (ne plante jamais la boucle)."""
+    import os, asyncio
     global _tg_last_send_ts
 
-    if not os.path.exists(path) or os.path.getsize(path) == 0:
-        await tg_send(f"ℹ️ Fichier introuvable ou vide: {path}")
-        return
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            await tg_send(f"ℹ️ Fichier introuvable ou vide: {path}")
+            return
 
-    async with _tg_lock:
-        # respecter ~1 msg/s comme pour tg_send
-        now = time.monotonic()
-        wait = max(0.0, 1.05 - (now - _tg_last_send_ts))
-        if wait > 0:
-            await asyncio.sleep(wait)
+        async with _tg_lock:
+            now = time.monotonic()
+            wait = max(0.0, 1.05 - (now - _tg_last_send_ts))
+            if wait > 0:
+                await asyncio.sleep(wait)
 
-        try:
-            with open(path, "rb") as f:
-                await bot.send_document(chat_id=chat_id, document=f, caption=safe_message(caption)[:1024])
-        except RetryAfter as e:
-            await asyncio.sleep(e.retry_after + 1)
-            with open(path, "rb") as f:
-                await bot.send_document(chat_id=chat_id, document=f, caption=safe_message(caption)[:1024])
-        except (TimedOut, NetworkError):
-            await asyncio.sleep(2)
-            with open(path, "rb") as f:
-                await bot.send_document(chat_id=chat_id, document=f, caption=safe_message(caption)[:1024])
+            for attempt in range(3):
+                try:
+                    with open(path, "rb") as f:
+                        await bot.send_document(chat_id=chat_id, document=f, caption=safe_message(caption)[:1024])
+                    _tg_last_send_ts = time.monotonic()
+                    return
+                except RetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 1)
+                except (TimedOut, NetworkError, asyncio.TimeoutError):
+                    await asyncio.sleep(2 + attempt)
+                except Exception as e:
+                    print(f"tg_send_doc unexpected error: {e}")
+                    return
 
-        _tg_last_send_ts = time.monotonic()
+            print("tg_send_doc: all retries failed (TimedOut/NetworkError)")
+    except Exception as e:
+        print(f"tg_send_doc wrapper error: {e}")
+
 
 def get_klines(symbol, interval='1h', limit=100):
     data = binance_get("/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
