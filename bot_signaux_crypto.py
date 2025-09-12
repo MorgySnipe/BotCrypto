@@ -247,9 +247,6 @@ market_cache = {}
 last_trade_time = {}
 btc_block_until  = None   # datetime UTC jusqu’à laquelle on bloque les alts
 btc_block_reason = ""     # mémo de la raison (pour logs)
-LOG_FILE = "trade_log.csv" 
-# --- Persistance des positions (survit aux redémarrages) ---
-PERSIST_FILE = "trades_state.json"
 
 def load_trades():
     try:
@@ -1072,7 +1069,6 @@ def log_trade(symbol, side, price, gain=0):
             "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         })
 # ====== CSV détaillé (audit) ======
-CSV_AUDIT_FILE = "trade_audit.csv"
 CSV_AUDIT_FIELDS = [
     "ts_utc","trade_id","symbol","event","strategy","version",
     "entry","exit","price","pnl_pct","position_pct",
@@ -1084,8 +1080,6 @@ CSV_AUDIT_FIELDS = [
     "reason_entry","reason_exit"
 ]
 
-# ====== CSV refus d'entrée (diagnostic) ======
-REFUSAL_LOG_FILE = "refusal_log.csv"
 REFUSAL_FIELDS = ["ts_utc", "symbol", "reason", "trigger", "cooldown_left_min"]
 
 # — Création des CSV au démarrage si absents —
