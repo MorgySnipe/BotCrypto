@@ -257,9 +257,12 @@ def daily_pnl_pct_utc() -> float:
 
 from telegram.request import HTTPXRequest
 
-# timeouts plus larges pour éviter les faux "TimedOut"
-_tg_request = HTTPXRequest(connect_timeout=10, read_timeout=30, pool_timeout=10)
-bot = Bot(token=TELEGRAM_TOKEN, request=_tg_request)
+def build_tg_bot(connect=20, read=60, pool=20):
+    req = HTTPXRequest(connect_timeout=connect, read_timeout=read, pool_timeout=pool)
+    return Bot(token=TELEGRAM_TOKEN, request=req)
+
+bot = build_tg_bot()
+
 
 trades = {}
 history = []
@@ -565,6 +568,34 @@ async def tg_send_doc(path: str, caption: str = "", chat_id: int = CHAT_ID):
             print("tg_send_doc: all retries failed (TimedOut/NetworkError)")
     except Exception as e:
         print(f"tg_send_doc wrapper error: {e}")
+
+async def ensure_tg_ready(max_wait_s: int = 120) -> bool:
+    """
+    Essaie d'envoyer un ping Telegram jusqu'à succès (limité à max_wait_s).
+    Recrée la session HTTP entre les tentatives (utile si le pool est froid).
+    """
+    start = time.monotonic()
+    attempt = 0
+    while (time.monotonic() - start) < max_wait_s:
+        attempt += 1
+        try:
+            # on recrée le client à chaque tentative pour repartir propre
+            global bot
+            bot = build_tg_bot()
+
+            ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            await bot.send_message(chat_id=CHAT_ID, text=f"🧪 Ping (try#{attempt}) {ts}")
+            print(f"✅ Telegram prêt (try#{attempt})")
+            return True
+        except Exception as e:
+            left = max_wait_s - int(time.monotonic() - start)
+            print(f"⏳ Ping TG échec try#{attempt}: {e} — {left}s restants")
+            # backoff doux 2, 3, 5, 8, 13...
+            delay = [2,3,5,8,13,13,13][min(attempt-1, 6)]
+            await asyncio.sleep(delay)
+    print("⚠️ Telegram non joignable dans la fenêtre d’amorçage")
+    return False
+
 
 
 def get_klines(symbol, interval='1h', limit=100):
@@ -2767,34 +2798,34 @@ async def send_startup_messages():
 async def main_loop():
     global START_MSG_SENT
 
-    await asyncio.sleep(0.5)  # petit warm-up réseau
+    # (1) Petit warm-up réseau
+    await asyncio.sleep(0.5)
 
-    # Envoi de démarrage (avec confirmation)
+    # (2) Amorçage/validation du canal Telegram (réessaie quelques fois)
+    # -> tu dois avoir défini build_tg_bot() et ensure_tg_ready() comme indiqué.
+    await ensure_tg_ready(max_wait_s=120)
+
+    # (3) Message de démarrage – protégé contre les doublons
     if not START_MSG_SENT:
-        # ping direct hors anti-flood pour valider le canal
+        START_MSG_SENT = True  # on arme d'abord le flag pour éviter tout double envoi
         try:
-            await bot.send_message(chat_id=CHAT_ID, text=f"🧪 Ping {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
-            print("✅ Ping direct envoyé")
+            await tg_send(f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+            print("✅ Message de démarrage demandé")
         except Exception as e:
-            print(f"❌ Ping direct échoué: {e}")
+            # Par sécurité: on tente un envoi direct brut si tg_send lève (rare)
+            try:
+                await bot.send_message(chat_id=CHAT_ID, text=f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+                print("✅ Message de démarrage (fallback direct)")
+            except Exception as e2:
+                print(f"⚠️ Impossible d'envoyer le message de démarrage: {e2}")
 
-        msg = f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
-        ok = await tg_send(msg)
-        if not ok:
-            # 2 autres tentatives espacées
-            for i in range(2):
-                await asyncio.sleep(3 + 2*i)
-                if await tg_send(msg):
-                    ok = True
-                    break
-        if ok:
-            START_MSG_SENT = True
-            print("✅ Message de démarrage confirmé")
-        else:
-            print("⚠️ Message de démarrage non confirmé")
+    # (4) Démarrage des tâches “background” inchangées
+    asyncio.create_task(flush_hold_loop())
 
-    # (le reste de ta boucle ensuite…)
-
+    # --- le reste de ta main_loop reste identique à partir d'ici ---
+    global trades
+    trades.update(load_trades())
+    # ... (suite de ton code existant)
 
     # lance le flush des HOLD si ta fonction existe
     try:
