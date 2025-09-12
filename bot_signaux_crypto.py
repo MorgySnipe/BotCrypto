@@ -1314,6 +1314,7 @@ async def process_symbol(symbol):
         atr = atr_tv(klines, period=14)
         adx_value = adx_tv(klines, period=14)
         ema25 = ema_tv(closes, 25)
+        supertrend_signal = supertrend_like_on_close(klines)   # <-- DÉFINI TÔT
 
         # --- 4h ---
         klines_4h = get_cached(symbol, '4h')
@@ -1368,7 +1369,6 @@ async def process_symbol(symbol):
            log_refusal(symbol, f"Volatilité trop faible (ATR/price={volatility:.4f} < 0.003)")
            return
 
-        supertrend_signal = supertrend_like_on_close(klines)
 
         # --- ADX (standard) assoupli ---
         if adx_value < (ADX_MIN if LEARNING_MODE else 18):
@@ -1488,7 +1488,6 @@ async def process_symbol(symbol):
             brk_ok = False
 
         buy = False
-        reasons = []
 
         if brk_ok and trend_ok and momentum_ok and volume_ok:
             # Filtre 15m avec niveau de breakout
@@ -1983,6 +1982,7 @@ async def process_symbol_aggressive(symbol):
         # init pénalités/notes (doit être fait AVANT de s'en servir)
         indicators_soft_penalty = 0
         tendance_soft_notes = []
+        reasons = []        
 
         ok_session, _sess = is_active_liquidity_session(symbol=symbol)
 
