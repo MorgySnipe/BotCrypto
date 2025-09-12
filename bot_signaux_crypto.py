@@ -156,6 +156,7 @@ SYMBOLS = [
 ]
 INTERVAL = '1h'
 LIMIT = 100
+TF_LIST = [("1h", LIMIT), ("4h", LIMIT), ("15m", 120), ("5m", 60)]
 SLEEP_SECONDS = 300
 MAX_TRADES = 7
 MIN_VOLUME = 600000
@@ -303,25 +304,8 @@ def _delete_trade(symbol):
         del trades[symbol]
         save_trades()
 
-def get_cached(symbol, tf="1h", limit=LIMIT, force: bool = False):
-    """
-    Retourne les klines depuis le cache de l'itération.
-    - Recharge si `force=True` ou si le cache est absent OU plus court que `limit`.
-    - N'écrase pas le cache existant si l'API renvoie moins/vides.
-    """
-    d = symbol_cache.setdefault(symbol, {})
-    series = d.get(tf)
-
-    need_reload = force or (series is None) or (int(limit) and len(series) < int(limit))
-
-    if need_reload:
-        fresh = get_klines(symbol, interval=tf, limit=int(limit))
-        # On ne remplace que si on a vraiment mieux/plus long
-        if fresh and (series is None or len(fresh) >= len(series)):
-            d[tf] = fresh
-            series = fresh
-
-    return series or []
+def get_cached(symbol, tf="1h", limit=None, force: bool=False):
+    return symbol_cache.get(symbol, {}).get(tf, [])
 
 # ====== META / HELPERS POUR MESSAGES & IDs ======
 BOT_VERSION = "v1.0.0"
@@ -2713,21 +2697,23 @@ async def main_loop():
                 await send_daily_summary()
                 last_summary_day = now.date()
 
-            # --- préchargement 1h/4h ---
+            # --- préchargement multi-TF ---
             symbol_cache.clear()
             tasks = []
             for s in SYMBOLS:
                 symbol_cache.setdefault(s, {})
-                tasks.append(get_klines_async(s, "1h", LIMIT))
-                tasks.append(get_klines_async(s, "4h", LIMIT))
+                for tf, lim in TF_LIST:
+                    tasks.append(get_klines_async(s, tf, lim))
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            for i, s in enumerate(SYMBOLS):
-                r1h = results[2*i]
-                r4h = results[2*i + 1]
-                symbol_cache[s]["1h"] = [] if isinstance(r1h, Exception) or r1h is None else r1h
-                symbol_cache[s]["4h"] = [] if isinstance(r4h, Exception) or r4h is None else r4h
 
+            idx = 0
+            for s in SYMBOLS:
+                for tf, lim in TF_LIST:
+                    r = results[idx]; idx += 1
+                    symbol_cache[s][tf] = [] if isinstance(r, Exception) or r is None else r
+
+            # contexte marché
             market_cache['BTCUSDT'] = symbol_cache.get('BTCUSDT', {}).get('1h', [])
             market_cache['ETHUSDT'] = symbol_cache.get('ETHUSDT', {}).get('1h', [])
             update_market_state()
