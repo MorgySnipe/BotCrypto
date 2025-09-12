@@ -2718,9 +2718,25 @@ async def flush_hold_loop():
 
 async def main_loop():
     global START_MSG_SENT
+
+    # petite pause pour laisser le réseau/dns/loop se stabiliser
+    await asyncio.sleep(0.5)
+
+    # ping brut pour debug (ne passe pas par tg_send)
+    try:
+        await bot.send_message(chat_id=CHAT_ID, text=f"🧪 Ping direct {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+        print("✅ Ping direct envoyé")
+    except Exception as e:
+        print("❌ Ping direct échoué:", e)
+
+    # message officiel de démarrage (protégé contre doublon)
     if not START_MSG_SENT:
-        START_MSG_SENT = True
-        await tg_send(f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+        try:
+            await tg_send(f"🚀 Bot démarré {datetime.now(timezone.utc).strftime('%H:%M:%S')}")
+            START_MSG_SENT = True
+            print("✅ Message de démarrage envoyé")
+        except Exception as e:
+            print("❌ Erreur envoi démarrage:", e)
 
     asyncio.create_task(flush_hold_loop())
     global trades
