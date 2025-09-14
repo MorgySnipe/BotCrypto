@@ -781,11 +781,11 @@ def pick_sl_pct(volatility, pct_min, pct_max, v_hi=0.02):
     v = _clamp(volatility, 0.0, v_hi)
     t = 0.0 if v_hi == 0 else (v / v_hi)
     return pct_min + (pct_max - pct_min) * t
-
-# --- Money management (risk-based) ---
+    
 # garde-fous globaux
-POS_MIN_PCT = 1.0   # min 1% du capital
-POS_MAX_PCT = 10.0  # max 10% du capital
+# --- Money management (risk-based) ---
+POS_MIN_PCT = 1.0
+POS_MAX_PCT = 7.0
 
 def position_pct_from_risk(entry_price: float, stop_price: float, score: int | None = None) -> float:
     """
