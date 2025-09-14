@@ -158,7 +158,7 @@ SYMBOLS = [
 ]
 INTERVAL = '1h'
 LIMIT = 100
-TF_LIST = [("1h", LIMIT), ("4h", LIMIT), ("15m", 120), ("5m", 60)]
+TF_LIST = [("1h", 750), ("4h", 300), ("15m", 200), ("5m", 120)]
 SLEEP_SECONDS = 300
 MAX_TRADES = 7
 MIN_VOLUME = 600000
@@ -646,18 +646,14 @@ def anti_spike_check_std(klines, price, atr_period=14):
     dyn_limit = min(ANTI_SPIKE_MAX_PCT, max(ANTI_SPIKE_UP_STD, ANTI_SPIKE_ATR_MULT * atr_pct))
     return (spike_pct <= dyn_limit), float(spike_pct), float(dyn_limit)
 
-def confirm_15m_after_signal(k15, breakout_level=None, ema25_1h=None, tol=0.001) -> bool:
-    """
-    Exige UNE clôture 15m (la dernière COMPLÈTE) au-dessus:
-      - du niveau de retest (si breakout_level fourni), OU
-      - de l'EMA25(1h) à ±0.1% (tol=0.001)
-    """
-    if not k15 or len(k15) < 2:
+def confirm_15m_after_signal(symbol, breakout_level=None, ema25_1h=None):
+    # exiger les 2 dernières bougies 15m complètes
+    kl = get_cached(symbol, "15m", 20)
+    if len(kl) < 3:
         return False
-    close15 = float(k15[-2][4])  # dernière bougie 15m COMPLÈTE
-
-    ok_level = breakout_level is not None and close15 >= breakout_level
-    ok_ema   = ema25_1h is not None and close15 >= (ema25_1h * (1 - tol))
+    closes = [float(kl[-2][4]), float(kl[-3][4])]
+    ok_level = breakout_level and all(c >= breakout_level for c in closes)
+    ok_ema   = ema25_1h and all(c >= ema25_1h * 0.999 for c in closes)
     return ok_level or ok_ema
 
 def compute_ema(prices, period=200):
@@ -1429,7 +1425,10 @@ async def process_symbol(symbol):
                 return
 
         # — Pré-filtre: prix trop loin de l’EMA25 (plus strict)
-        EMA25_PREFILTER_STD = 1.05   # +5%
+        EMA25_PREFILTER_STD = (
+            1.03 if symbol in {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","LINKUSDT"} else 1.05
+        )
+
         if price > ema25 * EMA25_PREFILTER_STD:
             dist = (price / max(ema25, 1e-9) - 1) * 100
             log_refusal(
@@ -2077,7 +2076,11 @@ async def process_symbol_aggressive(symbol):
         near_ema25  = abs(price - ema25)      / ema25      <= RETEST_BAND_AGR
 
         # éviter d’acheter trop loin de l’EMA25
-        too_far_from_ema25 = price >= ema25 * 1.03
+        EMA25_PREFILTER_STD = (
+            1.03 if symbol in {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","LINKUSDT"} else 1.05
+        )
+        too_far_from_ema25 = price >= ema25 * EMA25_PREFILTER_STD
+
         if too_far_from_ema25:
             log_refusal(symbol, f"Prix trop éloigné de l'EMA25 (+0.8%) (prix={price}, ema25={ema25})")
             return
