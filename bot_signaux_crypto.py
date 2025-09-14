@@ -188,6 +188,9 @@ TRAIL_TIERS = [
     (6.0, 0.45),
 ]
 TRAIL_BE_AFTER = 1.5  # lock BE dès ~TP1 (≥ +1.5%)
+# --- Take-profits dynamiques (multiplicateurs d'ATR) ---
+TP_ATR_MULTS_STD = [1.0, 2.0, 3.0]      # standard : TP1=1×ATR, TP2=2×ATR, TP3=3×ATR
+TP_ATR_MULTS_AGR = [1.0, 2.0, 3.0]      # aggressive (modifiable si besoin)
 # --- Stops init en % ---
 INIT_SL_PCT_STD_MIN = 0.010  # 1.0% (standard)
 INIT_SL_PCT_STD_MAX = 0.012  # 1.2%
@@ -986,6 +989,26 @@ def atr_tv_cached(symbol, klines, period=14):
         # en cas de pépin, on retombe sur le calcul direct
         return atr_tv(klines, period)
 
+# --- Trailing ADX adaptatif ---
+
+def trail_factor_from_adx(adx: float) -> float:
+    """
+    Retourne le coefficient (k * ATR) pour le trailing.
+    Tendance forte => trailing plus serré ; faible => plus large.
+    """
+    if adx is None:
+        return 0.9
+    if adx >= 28:
+        return 0.70   # tendance très forte -> serré
+    if adx >= 22:
+        return 0.85   # tendance correcte -> normal/serré
+    return 1.10       # tendance faible -> large
+
+TRAIL_TIERS_BASE = [
+    (1.8, 1.0),   # seuil en % de gain, coeff de base (sera multiplié par k_adx)
+    (3.5, 0.7),
+    (6.0, 0.55),
+]
 
 # [#fast-exit-5m]
 def _last_two_finite(values):
@@ -1363,6 +1386,17 @@ async def process_symbol(symbol):
         ema25 = ema_tv(closes, 25)
         supertrend_signal = supertrend_like_on_close(klines)   # <-- DÉFINI TÔT
 
+        # --- filtre de marché BTC pour les ALT ---
+        if symbol != "BTCUSDT":
+            # récupère l’état BTC 1h (tu as déjà update_market_state(); sinon recalcule ici)
+            btc = market_cache.get("BTCUSDT", [])
+            if len(btc) >= 50:
+                btc_rsi = rsi([float(k[4]) for k in btc], 14)  # adapte au nom de ta fonction RSI
+                macd, signal, _ = macd_series([float(k[4]) for k in btc])  # idem pour ta MACD
+                if (btc_rsi is not None and btc_rsi < 50) or (macd is not None and signal is not None and macd <= signal):
+                    log_refusal(symbol, "Blocage ALT: BTC faible (RSI<50 ou MACD<=Signal)")
+                    return
+
         # --- 4h ---
         klines_4h = get_cached(symbol, '4h')
         if not klines_4h or len(klines_4h) < 50:
@@ -1475,7 +1509,7 @@ async def process_symbol(symbol):
             
         # — Pré-filtre: prix trop loin de l’EMA25 (plus strict)
         EMA25_PREFILTER_STD = (
-            1.03 if symbol in {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","LINKUSDT"} else 1.05
+            1.02 if symbol in {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","LINKUSDT"} else 1.03
         )
 
         if price > ema25 * EMA25_PREFILTER_STD:
@@ -1621,6 +1655,22 @@ async def process_symbol(symbol):
             elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
             gain = ((price - entry) / entry) * 100
             stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN)))
+
+            # --- Trailing Stop Adaptatif (en fonction de l'ADX) ---
+            adx_val = trades[symbol].get("adx_1h", 20)  # récupère l'ADX stocké, ou valeur par défaut
+
+            if adx_val >= 25:
+                trail_multiplier = 0.3   # tendance forte → stop serré
+            elif adx_val >= 20:
+                trail_multiplier = 0.5   # tendance moyenne
+            else:
+                trail_multiplier = 0.8   # tendance faible → stop large
+
+            new_stop = price * (1 - trail_multiplier * atr_val_current / price)
+
+            # on garde le stop le plus haut (jamais descendre)
+            trades[symbol]["stop"] = max(stop, new_stop)
+
             # --- Sortie anticipée si BTC tourne négatif (gain faible) ---
             blocked, why_btc = btc_regime_blocked()
             if blocked and gain < 0.8:
@@ -1783,11 +1833,18 @@ async def process_symbol(symbol):
                 _delete_trade(symbol)
                 return
 
-            # TP progressifs
-            tp_levels = {1: 1.5, 2: 3.0, 3: 5.0}
+            # === TP progressifs (basés sur l'ATR) ===
+            # ATR -> % du prix d'entrée pour comparer avec `gain` (qui est en %)
+            atr_pct = (atr_val_current / max(entry, 1e-9)) * 100.0
+
+            # Seuils en % pour TP1/TP2/TP3 selon l'ATR (standard)
+            tp_levels = {i + 1: mult * atr_pct for i, mult in enumerate(TP_ATR_MULTS_STD)}
+
             if "tp_times" not in trades[symbol]:
                 trades[symbol]["tp_times"] = {}
+
             for tp_num, tp_pct in tp_levels.items():
+                # déclenche si gain >= seuil et pas encore déclenché
                 if gain >= tp_pct and not trades[symbol].get(f"tp{tp_num}", False):
                     last_tp_time = trades[symbol]["tp_times"].get(f"tp{tp_num-1}") if tp_num > 1 else None
                     if isinstance(last_tp_time, str):
@@ -1795,20 +1852,30 @@ async def process_symbol(symbol):
                             last_tp_time = datetime.fromisoformat(last_tp_time)
                         except Exception:
                             last_tp_time = None
-                            
+
+                    # anti double-déclenchement : 120 s mini entre 2 TP
                     if not last_tp_time or (datetime.now(timezone.utc) - last_tp_time).total_seconds() >= 120:
                         trades[symbol][f"tp{tp_num}"] = True
                         trades[symbol]["tp_times"][f"tp{tp_num}"] = datetime.now(timezone.utc)
-                        new_stop = entry * (1 + (tp_pct - 0.5) / 100) if tp_num > 1 else entry
+
+                        # Relèvement du stop :
+                        # - TP1 : break-even (on protège la position)
+                        # - TP2+ : on remonte un peu au-dessus du BE (tp_pct - 0.5%) comme avant
+                        if tp_num == 1:
+                            new_stop = entry
+                        else:
+                            new_stop = entry * (1 + max(tp_pct - 0.5, 0.0) / 100.0)
+
                         trades[symbol]["stop"] = max(stop, new_stop)
                         save_trades()
 
                         msg = format_tp_msg(
                             tp_num, symbol, trades[symbol]["trade_id"], price, gain,
-                            trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100,
-                            elapsed_time, "Stop ajusté"
+                            trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100.0,
+                            elapsed_time, "Stop ajusté (ATR)"
                         )
                         await tg_send(msg)
+
 
                         # LOG CSV TP standard
                         log_trade_csv({
@@ -1895,6 +1962,10 @@ async def process_symbol(symbol):
                     symbol,
                     f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}"
                 )
+        # --- score minimum (standard) ---
+        if confidence < 6:
+            log_refusal(symbol, f"Score insuffisant après pénalités (std): {confidence:.1f} < 6")
+            return
 
         # --- Circuit breaker JOUR (avant toute nouvelle entrée) ---
         if buy and symbol not in trades:
@@ -1920,6 +1991,8 @@ async def process_symbol(symbol):
                 "sl_initial": sl_initial,
                 "reason_entry": "; ".join(reasons) if reasons else "",
                 "strategy": "standard",
+                "atr_at_entry": atr_tv(klines),
+                "tp_multipliers": TP_ATR_MULTS_STD,
             }
             last_trade_time[symbol] = datetime.now(timezone.utc)
             save_trades()
@@ -2039,6 +2112,19 @@ async def process_symbol_aggressive(symbol):
         # comparer l'élan MACD vs bougie précédente
         macd_prev, signal_prev = compute_macd(closes[:-1])
 
+        # --- Filtre marché BTC pour ALT (aggressive) ---
+        if symbol != "BTCUSDT":
+            btc_klines = market_cache.get("BTCUSDT", [])
+            if len(btc_klines) >= 50:
+                closes_btc = [float(k[4]) for k in btc_klines]
+                btc_rsi = rsi_tv_series(closes_btc, period=14)
+                btc_macd, btc_signal = compute_macd(closes_btc)
+                if (btc_rsi is not None and btc_rsi < 50) or (
+                    btc_macd is not None and btc_signal is not None and btc_macd <= btc_signal
+                ):
+                    log_refusal(symbol, "Blocage ALT: BTC faible (RSI<50 ou MACD<=Signal)")
+                    return
+
         # ---- Garde-fous ----
         slots = allowed_trade_slots("aggressive")
         if _nb_trades("aggressive") >= slots:
@@ -2113,6 +2199,11 @@ async def process_symbol_aggressive(symbol):
         if c4[-1] < ema50_4h or ema50_4h < ema200_4h:
             return
 
+        # --- score minimum (aggressive) ---
+        if confidence < 7:
+            log_refusal(symbol, f"Score insuffisant après pénalités (aggro): {confidence:.1f} < 7")
+            return
+
         # ----- Breakout + Retest (UNIQUE) -----
         last10_high = max(highs[-10:])
         retest_tolerance = 0.005  # ±0.5%
@@ -2136,8 +2227,9 @@ async def process_symbol_aggressive(symbol):
 
         # éviter d’acheter trop loin de l’EMA25
         EMA25_PREFILTER_STD = (
-            1.03 if symbol in {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","LINKUSDT"} else 1.05
+            1.02 if symbol in {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","LINKUSDT"} else 1.03
         )
+
         too_far_from_ema25 = price >= ema25 * EMA25_PREFILTER_STD
 
         if too_far_from_ema25:
@@ -2254,6 +2346,8 @@ async def process_symbol_aggressive(symbol):
             "tp_times": {},
             "sl_initial": sl_initial,
             "reason_entry": "; ".join(reasons),
+            "atr_at_entry": atr_tv(klines),
+            "tp_multipliers": TP_ATR_MULTS_AGR,
             "strategy": "aggressive",
         }
         last_trade_time[symbol] = datetime.now(timezone.utc)
@@ -2319,6 +2413,64 @@ async def process_symbol_aggressive(symbol):
             datetime.now(timezone.utc)
             - datetime.strptime(trades[symbol]["time"], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
         ).total_seconds() / 3600
+
+
+            # --- TP progressifs (AGGRESSIVE) basés sur l'ATR ---
+            # Seuils ATR en % du prix (convertis via ATR/entry)
+            if "tp_times" not in trades[symbol]:
+                trades[symbol]["tp_times"] = {}
+
+            for tp_idx, atr_mult in enumerate(TP_ATR_MULTS_AGR, start=1):
+                # seuil de gain (en %) correspondant à atr_mult * ATR
+                threshold_pct = (atr_mult * atr_val_current / max(entry, 1e-9)) * 100.0
+
+                if gain >= threshold_pct and not trades[symbol].get(f"tp{tp_idx}", False):
+                    # anti-double déclenchement : 120s entre TP successifs
+                    last_tp_time = trades[symbol]["tp_times"].get(f"tp{tp_idx-1}") if tp_idx > 1 else None
+                    if isinstance(last_tp_time, str):
+                        try:
+                            last_tp_time = datetime.fromisoformat(last_tp_time)
+                        except Exception:
+                            last_tp_time = None
+
+                    if (not last_tp_time) or ((datetime.now(timezone.utc) - last_tp_time).total_seconds() >= 120):
+                        trades[symbol][f"tp{tp_idx}"] = True
+                        trades[symbol]["tp_times"][f"tp{tp_idx}"] = datetime.now(timezone.utc)
+
+                        # BE au TP1 ; au-delà on remonte vers le niveau du TP atteint (léger coussin)
+                        if tp_idx == 1:
+                            new_stop_level = entry
+                        else:
+                            # coussin ~0.5% sous le niveau atteint
+                            new_stop_level = entry * (1.0 + max(0.0, threshold_pct - 0.5) / 100.0)
+
+                        trades[symbol]["stop"] = max(stop, new_stop_level)
+                        save_trades()
+
+                        msg = format_tp_msg(
+                            tp_idx, symbol, trades[symbol]["trade_id"], price, gain,
+                            trades[symbol]["stop"],
+                            ((trades[symbol]["stop"] - entry) / entry) * 100.0,
+                            elapsed_time,
+                            "Stop ajusté (ATR)"
+                        )
+                        await tg_send(msg)
+
+        # === Trailing Stop Adaptatif (en fonction de l’ADX) ===
+        adx_val = trades[symbol].get("adx_1h", 20)  # récupère l'ADX stocké, sinon valeur par défaut 20
+
+        if adx_val >= 25:
+            trail_multiplier = 0.3  # tendance forte → stop serré
+        elif adx_val >= 20:
+            trail_multiplier = 0.5  # tendance moyenne
+        else:
+            trail_multiplier = 0.8  # tendance faible → stop large
+
+        new_stop = price * (1 - trail_multiplier * atr_val_current / price)
+
+        # on garde le stop le plus haut (jamais descendre)
+        trades[symbol]["stop"] = max(stop, new_stop)
+
 
         btc_up = is_uptrend([float(k[4]) for k in market_cache.get("BTCUSDT", [])]) if market_cache.get("BTCUSDT") else False
         eth_up = is_uptrend([float(k[4]) for k in market_cache.get("ETHUSDT", [])]) if market_cache.get("ETHUSDT") else False
