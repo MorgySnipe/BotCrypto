@@ -183,9 +183,9 @@ ANTI_SPIKE_OPEN_MAX = 0.035  # 3.5% max vs open (1h)
 
 # --- Trailing stop harmonisé (ATR TV) ---
 TRAIL_TIERS = [
-    (2.0, 0.8),  # gain >= 2%  -> stop = P - 0.8 * ATR
-    (4.0, 0.6),  # gain >= 4%  -> stop = P - 0.6 * ATR
-    (7.0, 0.4),  # gain >= 7%  -> stop = P - 0.4 * ATR
+    (1.8, 0.9),   # dès +1.8% ⇒ stop = P - 0.9*ATR
+    (3.5, 0.6),
+    (6.0, 0.45),
 ]
 TRAIL_BE_AFTER = 1.5  # lock BE dès ~TP1 (≥ +1.5%)
 # --- Stops init en % ---
@@ -994,46 +994,67 @@ def _last_two_finite(values):
         return float(finite[-2]), float(finite[-1])
     return float('nan'), float('nan')
 
+def is_bearish_engulfing_5m(k5):
+    """
+    Englobante baissière sur 5m en utilisant les 2 DERNIÈRES bougies COMPLÈTES.
+    Conditions :
+      - bougie -2 verte (close > open)
+      - bougie -1 rouge (close < open)
+      - open(-1) >= close(-2) ET close(-1) <= open(-2)
+    """
+    if not k5 or len(k5) < 3:
+        return False
+    a = k5[-3]  # bougie -2 (complète)
+    b = k5[-2]  # bougie -1 (complète)
+    open_a, close_a = float(a[1]), float(a[4])
+    open_b, close_b = float(b[1]), float(b[4])
+    return (close_a > open_a) and (close_b < open_b) and (open_b >= close_a) and (close_b <= open_a)
+
 def fast_exit_5m_trigger(symbol: str, entry: float, current_price: float):
     """
     Sortie dynamique (timeframe 5m) :
-    - Si gain >= +1% ET (RSI(5m) chute > 5 pts OU MACD(5m) croise à la baisse) -> True
+    - Si gain >= +0.8% ET (RSI(5m) chute > 5 pts OU MACD croise baissier OU bearish engulfing 5m) -> True
     Retourne (trigger: bool, info: dict)
     """
     try:
         if entry <= 0 or current_price is None:
             return False, {}
         gain_pct = ((current_price - entry) / entry) * 100.0
-        if gain_pct < 1.0:
+        if gain_pct < 0.8:
             return False, {"gain_pct": gain_pct}
 
         k5 = get_cached(symbol, '5m', limit=60)
         if not k5 or len(k5) < 20:
             return False, {"gain_pct": gain_pct}
 
-        closes5 = [float(k[4]) for k in k5]
+        # On travaille sur les bougies COMPLÈTES
+        closes5 = [float(k[4]) for k in k5[:-1]] if len(k5) >= 2 else [float(k5[-1][4])]
 
-        # RSI(5m) : chute entre les 2 dernières clôtures
+        # RSI(5m) : chute entre les 2 dernières clôtures complètes
         rsi5_series = rsi_tv_series(closes5, period=14)
         rsi_prev, rsi_now = _last_two_finite(rsi5_series)
         rsi_drop = (not np.isnan(rsi_prev) and not np.isnan(rsi_now) and (rsi_prev - rsi_now) > 5.0)
 
-        # MACD(5m) : croisement baissier récent
+        # MACD(5m) : croisement baissier récent (entre -2 et -1 complètes)
         macd_now,  signal_now  = compute_macd(closes5)
         macd_prev, signal_prev = compute_macd(closes5[:-1])
         macd_cross_down = (macd_prev >= signal_prev) and (macd_now < signal_now)
 
-        trigger = gain_pct >= 1.0 and (rsi_drop or macd_cross_down)
+        # Bearish engulfing 5m (sur les 2 dernières bougies complètes)
+        bearish_5m = is_bearish_engulfing_5m(k5)
+
+        trigger = gain_pct >= 0.8 and (rsi_drop or macd_cross_down or bearish_5m)
         return trigger, {
             "gain_pct": gain_pct,
             "rsi5_prev": rsi_prev, "rsi5_now": rsi_now,
             "rsi_drop": (rsi_prev - rsi_now) if (not np.isnan(rsi_prev) and not np.isnan(rsi_now)) else None,
             "macd5": macd_now, "signal5": signal_now,
             "macd5_prev": macd_prev, "signal5_prev": signal_prev,
-            "macd_cross_down": macd_cross_down
+            "macd_cross_down": macd_cross_down,
+            "bearish_engulfing_5m": bearish_5m
         }
     except Exception:
-        return False, {}    
+        return False, {}  
 
 
 def detect_breakout_retest(closes, highs, lookback=10, tol=0.003):
