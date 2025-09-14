@@ -126,6 +126,7 @@ def _binance_get_sync(path, params=None):
     base = BINANCE_BASES[_base_idx]; url = f"{base}{path}"
     with SESSION_LOCK:
         return SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
+
         
 async def binance_get_async(path, params=None, max_tries=6):
     for attempt in range(max_tries):
@@ -274,6 +275,7 @@ btc_block_until  = None   # datetime UTC jusqu’à laquelle on bloque les alts
 btc_block_reason = ""     # mémo de la raison (pour logs)
 # === Cache par itération pour limiter les requêtes ===
 symbol_cache = {}  # {"BTCUSDT": {"1h": [...], "4h": [...], "15m": [...], "5m": [...]} }
+hold_buffer = {}
 
 
 def load_trades():
@@ -647,12 +649,12 @@ def anti_spike_check_std(klines, price, atr_period=14):
 
 def confirm_15m_after_signal(symbol, breakout_level=None, ema25_1h=None):
     # exiger les 2 dernières bougies 15m complètes
-    kl = get_cached(symbol, "15m", 20)
-    if len(kl) < 3:
+    k15 = get_cached(symbol, "15m", 20)
+    if len(k15) < 3:
         return False
-    closes = [float(kl[-2][4]), float(kl[-3][4])]
-    ok_level = breakout_level and all(c >= breakout_level for c in closes)
-    ok_ema   = ema25_1h and all(c >= ema25_1h * 0.999 for c in closes)
+    closes = [float(k15[-2][4]), float(k15[-3][4])]
+    ok_level = (breakout_level is not None) and all(c >= breakout_level for c in closes)
+    ok_ema   = (ema25_1h is not None) and all(c >= ema25_1h * 0.999 for c in closes)
     return ok_level or ok_ema
 
 def compute_ema(prices, period=200):
@@ -1441,10 +1443,9 @@ async def process_symbol(symbol):
                 
         # ----- Garde-fous -----
         slots = allowed_trade_slots("standard")
-        if len(trades) >= slots:
-            log_refusal(symbol, f"Nombre max de trades atteint dynamiquement ({len(trades)}/{slots})")
+        if _nb_trades("standard") >= slots:
+            log_refusal(symbol, f"Max trades standard atteints ({_nb_trades('standard')}/{slots})")
             return
-
 
         # --- Low-liquidity session -> SOFT ---
         ok_session, _sess = is_active_liquidity_session(symbol=symbol)
@@ -1530,11 +1531,13 @@ async def process_symbol(symbol):
         label_conf = label_confidence(confidence)
 
         # --- Stop provisoire pour le sizing (même logique que l'entrée) ---
-        volatility      = get_volatility(atr, price)  # atr/price
-        sl_pct_sizing   = pick_sl_pct(volatility, INIT_SL_PCT_STD_MIN, INIT_SL_PCT_STD_MAX)
-        stop_for_sizing = price * (1.0 - sl_pct_sizing)
+        # --- Stop initial ATR (plus large, moins de faux stops) ---
+        ATR_INIT_MULT_STD = 1.2
+        sl_initial = price - ATR_INIT_MULT_STD * atr
+        # sécurité: ne jamais dépasser le prix (et >= 0)
+        sl_initial = max(0.0, min(sl_initial, price * 0.999))
 
-        position_pct = position_pct_from_risk(price, stop_for_sizing)
+        position_pct = position_pct_from_risk(price, sl_initial)
 
         # --- Décision d'achat (standard) avec filtre 15m ---
         brk_ok, br_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
@@ -1556,7 +1559,7 @@ async def process_symbol(symbol):
                 log_refusal(symbol, "Anti-chasse: mèche haute dominante sur la bougie 1h d'entrée")
                 return
 
-            if not confirm_15m_after_signal(k15, breakout_level=br_level, ema25_1h=ema25, tol=0.001):
+            if not confirm_15m_after_signal(symbol, breakout_level=br_level, ema25_1h=ema25):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > niveau de retest OU > EMA25(1h) ±0.1%")
                 return
 
@@ -1596,7 +1599,7 @@ async def process_symbol(symbol):
 
 
                 # pour PB: on exige close 15m > EMA25(1h) ±0.1%
-                if not confirm_15m_after_signal(k15, breakout_level=None, ema25_1h=ema25, tol=0.001):
+                if not confirm_15m_after_signal(symbol, breakout_level=None, ema25_1h=ema25):
                     log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (PB)")
                     return
 
@@ -1904,7 +1907,7 @@ async def process_symbol(symbol):
             trade_id = make_trade_id(symbol)
 
             # 🔁 réutilise le stop calculé plus haut pour le sizing
-            sl_initial = stop_for_sizing   # <= au lieu de recalculer avec pick_sl_pct(...)
+            sl_initial = sl_initial   # <= au lieu de recalculer avec pick_sl_pct(...)
 
             trades[symbol] = {
                 "entry": price,
@@ -2038,10 +2041,9 @@ async def process_symbol_aggressive(symbol):
 
         # ---- Garde-fous ----
         slots = allowed_trade_slots("aggressive")
-        if len(trades) >= slots:
-            log_refusal(symbol, f"Nombre max de trades atteint dynamiquement ({len(trades)}/{slots})")
+        if _nb_trades("aggressive") >= slots:
+            log_refusal(symbol, f"Max trades aggressive atteints ({_nb_trades('aggressive')}/{slots})")
             return
-
         # --- Low-liquidity session -> SOFT ---
         # init pénalités/notes (doit être fait AVANT de s'en servir)
         indicators_soft_penalty = 0
@@ -2198,12 +2200,12 @@ async def process_symbol_aggressive(symbol):
         if score < 7:
             return
 
-        # ---- Sizing au risque (aggressive) ----
-        volatility_aggr    = get_volatility(atr, price)  # atr/price (1h)
-        sl_pct_sizing_aggr = pick_sl_pct(volatility_aggr, INIT_SL_PCT_AGR_MIN, INIT_SL_PCT_AGR_MAX)
-        stop_for_sizing    = price * (1.0 - sl_pct_sizing_aggr)
-        position_pct       = position_pct_from_risk(price, stop_for_sizing, score)
+        ATR_INIT_MULT_AGR = 1.2
+        sl_initial = price - ATR_INIT_MULT_AGR * atr
+        sl_initial = max(0.0, min(sl_initial, price * 0.999))
 
+        position_pct = position_pct_from_risk(price, sl_initial, score)
+        
         # Anti-chasse (wick 1h) + confirmation 15m + entrée limit
         if is_wick_hunt_1h(klines[-1]):
             log_refusal(symbol, "Anti-chasse mèche 1h dominante (soft)")
@@ -2212,7 +2214,7 @@ async def process_symbol_aggressive(symbol):
 
 
         br_level_for_check = last10_high if near_level else None
-        if not confirm_15m_after_signal(k15, breakout_level=br_level_for_check, ema25_1h=ema25, tol=0.001):
+        if not confirm_15m_after_signal(symbol, breakout_level=br_level_for_check, ema25_1h=ema25):
             if br_level_for_check is not None:
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > niveau de retest (aggressive)")
             else:
@@ -2717,6 +2719,18 @@ async def send_daily_summary():
     except Exception as e:
         await tg_send(f"⚠️ Échec d’envoi de trade_audit.csv : {e}")
 
+def flush_hold_buffer():
+    """Vide le buffer HOLD et applique les signaux en attente"""
+    global hold_buffer
+    if not hold_buffer:
+        return
+    for sym, sig in list(hold_buffer.items()):
+        try:
+            process_symbol(sym, sig)
+        except Exception as e:
+            print(f"⚠️ flush_hold_buffer {sym}: {e}")
+    hold_buffer.clear()
+
 async def main_loop():
     global trades  # ✅ déclaré dès le début
 
@@ -2793,6 +2807,8 @@ async def main_loop():
             # analyses
             await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
             await asyncio.gather(*(process_symbol_aggressive(s) for s in SYMBOLS if s not in trades))
+
+            await flush_hold_buffer()
 
             print("✔️ Itération terminée", flush=True)
 
