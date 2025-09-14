@@ -1266,6 +1266,21 @@ def update_market_state():
         # en cas de pépin, on ne bloque pas le bot
         pass
 
+def btc_market_drift() -> bool:
+    """
+    True si BTC est en dérive baissière en 1h :
+    - close < EMA200(1h)
+    - MACD < signal
+    Utilisé pour bloquer les *ALTS* uniquement (pas BTC).
+    """
+    k = market_cache.get("BTCUSDT", [])
+    if not k or len(k) < 210:
+        return False
+    closes = [float(x[4]) for x in k]
+    ema200_btc = ema_tv(closes, 200)
+    macd_btc, signal_btc = compute_macd(closes)
+    return (closes[-1] < ema200_btc) and (macd_btc < signal_btc)
+
 async def process_symbol(symbol):
     try:
         # --- Auto-close SOUPLE (ne coupe plus automatiquement à 12h) ---
@@ -1442,6 +1457,11 @@ async def process_symbol(symbol):
                 log_refusal(symbol, f"Filtre régime BTC: {why}")
                 return
 
+        # --- BTC market drift (alts only) ---
+        if symbol != "BTCUSDT" and btc_market_drift():
+            log_refusal(symbol, "BTC drift (1h < EMA200 & MACD<signal)")
+            return
+            
         # — Pré-filtre: prix trop loin de l’EMA25 (plus strict)
         EMA25_PREFILTER_STD = (
             1.03 if symbol in {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","LINKUSDT"} else 1.05
