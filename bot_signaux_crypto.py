@@ -2719,17 +2719,20 @@ async def send_daily_summary():
     except Exception as e:
         await tg_send(f"⚠️ Échec d’envoi de trade_audit.csv : {e}")
 
-def flush_hold_buffer():
-    """Vide le buffer HOLD et applique les signaux en attente"""
-    global hold_buffer
+async def flush_hold_buffer():
+    """Envoie les messages HOLD accumulés puis vide le buffer."""
     if not hold_buffer:
         return
-    for sym, sig in list(hold_buffer.items()):
-        try:
-            process_symbol(sym, sig)
-        except Exception as e:
-            print(f"⚠️ flush_hold_buffer {sym}: {e}")
-    hold_buffer.clear()
+    try:
+        for sym, msgs in list(hold_buffer.items()):
+            if not msgs:
+                continue
+            # on compacte par symbole (dernier 10 max)
+            chunk = "\n".join(msgs[-10:])
+            await tg_send(f"📡 HOLD {sym}\n{chunk}")
+        hold_buffer.clear()
+    except Exception as e:
+        print(f"⚠️ flush_hold_buffer: {e}")
 
 async def main_loop():
     global trades  # ✅ déclaré dès le début
@@ -2808,9 +2811,11 @@ async def main_loop():
             await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
             await asyncio.gather(*(process_symbol_aggressive(s) for s in SYMBOLS if s not in trades))
 
+            # flush du buffer HOLD
             await flush_hold_buffer()
 
             print("✔️ Itération terminée", flush=True)
+
 
         except Exception as e:
             await tg_send(f"⚠️ Erreur : {e}")
