@@ -29,6 +29,7 @@ def _parse_dt_flex(s: str):
 from telegram import Bot
 import nest_asyncio
 import traceback
+from dotenv import load_dotenv; load_dotenv()
 import csv
 import os, json
 import threading
@@ -120,11 +121,12 @@ def binance_get(path, params=None, max_tries=6):
     return None
 
 # --- versions async (non bloquantes) ---
+SESSION_LOCK = threading.Lock()
 def _binance_get_sync(path, params=None):
-    base = BINANCE_BASES[_base_idx]
-    url = f"{base}{path}"
-    return SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
-
+    base = BINANCE_BASES[_base_idx]; url = f"{base}{path}"
+    with SESSION_LOCK:
+        return SESSION.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        
 async def binance_get_async(path, params=None, max_tries=6):
     for attempt in range(max_tries):
         base = BINANCE_BASES[_base_idx]
@@ -1281,6 +1283,14 @@ def btc_market_drift() -> bool:
     macd_btc, signal_btc = compute_macd(closes)
     return (closes[-1] < ema200_btc) and (macd_btc < signal_btc)
 
+def _nb_trades(strategy=None):
+    """
+    Compte les trades actifs.
+    - strategy=None : tous
+    - strategy="standard" ou "aggressive" : seulement ceux de ce type
+    """
+    return sum(1 for t in trades.values() if strategy is None or t.get("strategy") == strategy)
+
 async def process_symbol(symbol):
     try:
         # --- Auto-close SOUPLE (ne coupe plus automatiquement à 12h) ---
@@ -1935,6 +1945,15 @@ async def process_symbol(symbol):
     except Exception as e:
         print(f"❌ Erreur {symbol}: {e}", flush=True)
         traceback.print_exc()
+
+def _nb_trades(strategy=None):
+    """
+    Compte les trades actifs.
+    - strategy=None : tous
+    - strategy="standard" ou "aggressive" : seulement ceux de ce type
+    """
+    return sum(1 for t in trades.values() if strategy is None or t.get("strategy") == strategy)
+
 
 async def process_symbol_aggressive(symbol):
     try:
