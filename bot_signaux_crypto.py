@@ -1258,16 +1258,9 @@ async def process_symbol(symbol):
         if symbol in trades and trades[symbol].get("strategy", "standard") == "standard":
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             elapsed_h = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
+            # ❌ plus d’auto-BE avant 12h — le BE est géré uniquement par TRAIL_BE_AFTER/TP1
+            pass
 
-            if elapsed_h >= AUTO_CLOSE_MIN_H:
-                # On ne force plus une clôture horaire.
-                # Les sorties se feront via SMART_TIMEOUT / momentum cassé / fast-exit 5m / trailing.
-                pass
-            else:
-                # On laisse courir : sécuriser au moins à BE si possible
-                if "stop" in trades[symbol]:
-                    trades[symbol]["stop"] = max(trades[symbol]["stop"], trades[symbol]["entry"])
-                save_trades()
 
         # ---------- Analyse standard ----------
         print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
