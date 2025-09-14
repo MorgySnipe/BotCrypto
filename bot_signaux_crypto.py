@@ -2415,23 +2415,23 @@ async def process_symbol_aggressive(symbol):
         ).total_seconds() / 3600
 
 
-            # --- TP progressifs (AGGRESSIVE) basés sur l'ATR ---
-            # Seuils ATR en % du prix (convertis via ATR/entry)
-            if "tp_times" not in trades[symbol]:
-                trades[symbol]["tp_times"] = {}
+        # --- TP progressifs (AGGRESSIVE) basés sur l'ATR ---
+        # Seuils ATR en % du prix (convertis via ATR/entry)
+        if "tp_times" not in trades[symbol]:
+            trades[symbol]["tp_times"] = {}
 
-            for tp_idx, atr_mult in enumerate(TP_ATR_MULTS_AGR, start=1):
-                # seuil de gain (en %) correspondant à atr_mult * ATR
-                threshold_pct = (atr_mult * atr_val_current / max(entry, 1e-9)) * 100.0
+        for tp_idx, atr_mult in enumerate(TP_ATR_MULTS_AGR, start=1):
+            # seuil de gain (en %) correspondant à atr_mult * ATR
+            threshold_pct = (atr_mult * atr_val_current / max(entry, 1e-9)) * 100.0
 
-                if gain >= threshold_pct and not trades[symbol].get(f"tp{tp_idx}", False):
-                    # anti-double déclenchement : 120s entre TP successifs
-                    last_tp_time = trades[symbol]["tp_times"].get(f"tp{tp_idx-1}") if tp_idx > 1 else None
-                    if isinstance(last_tp_time, str):
-                        try:
-                            last_tp_time = datetime.fromisoformat(last_tp_time)
-                        except Exception:
-                            last_tp_time = None
+            if gain >= threshold_pct and not trades[symbol].get(f"tp{tp_idx}", False):
+                # anti-double déclenchement : 120s entre TP successifs
+                last_tp_time = trades[symbol]["tp_times"].get(f"tp{tp_idx-1}") if tp_idx > 1 else None
+                if isinstance(last_tp_time, str):
+                    try:
+                        last_tp_time = datetime.fromisoformat(last_tp_time)
+                    except Exception:
+                        last_tp_time = None
 
                     if (not last_tp_time) or ((datetime.now(timezone.utc) - last_tp_time).total_seconds() >= 120):
                         trades[symbol][f"tp{tp_idx}"] = True
