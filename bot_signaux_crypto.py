@@ -1388,15 +1388,15 @@ async def process_symbol(symbol):
 
         # --- filtre de marché BTC pour les ALT ---
         if symbol != "BTCUSDT":
-            # récupère l’état BTC 1h (tu as déjà update_market_state(); sinon recalcule ici)
             btc = market_cache.get("BTCUSDT", [])
             if len(btc) >= 50:
-                btc_rsi = rsi([float(k[4]) for k in btc], 14)  # adapte au nom de ta fonction RSI
-                macd, signal, _ = macd_series([float(k[4]) for k in btc])  # idem pour ta MACD
-                if (btc_rsi is not None and btc_rsi < 50) or (macd is not None and signal is not None and macd <= signal):
+                closes_btc = [float(k[4]) for k in btc]
+                btc_rsi = rsi_tv(closes_btc, 14)               # ✅ RSI scalaire
+                btc_macd, btc_signal = compute_macd(closes_btc) # ✅ MACD/Signal
+                if (btc_rsi < 50) or (btc_macd <= btc_signal):
                     log_refusal(symbol, "Blocage ALT: BTC faible (RSI<50 ou MACD<=Signal)")
                     return
-
+                    
         # --- 4h ---
         klines_4h = get_cached(symbol, '4h')
         if not klines_4h or len(klines_4h) < 50:
@@ -1666,7 +1666,7 @@ async def process_symbol(symbol):
             else:
                 trail_multiplier = 0.8   # tendance faible → stop large
 
-            new_stop = price * (1 - trail_multiplier * atr_val_current / price)
+            new_stop = price * (1 - trail_multiplier * atr / price)
 
             # on garde le stop le plus haut (jamais descendre)
             trades[symbol]["stop"] = max(stop, new_stop)
@@ -1835,7 +1835,7 @@ async def process_symbol(symbol):
 
             # === TP progressifs (basés sur l'ATR) ===
             # ATR -> % du prix d'entrée pour comparer avec `gain` (qui est en %)
-            atr_pct = (atr_val_current / max(entry, 1e-9)) * 100.0
+            atr_pct = (atr / max(entry, 1e-9)) * 100.0
 
             # Seuils en % pour TP1/TP2/TP3 selon l'ATR (standard)
             tp_levels = {i + 1: mult * atr_pct for i, mult in enumerate(TP_ATR_MULTS_STD)}
@@ -2117,11 +2117,9 @@ async def process_symbol_aggressive(symbol):
             btc_klines = market_cache.get("BTCUSDT", [])
             if len(btc_klines) >= 50:
                 closes_btc = [float(k[4]) for k in btc_klines]
-                btc_rsi = rsi_tv_series(closes_btc, period=14)
+                btc_rsi = rsi_tv(closes_btc, period=14)           # ✅ RSI scalaire
                 btc_macd, btc_signal = compute_macd(closes_btc)
-                if (btc_rsi is not None and btc_rsi < 50) or (
-                    btc_macd is not None and btc_signal is not None and btc_macd <= btc_signal
-                ):
+                if (btc_rsi < 50) or (btc_macd <= btc_signal):
                     log_refusal(symbol, "Blocage ALT: BTC faible (RSI<50 ou MACD<=Signal)")
                     return
 
@@ -2197,11 +2195,6 @@ async def process_symbol_aggressive(symbol):
         ema50_4h  = ema_tv(c4, 50)
         ema200_4h = ema_tv(c4, 200)
         if c4[-1] < ema50_4h or ema50_4h < ema200_4h:
-            return
-
-        # --- score minimum (aggressive) ---
-        if confidence < 7:
-            log_refusal(symbol, f"Score insuffisant après pénalités (aggro): {confidence:.1f} < 7")
             return
 
         # ----- Breakout + Retest (UNIQUE) -----
@@ -2334,7 +2327,6 @@ async def process_symbol_aggressive(symbol):
         # ---- Entrée ----
         trade_id = make_trade_id(symbol)
         ema200_1h = ema200
-        sl_initial = stop_for_sizing
 
         trades[symbol] = {
             "entry": price,
