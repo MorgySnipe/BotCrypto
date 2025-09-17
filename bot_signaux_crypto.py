@@ -264,6 +264,44 @@ def daily_pnl_pct_utc() -> float:
 
 from telegram.request import HTTPXRequest
 
+def pnl_7d_pct_utc() -> float:
+    """
+    Somme des P&L (%) des trades clôturés sur les 7 derniers jours (UTC).
+    Utilise `history` (persisté).
+    """
+    if not history:
+        return 0.0
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=7)
+    total = 0.0
+    for h in history:
+        ts = _parse_dt_flex(h.get("time", ""))
+        if not ts:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        ts = ts.astimezone(timezone.utc)
+        if ts >= cutoff:
+            try:
+                total += float(h.get("result", 0.0))
+            except Exception:
+                pass
+    return total
+
+def perf_cap_max_trades(strategy: str) -> int:
+    """
+    Cap 'machine à sous':
+    - Si P&L 7j < 0  → cap bas (prudence)
+      standard: 1   | aggressive: 1
+    - Si P&L 7j ≥ 0 → cap haut
+      standard: 3   | aggressive: 4
+    """
+    pnl7 = pnl_7d_pct_utc()
+    if pnl7 < 0:
+        return 1 if strategy == "standard" else 1
+    else:
+        return 3 if strategy == "standard" else 4
+
 def build_tg_bot(connect=20, read=60, pool=20):
     req = HTTPXRequest(connect_timeout=connect, read_timeout=read, pool_timeout=pool)
     return Bot(token=TELEGRAM_TOKEN, request=req)
@@ -1361,6 +1399,21 @@ def update_market_state():
         # en cas de pépin, on ne bloque pas le bot
         pass
 
+def btc_is_bullish_strong() -> bool:
+    """
+    True si BTC(1h) est franchement haussier :
+    RSI > 50, MACD > Signal, ADX > 22.
+    Retourne False si info manquante.
+    """
+    try:
+        b = MARKET_STATE["btc"]
+        req = (b["rsi"], b["macd"], b["signal"], b["adx"])
+        if any(v is None for v in req):
+            return False
+        return (b["rsi"] > 50) and (b["macd"] > b["signal"]) and (b["adx"] > 22)
+    except Exception:
+        return False
+
 def btc_market_drift() -> bool:
     """
     True si BTC est en dérive baissière en 1h :
@@ -1544,7 +1597,7 @@ async def process_symbol(symbol):
                 return
                 
         # ----- Garde-fous -----
-        slots = allowed_trade_slots("standard")
+        slots = min(allowed_trade_slots("standard"), perf_cap_max_trades("standard"))
         if _nb_trades("standard") >= slots:
             log_refusal(symbol, f"Max trades standard atteints ({_nb_trades('standard')}/{slots})")
             return
@@ -1759,7 +1812,8 @@ async def process_symbol(symbol):
             # --- Timeout intelligent (STANDARD) ---
             if (elapsed_time >= SMART_TIMEOUT_EARLIEST_H_STD
                 and gain < SMART_TIMEOUT_MIN_GAIN_STD
-                and not trades[symbol].get("tp1", False)):
+                and not trades[symbol].get("tp1", False)
+                and not btc_is_bullish_strong()):
                 k1h_now = get_cached(symbol, '1h')
                 trig, why = smart_timeout_check(k1h_now, entry,
                                                 window_h=SMART_TIMEOUT_WINDOW_H,
@@ -2080,7 +2134,7 @@ async def process_symbol_aggressive(symbol):
     try:
         # --- Paramètres VOLUME (aggressive) ---
         MIN_VOLUME_LOCAL = 50_000       # fallback local si pas de médiane 30j
-        VOL_MED_MULT_AGR = 0.05             # 5% de la médiane 30j (au lieu de 10%)
+        VOL_MED_MULT_AGR = 0.15             # 15% de la médiane 30j (filtre plus réaliste)
         VOL_CONFIRM_MULT_AGR = 0.85         
         VOL_CONFIRM_LOOKBACK_AGR = 12       # 15m: MA12 (au lieu de 20)
 
@@ -2169,7 +2223,7 @@ async def process_symbol_aggressive(symbol):
                     return
 
         # ---- Garde-fous ----
-        slots = allowed_trade_slots("aggressive")
+        slots = min(allowed_trade_slots("aggressive"), perf_cap_max_trades("aggressive"))
         if _nb_trades("aggressive") >= slots:
             log_refusal(symbol, f"Max trades aggressive atteints ({_nb_trades('aggressive')}/{slots})")
             return
@@ -2543,7 +2597,8 @@ async def process_symbol_aggressive(symbol):
         # --- Timeout intelligent (AGGRESSIVE) ---
         if (elapsed_time >= SMART_TIMEOUT_EARLIEST_H_AGR
             and gain < SMART_TIMEOUT_MIN_GAIN_AGR
-            and not trades[symbol].get("tp1", False)):
+            and not trades[symbol].get("tp1", False)
+            and not btc_is_bullish_strong()):
             k1h_now = get_cached(symbol, '1h')
             trig, why = smart_timeout_check(k1h_now, entry,
                                             window_h=SMART_TIMEOUT_WINDOW_H,
