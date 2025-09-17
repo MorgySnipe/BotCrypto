@@ -55,6 +55,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # Fichiers persistants
 PERSIST_FILE     = os.path.join(DATA_DIR, "trades_state.json")
 CSV_AUDIT_FILE   = os.path.join(DATA_DIR, "trade_audit.csv")
+HISTORY_FILE     = os.path.join(DATA_DIR, "history.json")
 file_lock = threading.Lock()
 REFUSAL_LOG_FILE = os.path.join(DATA_DIR, "refusal_log.csv")
 LOG_FILE         = os.path.join(DATA_DIR, "trade_log.csv")
@@ -303,6 +304,23 @@ def save_trades():
     except Exception as e:
         print(f"⚠️ save_trades: {e}")
 
+def load_history():
+    try:
+        with open(HISTORY_FILE, "r") as f:
+            data = json.load(f)
+        # sécurité : liste de dicts
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def save_history():
+    try:
+        with file_lock:
+            with open(HISTORY_FILE, "w") as f:
+                json.dump(history, f)
+    except Exception as e:
+        print(f"⚠️ save_history: {e}")
+
 def log_trade_csv(row: dict):
     header_needed = (not os.path.exists(CSV_AUDIT_FILE) or os.path.getsize(CSV_AUDIT_FILE) == 0)
     with file_lock:
@@ -474,18 +492,39 @@ def safe_message(text) -> str:
 
 
 async def tg_send(text: str, chat_id: int = CHAT_ID):
-    """Envoi Telegram simple et bourrin (5 tentatives)."""
+    """
+    Envoi Telegram robuste avec gestion explicite :
+    - RetryAfter : on respecte e.retry_after (sec)
+    - TimedOut / NetworkError : backoff exponentiel doux
+    - Autres erreurs : backoff puis retry limité
+    """
     text = safe_message(text)
-    for attempt in range(5):
+    max_tries = 6
+    base = 0.8  # backoff de base
+
+    for attempt in range(1, max_tries + 1):
         try:
             await bot.send_message(chat_id=chat_id, text=text)
             return True
+        except RetryAfter as e:
+            wait_s = getattr(e, "retry_after", 3)
+            print(f"[tg_send] RetryAfter: wait {wait_s}s (try#{attempt}/{max_tries})")
+            await asyncio.sleep(float(wait_s) + 0.25)
+        except TimedOut:
+            wait_s = min(8, base * (2 ** (attempt - 1)))
+            print(f"[tg_send] TimedOut: retry in {wait_s:.1f}s (try#{attempt}/{max_tries})")
+            await asyncio.sleep(wait_s)
+        except NetworkError as e:
+            wait_s = min(10, base * (2 ** (attempt - 1)))
+            print(f"[tg_send] NetworkError: {e} → retry in {wait_s:.1f}s (try#{attempt}/{max_tries})")
+            await asyncio.sleep(wait_s)
         except Exception as e:
-            print(f"[tg_send] tentative {attempt+1}/5 échouée: {e}")
-            await asyncio.sleep(1 + attempt)  # backoff: 1s,2s,3s...
-    print("[tg_send] échec après 5 tentatives")
-    return False
+            wait_s = min(12, base * (2 ** (attempt - 1)))
+            print(f"[tg_send] Exception: {e} → retry in {wait_s:.1f}s (try#{attempt}/{max_tries})")
+            await asyncio.sleep(wait_s)
 
+    print("[tg_send] échec après retries")
+    return False
 
 async def tg_send_doc(path: str, caption: str = "", chat_id: int = CHAT_ID):
     """Envoi simple de fichier Telegram (sans anti-flood)."""
@@ -649,6 +688,32 @@ def anti_spike_check_std(klines, price, atr_period=14):
 
     dyn_limit = min(ANTI_SPIKE_MAX_PCT, max(ANTI_SPIKE_UP_STD, ANTI_SPIKE_ATR_MULT * atr_pct))
     return (spike_pct <= dyn_limit), float(spike_pct), float(dyn_limit)
+
+def check_spike_and_wick(symbol: str, klines_1h, price: float, mode_label="std") -> bool:
+    """
+    Combine anti-spike 1h et mèche haute dominante dans un seul log.
+    Retourne True si OK, False si refus (avec log_refusal unique).
+    """
+    try:
+        ok_spike, spike_up_pct, limit_pct = anti_spike_check_std(klines_1h, price)
+        wick = is_wick_hunt_1h(klines_1h[-1]) if klines_1h else False
+
+        if ok_spike and not wick:
+            return True
+
+        # Compose un message unique
+        reasons = []
+        if not ok_spike:
+            reasons.append(f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}%")
+        if wick:
+            reasons.append("mèche_haute_dominante")
+
+        log_refusal(symbol, f"Anti-excès 1h ({mode_label})", trigger=" | ".join(reasons))
+        return False
+    except Exception as _:
+        # En cas d’erreur, ne bloque pas (fail-open)
+        return True
+
 
 def confirm_15m_after_signal(symbol, breakout_level=None, ema25_1h=None):
     # exiger les 2 dernières bougies 15m complètes
@@ -1151,6 +1216,9 @@ def log_trade(symbol, side, price, gain=0):
             "entry": trades.get(symbol, {}).get("entry", 0),
             "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         })
+        # ✅ persist
+        save_history()
+        
 # ====== CSV détaillé (audit) ======
 CSV_AUDIT_FIELDS = [
     "ts_utc","trade_id","symbol","event","strategy","version",
@@ -1522,12 +1590,9 @@ async def process_symbol(symbol):
             return
 
 
-        # [#anti-spike-standard]
-        ok_spike, spike_up_pct, limit_pct = anti_spike_check_std(klines, price)
-        if not ok_spike:
-            log_refusal(symbol, "Anti-spike 1h (std)", trigger=f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}%")
+        if not check_spike_and_wick(symbol, klines, price, mode_label="std"):
             return
-      
+            
         # [#volume-confirm-standard]
         k15 = get_cached(symbol, VOL_CONFIRM_TF, limit=max(25, VOL_CONFIRM_LOOKBACK + 5))
         vols15 = volumes_series(k15, quote=True)
@@ -1588,11 +1653,6 @@ async def process_symbol(symbol):
                 log_refusal(symbol, f"Filtre 15m non validé (BRK): {det15}")
                 return
 
-            # --- Anti-chasse (wick 1h) + confirmation 15m + entrée limit resserrée ---
-            if is_wick_hunt_1h(klines[-1]):
-                log_refusal(symbol, "Anti-chasse: mèche haute dominante sur la bougie 1h d'entrée")
-                return
-
             if not confirm_15m_after_signal(symbol, breakout_level=br_level, ema25_1h=ema25):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > niveau de retest OU > EMA25(1h) ±0.1%")
                 return
@@ -1624,14 +1684,7 @@ async def process_symbol(symbol):
                 if not ok15:
                     log_refusal(symbol, f"Filtre 15m non validé (PB EMA25): {det15}")
                     return
-
-                # --- Anti-chasse & confirmation 15m ---
-                if is_wick_hunt_1h(klines[-1]):
-                    log_refusal(symbol, "Anti-chasse mèche 1h dominante (soft)")
-                    reasons += ["⚠️ Mèche 1h dominante (soft)"]
-                    # pas de return -> on continue
-
-
+                    
                 # pour PB: on exige close 15m > EMA25(1h) ±0.1%
                 if not confirm_15m_after_signal(symbol, breakout_level=None, ema25_1h=ema25):
                     log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (PB)")
@@ -2022,14 +2075,6 @@ async def process_symbol(symbol):
         print(f"❌ Erreur {symbol}: {e}", flush=True)
         traceback.print_exc()
 
-def _nb_trades(strategy=None):
-    """
-    Compte les trades actifs.
-    - strategy=None : tous
-    - strategy="standard" ou "aggressive" : seulement ceux de ce type
-    """
-    return sum(1 for t in trades.values() if strategy is None or t.get("strategy") == strategy)
-
 
 async def process_symbol_aggressive(symbol):
     try:
@@ -2241,6 +2286,10 @@ async def process_symbol_aggressive(symbol):
             log_refusal(symbol, "Anti-spike (aggressive)", trigger=f"bougie_1h={spike_up_pct:.2f}%, seuil={ANTI_SPIKE_UP_AGR:.1f}%")
             return
 
+        # Regroupement anti-spike + anti-chasse (mèche 1h)
+        if not check_spike_and_wick(symbol, klines, price, mode_label="aggro"):
+            return
+            
         # ---- Confirmation volume 15m (aggressive) ----
         k15 = get_cached(symbol, '15m', limit=max(25, VOL_CONFIRM_LOOKBACK_AGR + 5))
         vols15 = volumes_series(k15, quote=True)
@@ -2291,13 +2340,6 @@ async def process_symbol_aggressive(symbol):
 
         position_pct = position_pct_from_risk(price, sl_initial, score)
         
-        # Anti-chasse (wick 1h) + confirmation 15m + entrée limit
-        if is_wick_hunt_1h(klines[-1]):
-            log_refusal(symbol, "Anti-chasse mèche 1h dominante (soft)")
-            reasons += ["⚠️ Mèche 1h dominante (soft)"]
-            # pas de return -> on continue
-
-
         br_level_for_check = last10_high if near_level else None
         if not confirm_15m_after_signal(symbol, breakout_level=br_level_for_check, ema25_1h=ema25):
             if br_level_for_check is not None:
@@ -2892,9 +2934,12 @@ async def main_loop():
     except Exception as e:
         print(f"❌ Erreur envoi démarrage: {e}")
 
-    # Charger les trades sauvegardés
+    # Charger les trades + history sauvegardés
     trades.update(load_trades())
-
+    # garde la même liste en mémoire (référence) et remplit depuis disque
+    history_loaded = load_history()
+    history.clear()
+    history.extend(history_loaded)
 
     # hydrater last_trade_time depuis le disque
     for _sym, _t in trades.items():
