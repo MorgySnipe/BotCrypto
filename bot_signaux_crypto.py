@@ -154,8 +154,9 @@ async def get_klines_async(symbol, interval='1h', limit=100):
 
 
 SYMBOLS = [
-    'BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','LINKUSDT','DOGEUSDT',
-    'ADAUSDT','AVAXUSDT','TONUSDT','SUIUSDT','SEIUSDT','TIAUSDT','APTUSDT'
+    'BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT',
+    'XRPUSDT','ADAUSDT','LINKUSDT','AVAXUSDT',
+    'DOTUSDT','DOGEUSDT'
 ]
 INTERVAL = '1h'
 LIMIT = 100
@@ -179,7 +180,7 @@ LEARNING_MODE = True
 ADX_MIN = 15                 # au lieu de 18/22
 RSI_MIN = 50                 # RSI >= 50 accepté
 RSI_MAX = 65                 # RSI <= 65 accepté
-VOL15M_MIN_RATIO = 0.80      # au lieu de 1.0 strict
+VOL15M_MIN_RATIO = 0.60      # au lieu de 1.0 strict
 ANTI_SPIKE_OPEN_MAX = 0.035  # 3.5% max vs open (1h)
 
 # --- Trailing stop harmonisé (ATR TV) ---
@@ -1455,35 +1456,28 @@ async def process_symbol(symbol):
             log_refusal(symbol, "Données 1h insuffisantes")
             return
 
-        # --- Volume 1h anormalement faible vs médiane 30j (si dispo) ---
-        try:
-            vol_now_1h = float(klines[-1][7])  # volume quote de la bougie 1h
+        # --- Volume 1h vs médiane 30j (robuste) ---
+        vol_now_1h = float(klines[-1][7])
 
-            k1h_30d  = get_cached(symbol, '1h', limit=750) or []
-            vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30 jours
+        k1h_30d = get_cached(symbol, '1h', limit=750) or []
+        vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j (720) + bougie courante
 
-            if len(vols_hist) >= 200:
-                med_30d = float(np.median(vols_hist[:-1]))  # médiane sans la bougie en cours
-                # ⛔ filtre ignoré pour BTCUSDT + seuil assoupli 25%
-                if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < VOL_MED_MULT * med_30d:
-                    log_refusal(
-                        symbol,
-                        f"Volume 1h anormalement faible ({vol_now_1h:.0f} < {VOL_MED_MULT:.2f}×med30j {med_30d:.0f})"
-                    )
-                    return
+        VOL_MED_MULT_EFF = 0.10     # 10% de la médiane 30j (plus réaliste)
+        MIN_VOLUME_ABS   = 200_000  # plancher absolu si 30j non dispo
 
-            else:
-                if vol_now_1h < MIN_VOLUME:
-                    log_refusal(symbol, f"Volume 1h trop faible ({vol_now_1h:.0f} < {MIN_VOLUME})")
-                    return
-        except Exception:
-            try:
-                vol_now_1h = float(klines[-1][7])
-                if vol_now_1h < MIN_VOLUME:
-                    log_refusal(symbol, f"Volume 1h trop faible ({vol_now_1h:.0f} < {MIN_VOLUME})")
-                    return
-            except Exception:
-                pass
+        if len(vols_hist) >= 200:
+            med_30d = float(np.median(vols_hist[:-1]))  # médiane SANS la bougie en cours
+            if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d):
+                log_refusal(
+                    symbol,
+                    f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})"
+                )
+                return
+        else:
+            # fallback quand on n'a pas un vrai historique 30j
+            if vol_now_1h < MIN_VOLUME_ABS:
+                log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
+                return
 
 
         closes = [float(k[4]) for k in klines]
@@ -1533,8 +1527,19 @@ async def process_symbol(symbol):
         eth_up = is_uptrend([float(k[4]) for k in market_cache.get('ETHUSDT', [])]) if market_cache.get('ETHUSDT') else False
 
         if not is_market_bullish():
-            log_refusal(symbol, "Marché global baissier (BTC/ETH pas en uptrend)")
-            return
+            b = MARKET_STATE.get("btc", {})
+            e = MARKET_STATE.get("eth", {})
+            btc_ok = b.get("rsi", 50) >= 45 and (b.get("macd", 0) > b.get("signal", 0) or b.get("adx", 0) >= 15)
+            eth_ok = e.get("rsi", 50) >= 45 and (e.get("macd", 0) > e.get("signal", 0) or e.get("adx", 0) >= 15)
+            if not (btc_ok or eth_ok):
+                log_refusal(symbol, "Blocage ALT: BTC & ETH faibles (soft)")
+                return
+            # pénalité (mais on autorise)
+            try:
+                indicators_soft_penalty += 1
+            except NameError:
+                pass
+
 
         supertrend_signal = supertrend_like_on_close(klines)
         indicators_soft_penalty = 0
@@ -1569,10 +1574,17 @@ async def process_symbol(symbol):
 
 
         volatility = get_volatility(atr, price)
-        if volatility < 0.003:
-           log_refusal(symbol, f"Volatilité trop faible (ATR/price={volatility:.4f} < 0.003)")
-           return
-
+        VOL_MIN = 0.002  # test: 0.002 (avant 0.003)
+        if volatility < VOL_MIN:
+            log_refusal(symbol, f"Volatilité faible (ATR/price={volatility:.4f} < {VOL_MIN})")
+            # SOFT: on ne coupe pas directement — on pénalise le score
+            try:
+                indicators_soft_penalty += 1
+            except NameError:
+                pass
+            # si vraiment très faible (<0.0015), on refuse
+            if volatility < 0.0015:
+                return
 
         # --- ADX (standard) assoupli ---
         if adx_value < (ADX_MIN if LEARNING_MODE else 18):
@@ -2166,39 +2178,28 @@ async def process_symbol_aggressive(symbol):
             log_refusal(symbol, "API prix indisponible")
             return
 
-        # --- Volume 1h anormalement faible vs médiane 30j (si dispo) ---
-        try:
-            vol_now_1h = float(klines[-1][7])  # volume quote de la bougie 1h
+        # --- Volume 1h vs médiane 30j (robuste) ---
+        vol_now_1h = float(klines[-1][7])
 
-            # Charger ~30 jours (720 bougies 1h). Si l'endpoint refuse → fallback.
-            k1h_30d  = get_cached(symbol, '1h', limit=750) or []
-            vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j + bougie courante
+        k1h_30d = get_cached(symbol, '1h', limit=750) or []
+        vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j (720) + bougie courante
 
-            if len(vols_hist) >= 200:
-                # médiane sur les 30j SANS la bougie en cours
-                med_30d = float(np.median(vols_hist[:-1]))
-                # ⛔ ignorer pour BTCUSDT + seuil assoupli à 5% (aggressive)
-                if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < VOL_MED_MULT_AGR * med_30d:
-                    log_refusal(
-                        symbol,
-                        f"Volume 1h anormalement faible ({vol_now_1h:.0f} < {VOL_MED_MULT_AGR:.2f}×med30j {med_30d:.0f})",
-                    )
-                    return
+        VOL_MED_MULT_EFF = 0.10     # 10% de la médiane 30j (plus réaliste)
+        MIN_VOLUME_ABS   = 200_000  # plancher absolu si 30j non dispo
 
-            # Fallback si on n'a pas 30j : garde-fou local plus bas
-            if vol_now_1h < MIN_VOLUME_LOCAL:
-                log_refusal(symbol, f"Volume 1h trop faible ({vol_now_1h:.0f} < {MIN_VOLUME_LOCAL})")
+        if len(vols_hist) >= 200:
+            med_30d = float(np.median(vols_hist[:-1]))  # médiane SANS la bougie en cours
+            if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d):
+                log_refusal(
+                    symbol,
+                    f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})"
+                )
                 return
-
-        except Exception:
-            # En cas d’erreur réseau ou autre, fallback MIN_VOLUME_LOCAL
-            try:
-                vol_now_1h = float(klines[-1][7])
-                if vol_now_1h < MIN_VOLUME_LOCAL:
-                    log_refusal(symbol, f"Volume 1h trop faible ({vol_now_1h:.0f} < {MIN_VOLUME_LOCAL})")
-                    return
-            except Exception:
-                pass
+        else:
+            # fallback quand on n'a pas un vrai historique 30j
+            if vol_now_1h < MIN_VOLUME_ABS:
+                log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
+                return
 
         # ---- Indicateurs (versions TradingView) ----
         rsi       = rsi_tv(closes, period=14)
@@ -2248,7 +2249,18 @@ async def process_symbol_aggressive(symbol):
             # Pas de return: on continue le flux
 
         if not is_market_bullish():
-            return
+            b = MARKET_STATE.get("btc", {})
+            e = MARKET_STATE.get("eth", {})
+            btc_ok = b.get("rsi", 50) >= 45 and (b.get("macd", 0) > b.get("signal", 0) or b.get("adx", 0) >= 15)
+            eth_ok = e.get("rsi", 50) >= 45 and (e.get("macd", 0) > e.get("signal", 0) or e.get("adx", 0) >= 15)
+            if not (btc_ok or eth_ok):
+                log_refusal(symbol, "Blocage ALT: BTC & ETH faibles (soft)")
+                return
+            # pénalité (mais on autorise)
+            try:
+                indicators_soft_penalty += 1
+            except NameError:
+                pass
 
         if symbol in last_trade_time:
             cooldown_left_h = COOLDOWN_HOURS - (datetime.now(timezone.utc) - last_trade_time[symbol]).total_seconds() / 3600
