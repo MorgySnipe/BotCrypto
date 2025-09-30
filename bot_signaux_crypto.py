@@ -222,6 +222,8 @@ BTC_REGIME_BLOCK_MIN = 90    # minutes de blocage des ALTS
 RISK_PER_TRADE   = 0.005   # 0.5% du capital par trade
 DAILY_MAX_LOSS   = -0.03   # -3% cumulé sur la journée (UTC)
 
+MAJORS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
+
 def allowed_trade_slots(strategy: str | None = None) -> int:
     """
     Nombre de positions autorisées en parallèle.
@@ -794,35 +796,19 @@ def is_volume_increasing(klines):
 
 def is_market_bullish():
     """
-    Version ultra simple & rapide : on lit le pré-calcul (MARKET_STATE).
-    On bloque SEULEMENT si BTC **et** ETH sont tous les deux "mous":
-      RSI < 45, MACD <= signal, ADX < 18.
-    Sinon on laisse passer.
+    On ne bloque plus globalement. On renvoie toujours True,
+    et on laisse les pénalités agir dans le scoring.
     """
-    try:
-        b = MARKET_STATE["btc"]
-        e = MARKET_STATE["eth"]
-
-        # si pas encore pré-rempli, on est permissif
-        if any(v is None for v in (b["rsi"], b["macd"], b["signal"], b["adx"],
-                                   e["rsi"], e["macd"], e["signal"], e["adx"])):
-            return True
-
-        bad_btc = (b["rsi"] < 45) and (b["macd"] <= b["signal"]) and (b["adx"] < 18)
-        bad_eth = (e["rsi"] < 45) and (e["macd"] <= e["signal"]) and (e["adx"] < 18)
-        return not (bad_btc and bad_eth)
-    except Exception:
-        return True
-
-
+    return True
+    
 def btc_regime_blocked():
     """
-    Filtre 'panic only' : on bloque les alts seulement lors de chutes franches du BTC.
-    -1h ≤ -1.5% OU -3h ≤ -3.5%.
-    Cooldown levé si petit rebond (≥ +0.5% sur 1h).
+    PANIC ONLY + cooldown court + exemption majors.
+    Bloque les ALTS seulement si chute forte et récente du BTC.
     """
     global btc_block_until, btc_block_reason
 
+    MAJORS = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT"}
     k1h = market_cache.get("BTCUSDT", [])
     if not k1h or len(k1h) < 10:
         return False, ""
@@ -831,14 +817,14 @@ def btc_regime_blocked():
     drop1h = (closes[-1] - closes[-2]) / max(closes[-2], 1e-9) * 100.0
     drop3h = ((closes[-1] - closes[-4]) / max(closes[-4], 1e-9) * 100.0) if len(closes) >= 4 else 0.0
 
-    # --- PANIC ONLY ---
-    bear_now = (drop1h <= -1.5) or (drop3h <= -3.5)
+    # PANIC ONLY (plus dur que chez toi)
+    bear_now = (drop1h <= -2.0) or (drop3h <= -4.5)
 
     now = datetime.now(timezone.utc)
 
-    # Si en cooldown, lever si rebond clair
+    # lever le cooldown si petit rebond
     if btc_block_until and now < btc_block_until:
-        rebound = drop1h >= 0.5  # +0.5% sur 1h -> on lève
+        rebound = drop1h >= 0.6  # +0.6% en 1h
         if rebound and not bear_now:
             btc_block_until = None
             btc_block_reason = ""
@@ -848,12 +834,11 @@ def btc_regime_blocked():
             return True, f"cooldown BTC {mins:.0f} min restant — {btc_block_reason}"
 
     if bear_now:
-        btc_block_until  = now + timedelta(minutes=BTC_REGIME_BLOCK_MIN)
+        btc_block_until  = now + timedelta(minutes=45)  # 90 → 45 min
         btc_block_reason = f"BTC {drop1h:.2f}%/1h, {drop3h:.2f}%/3h (panic)"
         return True, btc_block_reason
 
     return False, ""
-
 
 def in_active_session():
     hour = datetime.now(timezone.utc).hour
@@ -866,9 +851,16 @@ def is_active_liquidity_session(now=None, symbol=None):
 
     HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
 
-    # On ne bloque que 01:00–02:00 UTC, et on NE bloque jamais les paires très liquides
-    if 1 <= h < 2 and symbol not in HIGH_LIQ:
-        return False, "blocked_01_02"
+   # Patch 5 — 01:00–02:00 UTC
+    # On évite de bloquer inutilement les majors
+    if 1 <= h < 2:
+        if symbol in HIGH_LIQ:
+            # BTC, ETH, BNB, SOL… passent toujours
+            return True, "HIGH_LIQ_01_02"
+        else:
+            # autres paires → soft block
+            return False, "blocked_01_02"
+    
     return True, "ANY"
 
 def get_klines_4h(symbol, limit=100):
@@ -897,6 +889,13 @@ def pick_sl_pct(volatility, pct_min, pct_max, v_hi=0.02):
 # --- Money management (risk-based) ---
 POS_MIN_PCT = 1.0
 POS_MAX_PCT = 7.0
+
+def min_vol_threshold(symbol: str) -> float:
+    """Seuil ATR/price minimal par catégorie."""
+    MAJORS = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT"}
+    if symbol in MAJORS:
+        return 0.0015   # 0.15% pour majors
+    return 0.0020       # 0.20% pour alts
 
 def position_pct_from_risk(entry_price: float, stop_price: float, score: int | None = None) -> float:
     """
@@ -1456,29 +1455,28 @@ async def process_symbol(symbol):
             log_refusal(symbol, "Données 1h insuffisantes")
             return
 
-        # --- Volume 1h vs médiane 30j (robuste) ---
+        # --- Volume 1h vs médiane 30j (robuste & borné) ---
         vol_now_1h = float(klines[-1][7])
 
         k1h_30d = get_cached(symbol, '1h', limit=750) or []
-        vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j (720) + bougie courante
+        vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j + current
 
-        VOL_MED_MULT_EFF = 0.10     # 10% de la médiane 30j (plus réaliste)
-        MIN_VOLUME_ABS   = 200_000  # plancher absolu si 30j non dispo
+        VOL_MED_MULT_EFF = 0.07     # 7% de la médiane 30j (était 0.15)
+        MIN_VOLUME_ABS   = 120_000  # 200k → 120k
 
         if len(vols_hist) >= 200:
-            med_30d = float(np.median(vols_hist[:-1]))  # médiane SANS la bougie en cours
+            # borne haute : on limite l'influence de quelques mega-bougies
+            med_30d_raw = float(np.median(vols_hist[:-1]))
+            p70 = float(np.percentile(vols_hist[:-1], 70))
+            med_30d = min(med_30d_raw, p70 * 1.5)  # cap raisonnable
+
             if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d):
-                log_refusal(
-                    symbol,
-                    f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})"
-                )
+                log_refusal(symbol, f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})")
                 return
         else:
-            # fallback quand on n'a pas un vrai historique 30j
             if vol_now_1h < MIN_VOLUME_ABS:
                 log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
                 return
-
 
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
@@ -1574,16 +1572,15 @@ async def process_symbol(symbol):
 
 
         volatility = get_volatility(atr, price)
-        VOL_MIN = 0.002  # test: 0.002 (avant 0.003)
+        VOL_MIN = 0.001  # test assoupli (avant 0.002 ou 0.003)
         if volatility < VOL_MIN:
             log_refusal(symbol, f"Volatilité faible (ATR/price={volatility:.4f} < {VOL_MIN})")
-            # SOFT: on ne coupe pas directement — on pénalise le score
             try:
                 indicators_soft_penalty += 1
             except NameError:
                 pass
-            # si vraiment très faible (<0.0015), on refuse
-            if volatility < 0.0015:
+            # si vraiment très faible (<0.0008), on refuse
+            if volatility < 0.0008:
                 return
 
         # --- ADX (standard) assoupli ---
@@ -1627,9 +1624,8 @@ async def process_symbol(symbol):
                 tendance_soft_notes.append("Session à faible liquidité")
                 log_info(symbol, "Low-liquidity session (soft)")
             # Pas de return: on continue le flux
-            
-        # --- Filtre régime BTC ---
-        if symbol != "BTCUSDT":
+
+        if symbol not in MAJORS:
             blocked, why = btc_regime_blocked()
             if blocked:
                 log_refusal(symbol, f"Filtre régime BTC: {why}")
@@ -2081,10 +2077,23 @@ async def process_symbol(symbol):
                     symbol,
                     f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}"
                 )
-        # --- score minimum (standard) ---
-        if confidence < 6:
-            log_refusal(symbol, f"Score insuffisant après pénalités (std): {confidence:.1f} < 6")
-            return
+        # ===== Patch 4 — score minimum (standard) assoupli & non bloquant =====
+        SCORE_MIN_STD = 4  # au lieu de 6
+
+        if confidence < SCORE_MIN_STD:
+            # On LOG pour suivi, mais on ne coupe plus le trade.
+            log_refusal(symbol, f"Score insuffisant après pénalités (std): {confidence:.1f} < {SCORE_MIN_STD}")
+            # Petite pénalité additionnelle au scoring si la variable existe
+            try:
+                indicators_soft_penalty += 1
+            except NameError:
+                pass
+            # Réduction de la taille plutôt que d'annuler l'entrée
+            try:
+                position_pct = max(POS_MIN_PCT, min(position_pct * 0.75, POS_MAX_PCT))
+            except NameError:
+                # si pas de sizing encore défini ici, on met une petite taille par défaut
+                position_pct = POS_MIN_PCT
 
         # --- Circuit breaker JOUR (avant toute nouvelle entrée) ---
         if buy and symbol not in trades:
@@ -2178,29 +2187,29 @@ async def process_symbol_aggressive(symbol):
             log_refusal(symbol, "API prix indisponible")
             return
 
-        # --- Volume 1h vs médiane 30j (robuste) ---
+        # --- Volume 1h vs médiane 30j (robuste & borné) ---
         vol_now_1h = float(klines[-1][7])
 
         k1h_30d = get_cached(symbol, '1h', limit=750) or []
-        vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j (720) + bougie courante
+        vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j + current
 
-        VOL_MED_MULT_EFF = 0.10     # 10% de la médiane 30j (plus réaliste)
-        MIN_VOLUME_ABS   = 200_000  # plancher absolu si 30j non dispo
+        VOL_MED_MULT_EFF = 0.07     # 7% de la médiane 30j (était 0.15)
+        MIN_VOLUME_ABS   = 120_000  # 200k → 120k
 
         if len(vols_hist) >= 200:
-            med_30d = float(np.median(vols_hist[:-1]))  # médiane SANS la bougie en cours
+            # borne haute : on limite l'influence de quelques mega-bougies
+            med_30d_raw = float(np.median(vols_hist[:-1]))
+            p70 = float(np.percentile(vols_hist[:-1], 70))
+            med_30d = min(med_30d_raw, p70 * 1.5)  # cap raisonnable
+
             if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d):
-                log_refusal(
-                    symbol,
-                    f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})"
-                )
+                log_refusal(symbol, f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})")
                 return
         else:
-            # fallback quand on n'a pas un vrai historique 30j
             if vol_now_1h < MIN_VOLUME_ABS:
                 log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
                 return
-
+                
         # ---- Indicateurs (versions TradingView) ----
         rsi       = rsi_tv(closes, period=14)
         macd,signal = compute_macd(closes)
@@ -2268,8 +2277,8 @@ async def process_symbol_aggressive(symbol):
                 log_refusal(symbol, "Cooldown actif", cooldown_left_min=int(cooldown_left_h * 60))
                 return
 
-        # --- Filtre régime BTC (aggressive) ---
-        if symbol != "BTCUSDT":
+        # --- Filtre régime BTC (PANIC ONLY) : on n’applique PAS aux majors
+        if symbol not in MAJORS:
             blocked, why = btc_regime_blocked()
             if blocked:
                 log_refusal(symbol, f"Filtre régime BTC: {why}")
@@ -2397,8 +2406,18 @@ async def process_symbol_aggressive(symbol):
         score = compute_confidence_score(indicators)
         score = max(0, score - indicators_soft_penalty)
         label_conf = label_confidence(score)
-        if score < 7:
-            return
+        SCORE_MIN_AGR = 6
+        if score < SCORE_MIN_AGR:
+            log_refusal(symbol, f"Score insuffisant (agr): {score:.1f} < {SCORE_MIN_AGR}")
+            try:
+                indicators_soft_penalty += 1
+            except NameError:
+                pass
+            try:
+                position_pct = max(POS_MIN_PCT, min(position_pct * 0.70, POS_MAX_PCT))
+            except NameError:
+                position_pct = POS_MIN_PCT
+            # (pas de return)
 
         ATR_INIT_MULT_AGR = 1.2
         sl_initial = price - ATR_INIT_MULT_AGR * atr
