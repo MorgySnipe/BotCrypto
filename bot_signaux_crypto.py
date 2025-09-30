@@ -222,7 +222,9 @@ BTC_REGIME_BLOCK_MIN = 90    # minutes de blocage des ALTS
 RISK_PER_TRADE   = 0.005   # 0.5% du capital par trade
 DAILY_MAX_LOSS   = -0.03   # -3% cumulé sur la journée (UTC)
 
-MAJORS = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
+from typing import Final
+
+MAJORS: Final = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 
 def allowed_trade_slots(strategy: str | None = None) -> int:
     """
@@ -1614,7 +1616,6 @@ async def process_symbol(symbol):
         # --- Low-liquidity session -> SOFT ---
         ok_session, _sess = is_active_liquidity_session(symbol=symbol)
         if not ok_session:
-            MAJORS = {"BTCUSDT", "ETHUSDT", "BNBUSDT"}
             if symbol in MAJORS:
                 # On laisse passer sans pénalité sur les majeures
                 log_info(symbol, "Low-liquidity session (tolérée sur major)")
@@ -2246,7 +2247,6 @@ async def process_symbol_aggressive(symbol):
         ok_session, _sess = is_active_liquidity_session(symbol=symbol)
 
         if not ok_session:
-            MAJORS = {"BTCUSDT", "ETHUSDT", "BNBUSDT"}
             if symbol in MAJORS:
                 # On laisse passer sans pénalité sur les majeures
                 log_info(symbol, "Low-liquidity session (tolérée sur major)")
