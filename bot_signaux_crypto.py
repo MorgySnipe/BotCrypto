@@ -172,8 +172,9 @@ VOL_CONFIRM_MULT = 1.00
 ANTI_SPIKE_UP_STD = 0.8   # 0.8% mini (std)
 ANTI_SPIKE_UP_AGR = 2.4   # % max d'extension (stratégie agressive)
 # --- Anti-spike adaptatif (bonus) ---
-ANTI_SPIKE_ATR_MULT = 1.60   # autorise une extension ≈ 1.3 × ATR% (par rapport à l'open)
-ANTI_SPIKE_MAX_PCT = 5.00   # plafond std relevé à 4%
+# plus tolérant : accepte des extensions intraday raisonnables
+ANTI_SPIKE_ATR_MULT = 2.20   # au lieu de 1.60
+ANTI_SPIKE_MAX_PCT  = 7.00   # au lieu de 5.00
 # ===== Learning phase (assouplissements) =====
 LEARNING_MODE = True
 
@@ -223,7 +224,6 @@ RISK_PER_TRADE   = 0.005   # 0.5% du capital par trade
 DAILY_MAX_LOSS   = -0.03   # -3% cumulé sur la journée (UTC)
 
 from typing import Final
-
 MAJORS: Final = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 
 def allowed_trade_slots(strategy: str | None = None) -> int:
@@ -744,19 +744,27 @@ def check_spike_and_wick(symbol: str, klines_1h, price: float, mode_label="std")
         if ok_spike and not wick:
             return True
 
-        # Compose un message unique
-        reasons = []
+        # Si le spike dépasse légèrement le seuil OU si c’est une major → on ne bloque pas
         if not ok_spike:
-            reasons.append(f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}%")
+            if spike_up_pct <= (limit_pct + 0.8) or symbol in MAJORS:
+                log_refusal(symbol, f"Anti-excès 1h toléré (soft)", trigger=f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}% (+tol)")
+                try:
+                    indicators_soft_penalty += 1
+                except NameError:
+                    pass
+                return True  # on continue quand même
+            else:
+                reasons.append(f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}%")
+
         if wick:
             reasons.append("mèche_haute_dominante")
 
-        log_refusal(symbol, f"Anti-excès 1h ({mode_label})", trigger=" | ".join(reasons))
+        log_refusal(symbol, f"Anti-excès 1h {mode_label}", trigger=" | ".join(reasons))
         return False
-    except Exception as _:
-        # En cas d’erreur, ne bloque pas (fail-open)
-        return True
 
+            except Exception as _:
+                # En cas d’erreur, ne bloque pas (fail-open)
+                return True
 
 def confirm_15m_after_signal(symbol, breakout_level=None, ema25_1h=None):
     # exiger les 2 dernières bougies 15m complètes
@@ -1638,20 +1646,21 @@ async def process_symbol(symbol):
             return
             
         # — Pré-filtre: prix trop loin de l’EMA25 (plus strict)
-        EMA25_PREFILTER_STD = (
-            1.02 if symbol in {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","LINKUSDT"} else 1.03
-        )
+        # seuils plus larges + pénalité soft (ne bloque pas)
+        EMA25_PREFILTER_STD = (1.05 if symbol in MAJORS else 1.08)
 
         if price > ema25 * EMA25_PREFILTER_STD:
             dist = (price / max(ema25, 1e-9) - 1) * 100
             log_refusal(
                 symbol,
-                f"Prix trop éloigné de l'EMA25 (>+{(EMA25_PREFILTER_STD-1)*100:.0f}%)",
+                f"Prix éloigné EMA25 (soft > +{(EMA25_PREFILTER_STD-1)*100:.0f}%)",
                 trigger=f"dist_ema25={dist:.2f}%"
             )
-            return
-
-
+            try:
+                indicators_soft_penalty += 1
+            except NameError:
+                pass
+            # pas de return : on continue
         if not check_spike_and_wick(symbol, klines, price, mode_label="std"):
             return
             
@@ -1719,7 +1728,7 @@ async def process_symbol(symbol):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > niveau de retest OU > EMA25(1h) ±0.1%")
                 return
 
-            if price > ema25 * 1.05:
+            if price > ema25 * 1.08:
                 log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
                 reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
                 # pas de return -> on continue
@@ -1734,7 +1743,7 @@ async def process_symbol(symbol):
 
         elif trend_ok and momentum_ok and volume_ok:
             # Bande "retest" serrée autour de l'EMA25 (±0.2%)
-            RETEST_BAND_STD = 0.002
+            RETEST_BAND_STD = 0.004
             near_ema25 = (abs(price - ema25) / max(ema25, 1e-9)) <= RETEST_BAND_STD
 
             # On garde le contrôle de bougie, mais un peu plus permissif (3.5% au lieu de 3%)
@@ -1752,7 +1761,7 @@ async def process_symbol(symbol):
                     log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (PB)")
                     return
 
-                if price > ema25 * 1.05:
+                if price > ema25 * 1.08:
                     log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
                     reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
                     # pas de return -> on continue
@@ -2339,19 +2348,16 @@ async def process_symbol_aggressive(symbol):
         near_ema25  = abs(price - ema25)      / ema25      <= RETEST_BAND_AGR
 
         # éviter d’acheter trop loin de l’EMA25
-        EMA25_PREFILTER_STD = (
-            1.02 if symbol in {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","LINKUSDT"} else 1.03
-        )
+        EMA25_PREFILTER_STD = (1.05 if symbol in MAJORS else 1.08)
+        if price >= ema25 * EMA25_PREFILTER_STD:
+            dist = (price / max(ema25, 1e-9) - 1) * 100
+            log_refusal(symbol, "Prix éloigné EMA25 (soft)", trigger=f"dist_ema25={dist:.2f}%")
+            try:
+                indicators_soft_penalty += 1
+            except NameError:
+                pass
+            # pas de return
 
-        too_far_from_ema25 = price >= ema25 * EMA25_PREFILTER_STD
-
-        if too_far_from_ema25:
-            log_refusal(symbol, f"Prix trop éloigné de l'EMA25 (+0.8%) (prix={price}, ema25={ema25})")
-            return
-        # si le prix n'est proche ni du niveau de breakout ni de l'EMA25
-        if not (near_level or near_ema25):
-            log_refusal(symbol, "Pas de retest valide (ni proche breakout, ni proche EMA25)")
-            return
 
         # Anti-spike (bougie 1h en cours)
         open_now  = float(klines[-1][1])
@@ -2433,7 +2439,7 @@ async def process_symbol_aggressive(symbol):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (aggressive)")
             return
 
-        if price > ema25 * 1.05:
+        if price > ema25 * 1.08:
             log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
             reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
             # pas de return -> on continue
