@@ -749,22 +749,27 @@ def check_spike_and_wick(symbol: str, klines_1h, price: float, mode_label="std")
             if spike_up_pct <= (limit_pct + 0.8) or symbol in MAJORS:
                 log_refusal(symbol, f"Anti-excès 1h toléré (soft)", trigger=f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}% (+tol)")
                 try:
-                    indicators_soft_penalty += 1
-                except NameError:
-                    pass
-                return True  # on continue quand même
-            else:
-                reasons.append(f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}%")
+                    if not ok_spike:
+                        if spike_up_pct <= (limit_pct + 0.8) or symbol in MAJORS:
+                            log_refusal(symbol, f"Anti-excès 1h toléré (soft)", trigger=f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}% (+tol)")
+                            try:
+                                indicators_soft_penalty += 1
+                            except NameError:
+                                pass
+                            return True  # on continue quand même
+                        else:
+                            reasons.append(f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}%")
 
-        if wick:
-            reasons.append("mèche_haute_dominante")
+                    if wick:
+                        reasons.append("mèche_haute_dominante")
 
-        log_refusal(symbol, f"Anti-excès 1h {mode_label}", trigger=" | ".join(reasons))
-        return False
+                    log_refusal(symbol, f"Anti-excès 1h {mode_label}", trigger=" | ".join(reasons))
+                    return False
 
-            except Exception as _:
-                # En cas d’erreur, ne bloque pas (fail-open)
-                return True
+                except Exception as _:
+                    # En cas d’erreur, ne bloque pas (fail–open)
+                    return True
+
 
 def confirm_15m_after_signal(symbol, breakout_level=None, ema25_1h=None):
     # exiger les 2 dernières bougies 15m complètes
