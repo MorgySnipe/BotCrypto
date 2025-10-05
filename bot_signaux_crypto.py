@@ -762,9 +762,13 @@ def check_spike_and_wick(symbol: str, klines_1h, price: float, mode_label="std")
         if wick:
             reasons.append("mèche_haute_dominante")
 
-        log_refusal(symbol, f"Anti-excès 1h {mode_label}", trigger=" | ".join(reasons))
-        return False
-
+        log_refusal(symbol, f"Anti-excès 1h (soft, non bloquant)", trigger=" | ".join(reasons))
+        try:
+            indicators_soft_penalty += 1
+        except NameError:
+            pass
+        return True  # on ne bloque plus, on pénalise légèrement
+        
     except Exception as _:
         # En cas d’erreur, on ne bloque pas (fail–open)
         return True
@@ -805,7 +809,16 @@ def is_uptrend(prices, period=50):
 
 def is_volume_increasing(klines):
     volumes = volumes_series(klines, quote=True)
-    return np.mean(volumes[-5:]) > np.mean(volumes[-10:-5]) and np.mean(volumes[-5:]) > MIN_VOLUME
+    if len(volumes) < 15:
+        return False  # sécurité basique
+
+    vol5 = np.mean(volumes[-5:])
+    vol10 = np.mean(volumes[-10:-5])
+    vol20 = np.mean(volumes[-20:-5]) if len(volumes) >= 20 else vol10
+
+    # ✅ Adouci : ratio volume actuel vs historique
+    ratio = vol5 / max(vol20, 1e-9)
+    return (ratio >= 0.85) or (vol5 > vol10)
 
 def is_market_bullish():
     """
@@ -1197,21 +1210,28 @@ def fast_exit_5m_trigger(symbol: str, entry: float, current_price: float):
         return False, {}  
 
 
-def detect_breakout_retest(closes, highs, lookback=10, tol=0.003):
+def detect_breakout_retest(closes, highs, lookback=10, tol=0.0015):
     """
-    Détecte une séquence Breakout + Retest en 1h.
-    - Breakout: bougie -2 clôture au-dessus du plus haut des `lookback` bougies précédentes
-    - Retest:   bougie -1 clôture proche (±tol) du niveau de breakout et >= level
-    tol = 0.003 -> 0,3% de tolérance
+    Détecte Breakout + Retest en 1h (version assouplie).
+    - Breakout (bougie -2) : close >= plus_haut_lookback * (1 + tol) 
+      OU (close>=level ET close(-1)>=level)  ← breakout "quasi-plat" accepté
+    - Retest (bougie -1) : |close(-1) - level| / level <= tol * 1.2  OU close(-1) >= level
     Retourne (ok: bool, level: float)
     """
     if len(highs) < lookback + 3 or len(closes) < lookback + 3:
         return False, None
 
-    level = max(highs[-(lookback+2):-2])          # plus haut avant la bougie -2
-    breakout = closes[-2] > level * 1.003         # close -2 > +0,3% au-dessus du level
-    # Retest simple/robuste sans utiliser les lows (évite repaint)
-    retest = (abs(closes[-1] - level) / level) <= tol and (closes[-1] >= level)
+    # plus haut avant la bougie -2
+    level = max(highs[-(lookback+2):-2])
+
+    c_m2 = closes[-2]
+    c_m1 = closes[-1]
+
+    # breakout toléré (marge allégée + cas quasi-plat)
+    breakout = (c_m2 >= level * (1.0 + tol)) or ((c_m2 >= level) and (c_m1 >= level))
+
+    # retest toléré (un poil plus large) ou continuation au-dessus du level
+    retest = (abs(c_m1 - level) / max(level, 1e-9) <= tol * 1.2) or (c_m1 >= level)
 
     return (breakout and retest), level
 
@@ -1519,7 +1539,7 @@ async def process_symbol(symbol):
                 closes_btc = [float(k[4]) for k in btc]
                 btc_rsi = rsi_tv(closes_btc, 14)               # ✅ RSI scalaire
                 btc_macd, btc_signal = compute_macd(closes_btc) # ✅ MACD/Signal
-                if (btc_rsi < 50) or (btc_macd <= btc_signal):
+                if (btc_rsi < 45) or (btc_macd <= btc_signal):
                     log_refusal(symbol, "Blocage ALT: BTC faible (RSI<50 ou MACD<=Signal)")
                     return
                     
@@ -2241,7 +2261,7 @@ async def process_symbol_aggressive(symbol):
                 closes_btc = [float(k[4]) for k in btc_klines]
                 btc_rsi = rsi_tv(closes_btc, period=14)           # ✅ RSI scalaire
                 btc_macd, btc_signal = compute_macd(closes_btc)
-                if (btc_rsi < 50) or (btc_macd <= btc_signal):
+                if (btc_rsi < 45) or (btc_macd <= btc_signal):
                     log_refusal(symbol, "Blocage ALT: BTC faible (RSI<50 ou MACD<=Signal)")
                     return
 
@@ -2334,7 +2354,7 @@ async def process_symbol_aggressive(symbol):
         retest_tolerance = 0.005  # ±0.5%
 
         # breakout : prix au-dessus du plus haut des 10 dernières bougies (avec marge)
-        breakout = price > last10_high * 1.004
+        breakout = price > last10_high * 1.002
         if not breakout:
             log_refusal(symbol, f"Pas de breakout (prix={price}, plus_haut10j={last10_high})")
             return
