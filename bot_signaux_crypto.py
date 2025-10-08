@@ -2121,25 +2121,26 @@ async def process_symbol(symbol):
 
 async def process_symbol_aggressive(symbol):
     try:
-        in_trade = symbol in trades 
+        in_trade = symbol in trades
+
         # --- Paramètres VOLUME (aggressive) ---
-        MIN_VOLUME_LOCAL = 50_000       # fallback local si pas de médiane 30j
-        VOL_MED_MULT_AGR = 0.15             # 15% de la médiane 30j (filtre plus réaliste)
-        VOL_CONFIRM_MULT_AGR = 0.85         
-        VOL_CONFIRM_LOOKBACK_AGR = 12       # 15m: MA12 (au lieu de 20)
+        MIN_VOLUME_LOCAL = 50_000
+        VOL_MED_MULT_AGR = 0.15
+        VOL_CONFIRM_MULT_AGR = 0.85
+        VOL_CONFIRM_LOOKBACK_AGR = 12
 
         # ---- Auto-close SOUPLE (aggressive) ----
         if symbol in trades and trades[symbol].get("strategy") == "aggressive":
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             elapsed_h = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
-            if elapsed_h >= AUTO_CLOSE_MIN_H:
-                # On ne force plus une clôture horaire ici.
-                # Les vraies sorties seront gérées plus bas (SMART_TIMEOUT / momentum cassé / fast-exit 5m / trailing).
-                pass
+            # Pas d’auto-close forcé ici
+            pass
 
         # ---- Analyse agressive ----
         klines = get_cached(symbol, '1h')
         in_trade_agr = (symbol in trades) and (trades[symbol].get("strategy") == "aggressive")
+
+        # Fallback si pas de 1h alors qu’on est en position
         if in_trade_agr and (not klines or len(klines) < 20):
             price = get_last_price(symbol)
             if price is None:
@@ -2183,9 +2184,11 @@ async def process_symbol_aggressive(symbol):
             log_trade(symbol, "HOLD", price)
             await buffer_hold(symbol, f"{utc_now_str()} | {symbol} HOLD (fallback) | prix {price:.4f} | stop {stop:.4f}")
             return
+
         if not klines or len(klines) < 50:
             log_refusal(symbol, "Données 1h insuffisantes")
-            if not in_trade: return
+            if not in_trade:
+                return
 
         closes  = [float(k[4]) for k in klines]
         highs   = [float(k[2]) for k in klines]
@@ -2198,24 +2201,21 @@ async def process_symbol_aggressive(symbol):
         price = get_last_price(symbol)
         if price is None:
             log_refusal(symbol, "API prix indisponible")
-            if not in_trade: return
+            if not in_trade:
+                return
 
-
-        # --- Volume 1h vs médiane 30j (robuste & borné) ---
+        # --- Volume 1h vs médiane 30j ---
         vol_now_1h = float(klines[-1][7])
-
         k1h_30d = get_cached(symbol, '1h', limit=750) or []
-        vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j + current
+        vols_hist = volumes_series(k1h_30d, quote=True)[-721:]
 
-        VOL_MED_MULT_EFF = 0.07     # 7% de la médiane 30j (était 0.15)
-        MIN_VOLUME_ABS   = 120_000  # 200k → 120k
+        VOL_MED_MULT_EFF = 0.07
+        MIN_VOLUME_ABS   = 120_000
 
         if len(vols_hist) >= 200:
-            # borne haute : on limite l'influence de quelques mega-bougies
             med_30d_raw = float(np.median(vols_hist[:-1]))
             p70 = float(np.percentile(vols_hist[:-1], 70))
-            med_30d = min(med_30d_raw, p70 * 1.5)  # cap raisonnable
-
+            med_30d = min(med_30d_raw, p70 * 1.5)
             if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d):
                 log_refusal(symbol, f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})")
                 return
@@ -2223,21 +2223,20 @@ async def process_symbol_aggressive(symbol):
             if vol_now_1h < MIN_VOLUME_ABS:
                 log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
                 return
-                
-        # ---- Indicateurs (versions TradingView) ----
+
+        # ---- Indicateurs (TV-like) ----
         rsi       = rsi_tv(closes, period=14)
         macd,signal = compute_macd(closes)
         ema200    = ema_tv(closes, 200)
-        ema200_1h = ema200  
+        ema200_1h = ema200
         atr       = atr_tv(klines, period=14)
         adx_value = adx_tv(klines, period=14)
         ema25     = ema_tv(closes, 25)
-        # comparer l'élan MACD vs bougie précédente
         macd_prev, signal_prev = compute_macd(closes[:-1])
 
+        # === Gestion d'un trade agressif OUVERT ===
         in_trade = (symbol in trades) and (trades[symbol].get("strategy") == "aggressive")
         if in_trade:
-            # ---- Gestion TP / HOLD / SELL (MOVED) ----
             atr_val_current = atr_tv(klines)
             entry = trades[symbol]["entry"]
             gain  = ((price - entry) / max(entry, 1e-9)) * 100.0
@@ -2247,7 +2246,7 @@ async def process_symbol_aggressive(symbol):
                 - datetime.strptime(trades[symbol]["time"], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             ).total_seconds() / 3600
 
-            # --- TP progressifs (AGGRESSIVE) ---
+            # TP progressifs
             if "tp_times" not in trades[symbol]:
                 trades[symbol]["tp_times"] = {}
             for tp_idx, atr_mult in enumerate(TP_ATR_MULTS_AGR, start=1):
@@ -2273,20 +2272,18 @@ async def process_symbol_aggressive(symbol):
                         )
                         await tg_send(msg)
 
-            # === Trailing Stop Adaptatif (ADX) ===
+            # Trailing stop adaptatif (ADX)
             adx_val = trades[symbol].get("adx_1h", 20)
-            if adx_val >= 25:
-                trail_multiplier = 0.3
-            elif adx_val >= 20:
-                trail_multiplier = 0.5
-            else:
-                trail_multiplier = 0.8
+            trail_multiplier = 0.3 if adx_val >= 25 else (0.5 if adx_val >= 20 else 0.8)
             trades[symbol]["stop"] = max(stop, price * (1 - trail_multiplier * atr_val_current / max(price, 1e-9)))
 
+            # Filtre régime BTC (définir blocked AVANT)
+            blocked, _why_btc = btc_regime_blocked()
             if blocked and gain < 0.8:
+                supertrend_ok_local = supertrend_like_on_close(klines)
                 ctx = {
                     "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
-                    "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,
+                    "atr": atr, "st_on": supertrend_ok_local, "ema25": ema25, "ema200": ema200,
                     "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol,'4h') else 0.0,
                     "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol,'4h') else 0.0,
                     "vol5": vol5, "vol20": vol20,
@@ -2298,7 +2295,7 @@ async def process_symbol_aggressive(symbol):
                 _finalize_exit(symbol, price, gain, "BTC regime turned negative", "SELL", ctx)
                 return
 
-            # --- Timeout intelligent (AGGRESSIVE) ---
+            # Timeout intelligent (aggressive)
             if (elapsed_time >= SMART_TIMEOUT_EARLIEST_H_AGR
                 and gain < SMART_TIMEOUT_MIN_GAIN_AGR
                 and not trades[symbol].get("tp1", False)
@@ -2333,7 +2330,7 @@ async def process_symbol_aggressive(symbol):
                     _delete_trade(symbol)
                     return
 
-            # — Sortie dynamique rapide (5m) —
+            # Sortie dynamique 5m
             triggered, fx = fast_exit_5m_trigger(symbol, entry, price)
             if triggered:
                 vol5_local  = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
@@ -2374,7 +2371,7 @@ async def process_symbol_aggressive(symbol):
                 _delete_trade(symbol)
                 return
 
-            # ---- Sortie anticipée "momentum cassé" (aggressive) ----
+            # Momentum cassé
             if gain < 0.8 and (rsi < 48 or macd < signal):
                 raison = "Momentum cassé (sortie anticipée)"
                 msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, trades[symbol]["stop"], elapsed_time, raison)
@@ -2409,7 +2406,7 @@ async def process_symbol_aggressive(symbol):
                 _delete_trade(symbol)
                 return
 
-            # ---- Si TP1 pris puis le trade retombe trop ----
+            # Après TP1 si retombée
             if trades[symbol].get("tp1", False) and gain < 1:
                 raison_sortie = "Perte de momentum après TP1"
                 msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, trades[symbol]["stop"], elapsed_time, raison_sortie)
@@ -2441,7 +2438,7 @@ async def process_symbol_aggressive(symbol):
                 _delete_trade(symbol)
                 return
 
-            # ---- Stop touché ou perte max ----
+            # Stop touché / perte max
             if price < trades[symbol]["stop"] or gain <= -1.5:
                 msg = format_stop_msg(symbol, trades[symbol]["trade_id"], trades[symbol]["stop"], gain, rsi, adx_value, vol5 / max(vol20, 1e-9) if vol20 else 0.0)
                 await tg_send(msg)
@@ -2475,17 +2472,18 @@ async def process_symbol_aggressive(symbol):
                 _delete_trade(symbol)
                 return
 
+            # HOLD avec trailing avancé
             trailing_stop_advanced(symbol, price, atr_value=atr_val_current)
             log_trade(symbol, "HOLD", price)
             await buffer_hold(symbol, f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}")
-            return  # <- IMPORTANT
+            return
 
         # --- Filtre marché BTC pour ALT (aggressive) ---
         if symbol != "BTCUSDT":
             btc_klines = market_cache.get("BTCUSDT", [])
             if len(btc_klines) >= 50:
                 closes_btc = [float(k[4]) for k in btc_klines]
-                btc_rsi = rsi_tv(closes_btc, period=14)           # ✅ RSI scalaire
+                btc_rsi = rsi_tv(closes_btc, period=14)
                 btc_macd, btc_signal = compute_macd(closes_btc)
                 if (btc_rsi < 45) or (btc_macd <= btc_signal):
                     log_refusal(symbol, "Blocage ALT: BTC faible (RSI<50 ou MACD<=Signal)")
@@ -2497,25 +2495,22 @@ async def process_symbol_aggressive(symbol):
             log_refusal(symbol, f"Max trades aggressive atteints ({_nb_trades('aggressive')}/{slots})")
             if not in_trade:
                 return
+
         # --- Low-liquidity session -> SOFT ---
-        # init pénalités/notes (doit être fait AVANT de s'en servir)
         indicators_soft_penalty = 0
         tendance_soft_notes = []
-        reasons = []        
+        reasons = []
 
         ok_session, _sess = is_active_liquidity_session(symbol=symbol)
-
         if not ok_session:
             if symbol in MAJORS:
-                # On laisse passer sans pénalité sur les majeures
                 log_info(symbol, "Low-liquidity session (tolérée sur major)")
             else:
-                # Soft penalty sur les autres paires
                 indicators_soft_penalty += 1
                 tendance_soft_notes.append("Session à faible liquidité")
                 log_info(symbol, "Low-liquidity session (soft)")
-            # Pas de return: on continue le flux
 
+        # Contexte marché global soft
         if not is_market_bullish():
             b = MARKET_STATE.get("btc", {})
             e = MARKET_STATE.get("eth", {})
@@ -2524,19 +2519,16 @@ async def process_symbol_aggressive(symbol):
             if not (btc_ok or eth_ok):
                 log_refusal(symbol, "Blocage ALT: BTC & ETH faibles (soft)")
                 return
-            # pénalité (mais on autorise)
-            try:
-                indicators_soft_penalty += 1
-            except NameError:
-                pass
+            indicators_soft_penalty += 1
 
+        # Cooldown (nouvelles entrées uniquement)
         if (symbol in last_trade_time) and (not in_trade):
             cooldown_left_h = COOLDOWN_HOURS - (datetime.now(timezone.utc) - last_trade_time[symbol]).total_seconds() / 3600
             if cooldown_left_h > 0:
                 log_refusal(symbol, "Cooldown actif", cooldown_left_min=int(cooldown_left_h * 60))
                 return
 
-        # --- Filtre régime BTC (PANIC ONLY) : on n’applique PAS aux majors
+        # Filtre régime BTC (panic only) — pas pour MAJORS
         if symbol not in MAJORS:
             blocked, why = btc_regime_blocked()
             if blocked:
@@ -2544,24 +2536,22 @@ async def process_symbol_aggressive(symbol):
                 if not in_trade:
                     return
 
-        # ---- Conditions confluence ----
+        # ---- Confluence principale ----
         supertrend_ok = supertrend_like_on_close(klines)
         above_ema200  = price >= ema200 * 0.98  # soft
-
         if not above_ema200:
             indicators_soft_penalty += 1
             tendance_soft_notes.append("Prix ~ sous EMA200(1h)")
 
-        # ADX devient une pénalité (seuil assoupli)
         adx_ok = adx_value >= 15
         if not adx_ok:
             indicators_soft_penalty += 1
 
-        # Momentum MACD vs bougie précédente
+        # Momentum MACD (renforcé)
         if not (macd > signal and (macd - signal) > (macd_prev - signal_prev)):
             return
 
-        # RSI en zone constructive
+        # RSI zone constructive
         if not (52 <= rsi < 82):
             return
 
@@ -2569,7 +2559,8 @@ async def process_symbol_aggressive(symbol):
         k4 = get_cached(symbol, '4h')
         if not k4 or len(k4) < 50:
             log_refusal(symbol, "Données 4h insuffisantes")
-            if not in_trade: return
+            if not in_trade:
+                return
 
         c4 = [float(k[4]) for k in k4]
         ema50_4h  = ema_tv(c4, 50)
@@ -2577,71 +2568,60 @@ async def process_symbol_aggressive(symbol):
         if c4[-1] < ema50_4h or ema50_4h < ema200_4h:
             return
 
-        # ----- Breakout + Retest (UNIQUE) -----
+        # ----- Breakout + Retest -----
         last10_high = max(highs[-10:])
-        retest_tolerance = 0.005  # ±0.5%
-
-        # breakout : prix au-dessus du plus haut des 10 dernières bougies (avec marge)
         breakout = price > last10_high * 1.002
         if not breakout:
-            log_refusal(symbol, f"Pas de breakout (...)")
+            log_refusal(symbol, "Pas de breakout (last10_high non dépassé)")
             if not in_trade:
                 return
 
-        # éviter un mouvement déjà trop étendu sur les 3 dernières bougies
         last3_change = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
         if last3_change > 0.022:
-            log_refusal(symbol, f"Mouvement 3 bougies trop fort ...")
+            log_refusal(symbol, "Mouvement 3 bougies trop fort (>2.2%)")
             if not in_trade:
                 return
 
-        # Retest valide = breakout OU rebond EMA25 ±0.3%
         RETEST_BAND_AGR = 0.003
         near_level = abs(price - last10_high) / last10_high <= RETEST_BAND_AGR
         near_ema25  = abs(price - ema25)      / ema25      <= RETEST_BAND_AGR
 
-        # éviter d’acheter trop loin de l’EMA25
+        # Pré-filtre EMA25 éloignée
         EMA25_PREFILTER_STD = (1.05 if symbol in MAJORS else 1.08)
         if price >= ema25 * EMA25_PREFILTER_STD:
             dist = (price / max(ema25, 1e-9) - 1) * 100
             log_refusal(symbol, "Prix éloigné EMA25 (soft)", trigger=f"dist_ema25={dist:.2f}%")
-            try:
-                indicators_soft_penalty += 1
-            except NameError:
-                pass
-            # pas de return
+            indicators_soft_penalty += 1
 
-
-        # Anti-spike (bougie 1h en cours)
+        # Anti-spike 1h brut
         open_now  = float(klines[-1][1])
         high_now  = float(klines[-1][2])
         spike_up_pct = ((max(high_now, price) - open_now) / max(open_now, 1e-9)) * 100.0
         if spike_up_pct > ANTI_SPIKE_UP_AGR:
-            log_refusal(symbol, "Anti-spike (aggressive)", ...)
+            log_refusal(symbol, "Anti-spike (aggressive)", trigger=f"spike={spike_up_pct:.2f}%>{ANTI_SPIKE_UP_AGR:.2f}%")
             if not in_trade:
                 return
-        # Regroupement anti-spike + anti-chasse (mèche 1h)
+
+        # Anti-spike + wick (soft)
         if not check_spike_and_wick(symbol, klines, price, mode_label="aggro"):
             return
-            
+
         # ---- Confirmation volume 15m (aggressive) ----
         k15 = get_cached(symbol, '15m', limit=max(25, VOL_CONFIRM_LOOKBACK_AGR + 5))
         vols15 = volumes_series(k15, quote=True)
         if len(vols15) < VOL_CONFIRM_LOOKBACK_AGR + 1:
             log_refusal(symbol, "Données 15m insuffisantes (volume)")
-            if not in_trade: return
-        # APRÈS (agressif) — MA10 + seuil 1.05
-        # [#volume-confirm-aggressive] — MA12 + seuil 0.95
+            if not in_trade:
+                return
+
         vol_now = float(k15[-2][7])
         vol_ma12 = float(np.mean(vols15[-13:-1]))
         vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
-
-        if vol_ratio_15m < VOL15M_MIN_RATIO:
+        if vol_ratio_15m < VOL_CONFIRM_MULT_AGR:
             log_refusal(symbol, f"Vol 15m faible (soft): {vol_ratio_15m:.2f}")
             reasons += [f"⚠️ Vol15m {vol_ratio_15m:.2f} (soft)"]
-            # pas de return -> on continue
+            # on continue (soft)
 
-      
         # --- Filtre structure 15m (aggressive) ---
         if near_level:
             ok15, det15 = check_15m_filter(k15, breakout_level=last10_high)
@@ -2649,9 +2629,10 @@ async def process_symbol_aggressive(symbol):
             ok15, det15 = check_15m_filter(k15, breakout_level=None)
         if not ok15:
             log_refusal(symbol, f"Filtre 15m non validé (aggressive): {det15}")
-            if not in_trade: return
+            if not in_trade:
+                return
 
-        # ---- Scoring + raisons ----
+        # ---- Scoring & sizing ----
         indicators = {
             "rsi": rsi,
             "macd": macd,
@@ -2661,28 +2642,23 @@ async def process_symbol_aggressive(symbol):
             "volume_ok": volume_ok,
             "above_ema200": above_ema200,
         }
-        score = compute_confidence_score(indicators)
-        score = max(0, score - indicators_soft_penalty)
+        score = max(0, compute_confidence_score(indicators) - indicators_soft_penalty)
         label_conf = label_confidence(score)
         SCORE_MIN_AGR = 6
         if score < SCORE_MIN_AGR:
             log_refusal(symbol, f"Score insuffisant (agr): {score:.1f} < {SCORE_MIN_AGR}")
-            try:
-                indicators_soft_penalty += 1
-            except NameError:
-                pass
+            # Réduire la taille plutôt que refuser
             try:
                 position_pct = max(POS_MIN_PCT, min(position_pct * 0.70, POS_MAX_PCT))
             except NameError:
                 position_pct = POS_MIN_PCT
-            # (pas de return)
 
         ATR_INIT_MULT_AGR = 1.2
         sl_initial = price - ATR_INIT_MULT_AGR * atr
         sl_initial = max(0.0, min(sl_initial, price * 0.999))
 
         position_pct = position_pct_from_risk(price, sl_initial, score)
-        
+
         br_level_for_check = last10_high if near_level else None
         if not confirm_15m_after_signal(symbol, breakout_level=br_level_for_check, ema25_1h=ema25):
             if br_level_for_check is not None:
@@ -2691,13 +2667,10 @@ async def process_symbol_aggressive(symbol):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (aggressive)")
             if not in_trade:
                 return
-            # si in_trade: on ne retourne pas ici (la gestion a déjà été faite plus haut)
 
         if price > ema25 * 1.08:
             log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
             reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
-            # pas de return -> on continue
-
 
         # --- Circuit breaker JOUR (aggressive) ---
         pnl_today = daily_pnl_pct_utc()
@@ -2713,7 +2686,6 @@ async def process_symbol_aggressive(symbol):
 
         # ---- Entrée ----
         trade_id = make_trade_id(symbol)
-        ema200_1h = ema200
 
         trades[symbol] = {
             "entry": price,
@@ -2732,22 +2704,23 @@ async def process_symbol_aggressive(symbol):
         last_trade_time[symbol] = datetime.now(timezone.utc)
         save_trades()
 
-        # uptrends via cache préchargé
+        # Contexte uptrend via cache
         btc_up = is_uptrend([float(k[4]) for k in market_cache.get("BTCUSDT", [])]) if market_cache.get("BTCUSDT") else False
         eth_up = is_uptrend([float(k[4]) for k in market_cache.get("ETHUSDT", [])]) if market_cache.get("ETHUSDT") else False
 
         msg = format_entry_msg(
             symbol, trade_id, "aggressive", BOT_VERSION, price, position_pct,
-            trades[symbol]["sl_initial"], ((price - trades[symbol]["sl_initial"]) / price) * 100, atr,
+            sl_initial, ((price - sl_initial) / price) * 100, atr,
             rsi, macd, signal, adx_value,
-            supertrend_ok, ema25, ema50_4h, ema200_1h, ema200_4h,
+            supertrend_ok,
+            ema25,
+            ema50_4h, ema200_1h, ema200_4h,
             vol5, vol20, vol5 / max(vol20, 1e-9),
             btc_up, eth_up,
             score, label_conf, reasons
         )
         await tg_send(msg)
 
-        # Logging CSV (BUY)
         log_trade_csv({
             "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             "trade_id": trade_id,
@@ -2760,7 +2733,7 @@ async def process_symbol_aggressive(symbol):
             "price": price,
             "pnl_pct": "",
             "position_pct": position_pct,
-            "sl_initial": trades[symbol]["sl_initial"],
+            "sl_initial": sl_initial,
             "sl_final": "",
             "atr_1h": atr,
             "atr_mult_at_entry": "",
@@ -2783,9 +2756,10 @@ async def process_symbol_aggressive(symbol):
         })
         log_trade(symbol, "BUY", price)
 
+        # HOLD buffer initial (gain=0)
         await buffer_hold(
             symbol,
-            f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}"
+            f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {0.0:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}"
         )
 
     except Exception as e:
