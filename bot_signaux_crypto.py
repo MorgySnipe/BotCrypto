@@ -1472,6 +1472,9 @@ def _nb_trades(strategy=None):
 
 async def process_symbol(symbol):
     try:
+        # [PATCH-COOLDOWN std]
+        in_trade = symbol in trades  # pour ne pas bloquer la gestion d'une position déjà ouverte
+
         # --- Auto-close SOUPLE (ne coupe plus automatiquement à 12h) ---
         if symbol in trades and trades[symbol].get("strategy", "standard") == "standard":
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
@@ -1628,7 +1631,8 @@ async def process_symbol(symbol):
             log_refusal(symbol, "Supertrend 1h non haussier (signal=False)")
             return
 
-        if symbol in last_trade_time:
+        # [PATCH-COOLDOWN std] — le cooldown ne bloque que les nouvelles entrées
+        if (symbol in last_trade_time) and (not in_trade):
             cooldown_left_h = COOLDOWN_HOURS - (datetime.now(timezone.utc) - last_trade_time[symbol]).total_seconds() / 3600
             if cooldown_left_h > 0:
                 log_refusal(
@@ -1637,7 +1641,7 @@ async def process_symbol(symbol):
                     cooldown_left_min=int(cooldown_left_h * 60)
                 )
                 return
-                
+            
         # ----- Garde-fous -----
         slots = min(allowed_trade_slots("standard"), perf_cap_max_trades("standard"))
         if _nb_trades("standard") >= slots:
@@ -2186,6 +2190,7 @@ async def process_symbol(symbol):
 
 async def process_symbol_aggressive(symbol):
     try:
+        in_trade = symbol in trades 
         # --- Paramètres VOLUME (aggressive) ---
         MIN_VOLUME_LOCAL = 50_000       # fallback local si pas de médiane 30j
         VOL_MED_MULT_AGR = 0.15             # 15% de la médiane 30j (filtre plus réaliste)
@@ -2303,7 +2308,7 @@ async def process_symbol_aggressive(symbol):
             except NameError:
                 pass
 
-        if symbol in last_trade_time:
+        if (symbol in last_trade_time) and (not in_trade):
             cooldown_left_h = COOLDOWN_HOURS - (datetime.now(timezone.utc) - last_trade_time[symbol]).total_seconds() / 3600
             if cooldown_left_h > 0:
                 log_refusal(symbol, "Cooldown actif", cooldown_left_min=int(cooldown_left_h * 60))
