@@ -1487,6 +1487,54 @@ async def process_symbol(symbol):
         print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
 
         klines = get_cached(symbol, '1h')# 1h
+        # --- GUARD: trade ouvert mais pas de données 1h -> gérer en mode minimal ---
+        in_trade_std = (symbol in trades) and (trades[symbol].get("strategy", "standard") == "standard")
+        if in_trade_std and (not klines or len(klines) < 20):
+            price = get_last_price(symbol)
+            if price is None:
+                await tg_send(f"⚠️ {symbol} en position (standard) mais données 1h indisponibles. Pas d’update.")
+                return
+            entry = float(trades[symbol].get("entry", price))
+            stop  = float(trades[symbol].get("stop", trades[symbol].get("sl_initial", price)))
+            gain  = ((price - entry) / max(entry, 1e-9)) * 100.0
+
+            if price <= stop or gain <= -1.5:
+                # sortie sécurité minimale (indicateurs à 0 dans le message)
+                msg = format_stop_msg(symbol, trades[symbol]["trade_id"], stop, gain, 0, 0, 0)
+                await tg_send(msg)
+                log_trade_csv({
+                    "ts_utc": utc_now_str(),
+                    "trade_id": trades[symbol]["trade_id"],
+                    "symbol": symbol,
+                    "event": "STOP",
+                    "strategy": "standard",
+                    "version": BOT_VERSION,
+                    "entry": entry,
+                    "exit": price,
+                    "price": price,
+                    "pnl_pct": gain,
+                    "position_pct": trades[symbol].get("position_pct", ""),
+                    "sl_initial": trades[symbol].get("sl_initial", ""),
+                    "sl_final": stop,
+                    "atr_1h": 0.0, "atr_mult_at_entry": "",
+                    "rsi_1h": 0.0, "macd": 0.0, "signal": 0.0, "adx_1h": 0.0,
+                    "supertrend_on": False,
+                    "ema25_1h": 0.0, "ema200_1h": 0.0, "ema50_4h": 0.0, "ema200_4h": 0.0,
+                    "vol_ma5": 0.0, "vol_ma20": 0.0, "vol_ratio": 0.0,
+                    "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
+                    "reason_entry": trades[symbol].get("reason_entry", ""),
+                    "reason_exit": "Stop (fallback 1h indisponible)"
+                })
+                log_trade(symbol, "STOP", price, gain)
+                _delete_trade(symbol)
+                return
+
+            # sinon tenir la position : HOLD minimal
+            log_trade(symbol, "HOLD", price)
+            await buffer_hold(symbol, f"{utc_now_str()} | {symbol} HOLD (fallback) | prix {price:.4f} | stop {stop:.4f}")
+            return
+
         if not klines or len(klines) < 50:
             log_refusal(symbol, "Données 1h insuffisantes")
             if not in_trade:
@@ -2395,6 +2443,50 @@ async def process_symbol_aggressive(symbol):
 
         # ---- Analyse agressive ----
         klines = get_cached(symbol, '1h')
+        in_trade_agr = (symbol in trades) and (trades[symbol].get("strategy") == "aggressive")
+        if in_trade_agr and (not klines or len(klines) < 20):
+            price = get_last_price(symbol)
+            if price is None:
+                await tg_send(f"⚠️ {symbol} en position (aggressive) mais données 1h indisponibles. Pas d’update.")
+                return
+            entry = float(trades[symbol].get("entry", price))
+            stop  = float(trades[symbol].get("stop", trades[symbol].get("sl_initial", price)))
+            gain  = ((price - entry) / max(entry, 1e-9)) * 100.0
+
+            if price <= stop or gain <= -1.5:
+                msg = format_stop_msg(symbol, trades[symbol]["trade_id"], stop, gain, 0, 0, 0)
+                await tg_send(msg)
+                log_trade_csv({
+                    "ts_utc": utc_now_str(),
+                    "trade_id": trades[symbol]["trade_id"],
+                    "symbol": symbol,
+                    "event": "STOP",
+                    "strategy": "aggressive",
+                    "version": BOT_VERSION,
+                    "entry": entry,
+                    "exit": price,
+                    "price": price,
+                    "pnl_pct": gain,
+                    "position_pct": trades[symbol].get("position_pct", ""),
+                    "sl_initial": trades[symbol].get("sl_initial", ""),
+                    "sl_final": stop,
+                    "atr_1h": 0.0, "atr_mult_at_entry": "",
+                    "rsi_1h": 0.0, "macd": 0.0, "signal": 0.0, "adx_1h": 0.0,
+                    "supertrend_on": False,
+                    "ema25_1h": 0.0, "ema200_1h": 0.0, "ema50_4h": 0.0, "ema200_4h": 0.0,
+                    "vol_ma5": 0.0, "vol_ma20": 0.0, "vol_ratio": 0.0,
+                    "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
+                    "reason_entry": trades[symbol].get("reason_entry", ""),
+                    "reason_exit": "Stop (fallback 1h indisponible)"
+                })
+                log_trade(symbol, "STOP", price, gain)
+                _delete_trade(symbol)
+                return
+
+            log_trade(symbol, "HOLD", price)
+            await buffer_hold(symbol, f"{utc_now_str()} | {symbol} HOLD (fallback) | prix {price:.4f} | stop {stop:.4f}")
+            return
         if not klines or len(klines) < 50:
             log_refusal(symbol, "Données 1h insuffisantes")
             if not in_trade: return
