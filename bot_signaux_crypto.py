@@ -1489,7 +1489,10 @@ async def process_symbol(symbol):
         klines = get_cached(symbol, '1h')# 1h
         if not klines or len(klines) < 50:
             log_refusal(symbol, "Données 1h insuffisantes")
-            return
+            if not in_trade:
+                return
+            # si in_trade: on continue (la gestion a déjà été faite plus haut)
+
 
         # --- Volume 1h vs médiane 30j (robuste & borné) ---
         vol_now_1h = float(klines[-1][7])
@@ -1507,8 +1510,9 @@ async def process_symbol(symbol):
             med_30d = min(med_30d_raw, p70 * 1.5)  # cap raisonnable
 
             if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d):
-                log_refusal(symbol, f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})")
-                return
+                log_refusal(symbol, f"Volume 1h trop faible vs med30j (...)")
+                if not in_trade:
+                    return
         else:
             if vol_now_1h < MIN_VOLUME_ABS:
                 log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
@@ -1524,7 +1528,8 @@ async def process_symbol(symbol):
         price = get_last_price(symbol)
         if price is None:
             log_refusal(symbol, "API prix indisponible")
-            return
+            if not in_trade:
+                return
         # --- Indicateurs (versions TradingView) ---
         rsi = rsi_tv(closes, period=14)
         rsi_series = rsi_tv_series(closes, period=14)
@@ -1786,7 +1791,9 @@ async def process_symbol(symbol):
         klines_4h = get_cached(symbol, '4h')
         if not klines_4h or len(klines_4h) < 50:
             log_refusal(symbol, "Données 4h insuffisantes")
-            return
+            if not in_trade:
+                return
+
         closes_4h = [float(k[4]) for k in klines_4h]
         ema200_4h = ema_tv(closes_4h, 200)
         ema50_4h  = ema_tv(closes_4h, 50)
@@ -1882,7 +1889,8 @@ async def process_symbol(symbol):
         slots = min(allowed_trade_slots("standard"), perf_cap_max_trades("standard"))
         if _nb_trades("standard") >= slots:
             log_refusal(symbol, f"Max trades standard atteints ({_nb_trades('standard')}/{slots})")
-            return
+            if not in_trade:
+                return
 
         # --- Low-liquidity session -> SOFT ---
         ok_session, _sess = is_active_liquidity_session(symbol=symbol)
@@ -1901,12 +1909,14 @@ async def process_symbol(symbol):
             blocked, why = btc_regime_blocked()
             if blocked:
                 log_refusal(symbol, f"Filtre régime BTC: {why}")
-                return
+                if not in_trade:
+                    return
 
-        # --- BTC market drift (alts only) ---
         if symbol != "BTCUSDT" and btc_market_drift():
             log_refusal(symbol, "BTC drift (1h < EMA200 & MACD<signal)")
-            return
+            if not in_trade:
+                return
+
             
         # — Pré-filtre: prix trop loin de l’EMA25 (plus strict)
         # seuils plus larges + pénalité soft (ne bloque pas)
@@ -1925,14 +1935,16 @@ async def process_symbol(symbol):
                 pass
             # pas de return : on continue
         if not check_spike_and_wick(symbol, klines, price, mode_label="std"):
-            return
+            if not in_trade:
+                return
             
         # [#volume-confirm-standard]
         k15 = get_cached(symbol, VOL_CONFIRM_TF, limit=max(25, VOL_CONFIRM_LOOKBACK + 5))
         vols15 = volumes_series(k15, quote=True)
         if len(vols15) < VOL_CONFIRM_LOOKBACK + 1:
             log_refusal(symbol, "Données 15m insuffisantes (volume)")
-            return
+            if not in_trade:
+                return
 
         # APRÈS (standard) — MA12 + seuil 1.10
         # --- volume-confirm-standard (MA12 + seuil 1.00) ---
@@ -1985,12 +1997,14 @@ async def process_symbol(symbol):
             ok15, det15 = check_15m_filter(k15, breakout_level=br_level)
             if not ok15:
                 log_refusal(symbol, f"Filtre 15m non validé (BRK): {det15}")
-                return
+                if not in_trade:
+                    return
 
             if not confirm_15m_after_signal(symbol, breakout_level=br_level, ema25_1h=ema25):
-                log_refusal(symbol, "Anti-chasse: pas de clôture 15m > niveau de retest OU > EMA25(1h) ±0.1%")
-                return
-
+                log_refusal(symbol, "Anti-chasse: ...")
+                if not in_trade:
+                    return
+                    
             if price > ema25 * 1.08:
                 log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
                 reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
@@ -2312,11 +2326,12 @@ async def process_symbol(symbol):
                 position_pct = POS_MIN_PCT
 
         # --- Circuit breaker JOUR (avant toute nouvelle entrée) ---
-        if buy and symbol not in trades:
+        if buy and not in_trade:
             pnl_today = daily_pnl_pct_utc()
             if pnl_today <= DAILY_MAX_LOSS * 100.0:
-                log_refusal(symbol, f"Daily loss limit hit (P&L jour {pnl_today:.2f}% ≤ {DAILY_MAX_LOSS*100:.0f}%)")
+                log_refusal(symbol, f"Daily loss limit hit (...)")
                 return
+
         # --- Entrée (BUY) ---
         if buy and symbol not in trades:
             trade_id = make_trade_id(symbol)
@@ -2389,7 +2404,7 @@ async def process_symbol_aggressive(symbol):
         klines = get_cached(symbol, '1h')
         if not klines or len(klines) < 50:
             log_refusal(symbol, "Données 1h insuffisantes")
-            return
+            if not in_trade: return
 
         closes  = [float(k[4]) for k in klines]
         highs   = [float(k[2]) for k in klines]
@@ -2402,7 +2417,8 @@ async def process_symbol_aggressive(symbol):
         price = get_last_price(symbol)
         if price is None:
             log_refusal(symbol, "API prix indisponible")
-            return
+            if not in_trade: return
+
 
         # --- Volume 1h vs médiane 30j (robuste & borné) ---
         vol_now_1h = float(klines[-1][7])
@@ -2714,7 +2730,8 @@ async def process_symbol_aggressive(symbol):
         slots = min(allowed_trade_slots("aggressive"), perf_cap_max_trades("aggressive"))
         if _nb_trades("aggressive") >= slots:
             log_refusal(symbol, f"Max trades aggressive atteints ({_nb_trades('aggressive')}/{slots})")
-            return
+            if not in_trade:
+                return
         # --- Low-liquidity session -> SOFT ---
         # init pénalités/notes (doit être fait AVANT de s'en servir)
         indicators_soft_penalty = 0
@@ -2759,7 +2776,8 @@ async def process_symbol_aggressive(symbol):
             blocked, why = btc_regime_blocked()
             if blocked:
                 log_refusal(symbol, f"Filtre régime BTC: {why}")
-                return
+                if not in_trade:
+                    return
 
         # ---- Conditions confluence ----
         supertrend_ok = supertrend_like_on_close(klines)
@@ -2786,7 +2804,7 @@ async def process_symbol_aggressive(symbol):
         k4 = get_cached(symbol, '4h')
         if not k4 or len(k4) < 50:
             log_refusal(symbol, "Données 4h insuffisantes")
-            return
+            if not in_trade: return
 
         c4 = [float(k[4]) for k in k4]
         ema50_4h  = ema_tv(c4, 50)
@@ -2801,14 +2819,16 @@ async def process_symbol_aggressive(symbol):
         # breakout : prix au-dessus du plus haut des 10 dernières bougies (avec marge)
         breakout = price > last10_high * 1.002
         if not breakout:
-            log_refusal(symbol, f"Pas de breakout (prix={price}, plus_haut10j={last10_high})")
-            return
+            log_refusal(symbol, f"Pas de breakout (...)")
+            if not in_trade:
+                return
 
         # éviter un mouvement déjà trop étendu sur les 3 dernières bougies
         last3_change = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
         if last3_change > 0.022:
-            log_refusal(symbol, f"Mouvement 3 bougies trop fort (+{last3_change*100:.2f}%)")
-            return
+            log_refusal(symbol, f"Mouvement 3 bougies trop fort ...")
+            if not in_trade:
+                return
 
         # Retest valide = breakout OU rebond EMA25 ±0.3%
         RETEST_BAND_AGR = 0.003
@@ -2832,9 +2852,9 @@ async def process_symbol_aggressive(symbol):
         high_now  = float(klines[-1][2])
         spike_up_pct = ((max(high_now, price) - open_now) / max(open_now, 1e-9)) * 100.0
         if spike_up_pct > ANTI_SPIKE_UP_AGR:
-            log_refusal(symbol, "Anti-spike (aggressive)", trigger=f"bougie_1h={spike_up_pct:.2f}%, seuil={ANTI_SPIKE_UP_AGR:.1f}%")
-            return
-
+            log_refusal(symbol, "Anti-spike (aggressive)", ...)
+            if not in_trade:
+                return
         # Regroupement anti-spike + anti-chasse (mèche 1h)
         if not check_spike_and_wick(symbol, klines, price, mode_label="aggro"):
             return
@@ -2844,8 +2864,7 @@ async def process_symbol_aggressive(symbol):
         vols15 = volumes_series(k15, quote=True)
         if len(vols15) < VOL_CONFIRM_LOOKBACK_AGR + 1:
             log_refusal(symbol, "Données 15m insuffisantes (volume)")
-            return
-
+            if not in_trade: return
         # APRÈS (agressif) — MA10 + seuil 1.05
         # [#volume-confirm-aggressive] — MA12 + seuil 0.95
         vol_now = float(k15[-2][7])
@@ -2865,7 +2884,7 @@ async def process_symbol_aggressive(symbol):
             ok15, det15 = check_15m_filter(k15, breakout_level=None)
         if not ok15:
             log_refusal(symbol, f"Filtre 15m non validé (aggressive): {det15}")
-            return
+            if not in_trade: return
 
         # ---- Scoring + raisons ----
         indicators = {
@@ -2905,7 +2924,9 @@ async def process_symbol_aggressive(symbol):
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > niveau de retest (aggressive)")
             else:
                 log_refusal(symbol, "Anti-chasse: pas de clôture 15m > EMA25(1h) ±0.1% (aggressive)")
-            return
+            if not in_trade:
+                return
+            # si in_trade: on ne retourne pas ici (la gestion a déjà été faite plus haut)
 
         if price > ema25 * 1.08:
             log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
