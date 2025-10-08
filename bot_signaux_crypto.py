@@ -1533,7 +1533,243 @@ async def process_symbol(symbol):
         atr = atr_tv(klines, period=14)
         adx_value = adx_tv(klines, period=14)
         ema25 = ema_tv(closes, 25)
-        supertrend_signal = supertrend_like_on_close(klines)   # <-- DÉFINI TÔT
+        supertrend_signal = supertrend_like_on_close(klines)
+
+        in_trade = (symbol in trades) and (trades[symbol].get("strategy", "standard") == "standard")
+        if in_trade:
+            # === GESTION TP / HOLD / SELL (MOVED) ===
+            sell = False
+            entry = trades[symbol]['entry']
+            entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+            elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
+            gain = ((price - entry) / max(entry, 1e-9)) * 100.0
+            stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN)))
+
+            # --- Trailing Stop Adaptatif (en fonction de l'ADX) ---
+            adx_val = trades[symbol].get("adx_1h", 20)
+            if adx_val >= 25:
+                trail_multiplier = 0.3
+            elif adx_val >= 20:
+                trail_multiplier = 0.5
+            else:
+                trail_multiplier = 0.8
+            new_stop = price * (1 - trail_multiplier * atr / max(price, 1e-9))
+            trades[symbol]["stop"] = max(stop, new_stop)
+
+            # --- Sortie anticipée si BTC tourne négatif (gain faible) ---
+            blocked, why_btc = btc_regime_blocked()
+            if blocked and gain < 0.8:
+                raison = "BTC regime turned negative"
+                msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, trades[symbol]["stop"], elapsed_time, raison)
+                await tg_send(msg)
+                vol5_loc  = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                log_trade_csv({
+                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                    "trade_id": trades[symbol]["trade_id"], "symbol": symbol,
+                    "event": "SELL", "strategy": "standard", "version": BOT_VERSION,
+                    "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
+                    "position_pct": trades[symbol].get("position_pct", ""),
+                    "sl_initial": trades[symbol].get("sl_initial", ""), "sl_final": trades[symbol]["stop"],
+                    "atr_1h": atr, "atr_mult_at_entry": "",
+                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                    "supertrend_on": supertrend_signal, "ema25_1h": ema25, "ema200_1h": ema200,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
+                    "vol_ma5": vol5_loc, "vol_ma20": vol20_loc,
+                    "vol_ratio": vol5_loc / max(vol20_loc, 1e-9) if vol20_loc else 0.0,
+                    "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
+                    "reason_entry": trades[symbol].get("reason_entry", ""),
+                    "reason_exit": raison
+                })
+                log_trade(symbol, "SELL", price, gain)
+                _delete_trade(symbol)
+                return
+
+            # --- Timeout intelligent (STANDARD) ---
+            if (elapsed_time >= SMART_TIMEOUT_EARLIEST_H_STD
+                and gain < SMART_TIMEOUT_MIN_GAIN_STD
+                and not trades[symbol].get("tp1", False)
+                and not btc_is_bullish_strong()):
+                k1h_now = get_cached(symbol, '1h')
+                trig, why = smart_timeout_check(k1h_now, entry,
+                                                window_h=SMART_TIMEOUT_WINDOW_H,
+                                                range_pct=SMART_TIMEOUT_RANGE_PCT_STD)
+                if trig:
+                    raison = f"Timeout intelligent (standard): {why}"
+                    msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, trades[symbol]["stop"], elapsed_time, raison)
+                    await tg_send(msg)
+                    vol5_loc  = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                    vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                    log_trade_csv({
+                        "trade_id": trades[symbol]["trade_id"], "symbol": symbol, "event": "SMART_TIMEOUT",
+                        "strategy": "standard", "version": BOT_VERSION,
+                        "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
+                        "position_pct": trades[symbol].get("position_pct", ""),
+                        "sl_initial": trades[symbol].get("sl_initial", ""), "sl_final": trades[symbol]["stop"],
+                        "atr_1h": atr, "atr_mult_at_entry": "",
+                        "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                        "supertrend_on": supertrend_signal, "ema25_1h": ema25, "ema200_1h": ema200,
+                        "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                        "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
+                        "vol_ma5": vol5_loc, "vol_ma20": vol20_loc, "vol_ratio": vol5_loc / max(vol20_loc, 1e-9) if vol20_loc else 0.0,
+                        "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
+                        "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
+                        "reason_entry": trades[symbol].get("reason_entry", ""), "reason_exit": raison
+                    })
+                    log_trade(symbol, "SELL", price, gain)
+                    _delete_trade(symbol)
+                    return
+
+            # — Sortie dynamique rapide (5m) —
+            triggered, fx = fast_exit_5m_trigger(symbol, entry, price)
+            if triggered:
+                vol5_loc  = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                reason_bits = []
+                if fx.get("rsi_drop") is not None and fx["rsi_drop"] > 5:
+                    reason_bits.append(f"RSI(5m) -{fx['rsi_drop']:.1f} pts")
+                if fx.get("macd_cross_down"):
+                    reason_bits.append("MACD(5m) croisement baissier")
+                raison = "Sortie dynamique 5m: gain ≥ +1% ; " + " + ".join(reason_bits)
+                msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, trades[symbol]["stop"], elapsed_time, raison)
+                await tg_send(msg)
+                log_trade_csv({
+                    "trade_id": trades[symbol]["trade_id"],
+                    "symbol": symbol,
+                    "event": "DYN_EXIT_5M",
+                    "strategy": "standard",
+                    "version": BOT_VERSION,
+                    "entry": entry,
+                    "exit": price,
+                    "price": price,
+                    "pnl_pct": gain,
+                    "position_pct": trades[symbol].get("position_pct", ""),
+                    "sl_initial": trades[symbol].get("sl_initial", ""),
+                    "sl_final": trades[symbol]["stop"],
+                    "atr_mult_at_entry": "",
+                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                    "supertrend_on": supertrend_signal,
+                    "ema25_1h": ema25, "ema200_1h": ema200,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
+                    "vol_ma5": vol5_loc, "vol_ma20": vol20_loc, "vol_ratio": vol5_loc / max(vol20_loc, 1e-9) if vol20_loc else 0.0,
+                    "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
+                    "reason_entry": trades[symbol].get("reason_entry", ""),
+                    "reason_exit": raison
+                })
+                log_trade(symbol, "SELL", price, gain)
+                _delete_trade(symbol)
+                return
+
+            trailing_stop_advanced(symbol, price, atr_value=atr)
+            stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN)))
+
+            if gain < 0.8 and (rsi < 48 or macd < signal):
+                raison = "Momentum cassé (sortie anticipée)"
+                msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, raison)
+                await tg_send(msg)
+                vol5_loc  = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                log_trade_csv({
+                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                    "trade_id": trades[symbol]["trade_id"],
+                    "symbol": symbol,
+                    "event": "SELL",
+                    "strategy": "standard",
+                    "version": BOT_VERSION,
+                    "entry": entry,
+                    "exit": price,
+                    "price": price,
+                    "pnl_pct": gain,
+                    "position_pct": trades[symbol].get("position_pct", ""),
+                    "sl_initial": trades[symbol].get("sl_initial", ""), "sl_final": stop,
+                    "atr_1h": atr, "atr_mult_at_entry": "",
+                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                    "supertrend_on": supertrend_signal,
+                    "ema25_1h": ema25, "ema200_1h": ema200,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
+                    "vol_ma5": vol5_loc, "vol_ma20": vol20_loc,
+                    "vol_ratio": vol5_loc / max(vol20_loc, 1e-9) if vol20_loc else 0.0,
+                    "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
+                    "reason_entry": trades[symbol].get("reason_entry", ""),
+                    "reason_exit": raison
+                })
+                log_trade(symbol, "SELL", price, gain)
+                _delete_trade(symbol)
+                return
+
+            # === TP progressifs (basés sur l'ATR) ===
+            atr_pct = (atr / max(entry, 1e-9)) * 100.0
+            tp_levels = {i + 1: mult * atr_pct for i, mult in enumerate(TP_ATR_MULTS_STD)}
+            if "tp_times" not in trades[symbol]:
+                trades[symbol]["tp_times"] = {}
+            for tp_num, tp_pct in tp_levels.items():
+                if gain >= tp_pct and not trades[symbol].get(f"tp{tp_num}", False):
+                    last_tp_time = trades[symbol]["tp_times"].get(f"tp{tp_num-1}") if tp_num > 1 else None
+                    if isinstance(last_tp_time, str):
+                        try:
+                            last_tp_time = datetime.fromisoformat(last_tp_time)
+                        except Exception:
+                            last_tp_time = None
+                    if not last_tp_time or (datetime.now(timezone.utc) - last_tp_time).total_seconds() >= 120:
+                        trades[symbol][f"tp{tp_num}"] = True
+                        trades[symbol]["tp_times"][f"tp{tp_num}"] = datetime.now(timezone.utc)
+                        new_stop = entry if tp_num == 1 else entry * (1 + max(tp_pct - 0.5, 0.0) / 100.0)
+                        trades[symbol]["stop"] = max(stop, new_stop)
+                        save_trades()
+                        msg = format_tp_msg(
+                            tp_num, symbol, trades[symbol]["trade_id"], price, gain,
+                            trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100.0,
+                            elapsed_time, "Stop ajusté (ATR)"
+                        )
+                        await tg_send(msg)
+
+            if trades[symbol].get("tp1", False) and gain < 1:
+                sell = True
+            if price < trades[symbol]["stop"] or gain <= -1.5:
+                msg = format_stop_msg(symbol, trades[symbol]["trade_id"], trades[symbol]["stop"], gain, rsi, adx_value, np.mean(volumes[-5:]) / max(np.mean(volumes[-20:]), 1e-9) if len(volumes) >= 20 else 0.0)
+                await tg_send(msg)
+                sell = True
+                event_name = "STOP" if price < trades[symbol]["stop"] else "SELL"
+                log_trade_csv({
+                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                    "trade_id": trades[symbol]["trade_id"],
+                    "symbol": symbol,
+                    "event": event_name,
+                    "strategy": "standard",
+                    "version": BOT_VERSION,
+                    "entry": entry,
+                    "exit": price,
+                    "price": price,
+                    "pnl_pct": gain,
+                    "position_pct": trades[symbol].get("position_pct", ""),
+                    "sl_initial": trades[symbol].get("sl_initial", ""),
+                    "sl_final": trades[symbol]["stop"],
+                    "atr_1h": atr,
+                    "atr_mult_at_entry": "",
+                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                    "supertrend_on": supertrend_signal,
+                    "ema25_1h": ema25, "ema200_1h": ema200,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
+                    "vol_ma5": np.mean(volumes[-5:]) if len(volumes) >= 5 else 0.0,
+                    "vol_ma20": np.mean(volumes[-20:]) if len(volumes) >= 20 else 0.0,
+                    "vol_ratio": (np.mean(volumes[-5:]) / max(np.mean(volumes[-20:]), 1e-9)) if len(volumes) >= 20 else 0.0,
+                    "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
+                    "reason_entry": trades[symbol].get("reason_entry", ""),
+                    "reason_exit": "Stop touché" if event_name == "STOP" else "Perte max (-1.5%)"
+                })
+
+            if not sell:
+                log_trade(symbol, "HOLD", price)
+                await buffer_hold(symbol, f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}")
+            return  # <- IMPORTANT : on termine ici la gestion d’un trade ouvert
 
         # --- filtre de marché BTC pour les ALT ---
         if symbol != "BTCUSDT":
@@ -1796,63 +2032,6 @@ async def process_symbol(symbol):
                 buy = True
                 label = "✅ Pullback EMA25 propre + Confluence"
                 reasons = [label, f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
-
-        # === GESTION TP / HOLD / SELL ===
-
-        sell = False
-        if symbol in trades and trades[symbol].get("strategy", "standard") == "standard":
-            entry = trades[symbol]['entry']
-            entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-            elapsed_time = (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600
-            gain = ((price - entry) / entry) * 100
-            stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN)))
-
-            # --- Trailing Stop Adaptatif (en fonction de l'ADX) ---
-            adx_val = trades[symbol].get("adx_1h", 20)  # récupère l'ADX stocké, ou valeur par défaut
-
-            if adx_val >= 25:
-                trail_multiplier = 0.3   # tendance forte → stop serré
-            elif adx_val >= 20:
-                trail_multiplier = 0.5   # tendance moyenne
-            else:
-                trail_multiplier = 0.8   # tendance faible → stop large
-
-            new_stop = price * (1 - trail_multiplier * atr / price)
-
-            # on garde le stop le plus haut (jamais descendre)
-            trades[symbol]["stop"] = max(stop, new_stop)
-
-            # --- Sortie anticipée si BTC tourne négatif (gain faible) ---
-            blocked, why_btc = btc_regime_blocked()
-            if blocked and gain < 0.8:
-                raison = "BTC regime turned negative"
-                msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, raison)
-                await tg_send(msg)
-
-                vol5_loc  = float(np.mean(volumes[-5:]))
-                vol20_loc = float(np.mean(volumes[-20:]))
-
-                log_trade_csv({
-                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                    "trade_id": trades[symbol]["trade_id"], "symbol": symbol,
-                    "event": "SELL", "strategy": "standard", "version": BOT_VERSION,
-                    "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
-                    "position_pct": trades[symbol].get("position_pct", ""),
-                    "sl_initial": trades[symbol].get("sl_initial", ""), "sl_final": stop,
-                    "atr_1h": atr, "atr_mult_at_entry": "",
-                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
-                    "supertrend_on": supertrend_signal, "ema25_1h": ema25, "ema200_1h": ema200,
-                    "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
-                    "vol_ma5": vol5_loc, "vol_ma20": vol20_loc,
-                    "vol_ratio": vol5_loc / max(vol20_loc, 1e-9),
-                    "btc_uptrend": btc_up, "eth_uptrend": eth_up,
-                    "reason_entry": trades[symbol].get("reason_entry", ""),
-                    "reason_exit": raison
-                })
-
-                log_trade(symbol, "SELL", price, gain)
-                _delete_trade(symbol)
-                return
 
             # --- Timeout intelligent (STANDARD) ---
             if (elapsed_time >= SMART_TIMEOUT_EARLIEST_H_STD
@@ -2259,6 +2438,267 @@ async def process_symbol_aggressive(symbol):
         # comparer l'élan MACD vs bougie précédente
         macd_prev, signal_prev = compute_macd(closes[:-1])
 
+        in_trade = (symbol in trades) and (trades[symbol].get("strategy") == "aggressive")
+        if in_trade:
+            # ---- Gestion TP / HOLD / SELL (MOVED) ----
+            atr_val_current = atr_tv(klines)
+            entry = trades[symbol]["entry"]
+            gain  = ((price - entry) / max(entry, 1e-9)) * 100.0
+            stop  = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_AGR_MIN)))
+            elapsed_time = (
+                datetime.now(timezone.utc)
+                - datetime.strptime(trades[symbol]["time"], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+            ).total_seconds() / 3600
+
+            # --- TP progressifs (AGGRESSIVE) ---
+            if "tp_times" not in trades[symbol]:
+                trades[symbol]["tp_times"] = {}
+            for tp_idx, atr_mult in enumerate(TP_ATR_MULTS_AGR, start=1):
+                threshold_pct = (atr_mult * atr_val_current / max(entry, 1e-9)) * 100.0
+                if gain >= threshold_pct and not trades[symbol].get(f"tp{tp_idx}", False):
+                    last_tp_time = trades[symbol]["tp_times"].get(f"tp{tp_idx-1}") if tp_idx > 1 else None
+                    if isinstance(last_tp_time, str):
+                        try:
+                            last_tp_time = datetime.fromisoformat(last_tp_time)
+                        except Exception:
+                            last_tp_time = None
+                    if not last_tp_time or (datetime.now(timezone.utc) - last_tp_time).total_seconds() >= 120:
+                        trades[symbol][f"tp{tp_idx}"] = True
+                        trades[symbol]["tp_times"][f"tp{tp_idx}"] = datetime.now(timezone.utc)
+                        new_stop_level = entry if tp_idx == 1 else entry * (1.0 + max(0.0, threshold_pct - 0.5) / 100.0)
+                        trades[symbol]["stop"] = max(stop, new_stop_level)
+                        save_trades()
+                        msg = format_tp_msg(
+                            tp_idx, symbol, trades[symbol]["trade_id"], price, gain,
+                            trades[symbol]["stop"],
+                            ((trades[symbol]["stop"] - entry) / entry) * 100.0,
+                            elapsed_time, "Stop ajusté (ATR)"
+                        )
+                        await tg_send(msg)
+
+            # === Trailing Stop Adaptatif (ADX) ===
+            adx_val = trades[symbol].get("adx_1h", 20)
+            if adx_val >= 25:
+                trail_multiplier = 0.3
+            elif adx_val >= 20:
+                trail_multiplier = 0.5
+            else:
+                trail_multiplier = 0.8
+            trades[symbol]["stop"] = max(stop, price * (1 - trail_multiplier * atr_val_current / max(price, 1e-9)))
+
+            # --- Sortie anticipée si BTC tourne négatif (gain faible) ---
+            blocked, why_btc = btc_regime_blocked()
+            if blocked and gain < 0.8:
+                raison = "BTC regime turned negative"
+                msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, trades[symbol]["stop"], elapsed_time, raison)
+                await tg_send(msg)
+                vol5_loc  = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                log_trade_csv({
+                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                    "trade_id": trades[symbol]["trade_id"], "symbol": symbol,
+                    "event": "SELL", "strategy": "aggressive", "version": BOT_VERSION,
+                    "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
+                    "position_pct": trades[symbol]["position_pct"],
+                    "sl_initial": trades[symbol]["sl_initial"], "sl_final": trades[symbol]["stop"],
+                    "atr_1h": atr_val_current, "atr_mult_at_entry": "",
+                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                    "supertrend_on": supertrend_like_on_close(klines), "ema25_1h": ema25, "ema200_1h": ema200_1h,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
+                    "vol_ma5": vol5_loc, "vol_ma20": vol20_loc,
+                    "vol_ratio": vol5_loc / max(vol20_loc, 1e-9) if vol20_loc else 0.0,
+                    "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
+                    "reason_entry": trades[symbol]["reason_entry"],
+                    "reason_exit": raison
+                })
+                log_trade(symbol, "SELL", price, gain)
+                _delete_trade(symbol)
+                return
+
+            # --- Timeout intelligent (AGGRESSIVE) ---
+            if (elapsed_time >= SMART_TIMEOUT_EARLIEST_H_AGR
+                and gain < SMART_TIMEOUT_MIN_GAIN_AGR
+                and not trades[symbol].get("tp1", False)
+                and not btc_is_bullish_strong()):
+                k1h_now = get_cached(symbol, '1h')
+                trig, why = smart_timeout_check(k1h_now, entry,
+                                                window_h=SMART_TIMEOUT_WINDOW_H,
+                                                range_pct=SMART_TIMEOUT_RANGE_PCT_AGR)
+                if trig:
+                    raison = f"Timeout intelligent (aggressive): {why}"
+                    msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, trades[symbol]["stop"], elapsed_time, raison)
+                    await tg_send(msg)
+                    vol5_loc  = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                    vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                    log_trade_csv({
+                        "trade_id": trades[symbol]["trade_id"], "symbol": symbol, "event": "SMART_TIMEOUT",
+                        "strategy": "aggressive", "version": BOT_VERSION,
+                        "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
+                        "position_pct": trades[symbol]["position_pct"],
+                        "sl_initial": trades[symbol]["sl_initial"], "sl_final": trades[symbol]["stop"],
+                        "atr_1h": atr_val_current, "atr_mult_at_entry": "",
+                        "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                        "supertrend_on": supertrend_like_on_close(klines), "ema25_1h": ema25, "ema200_1h": ema200_1h,
+                        "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                        "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
+                        "vol_ma5": vol5_loc, "vol_ma20": vol20_loc, "vol_ratio": vol5_loc / max(vol20_loc, 1e-9) if vol20_loc else 0.0,
+                        "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
+                        "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
+                        "reason_entry": trades[symbol]["reason_entry"], "reason_exit": raison
+                    })
+                    log_trade(symbol, "SELL", price, gain)
+                    _delete_trade(symbol)
+                    return
+
+            # — Sortie dynamique rapide (5m) —
+            triggered, fx = fast_exit_5m_trigger(symbol, entry, price)
+            if triggered:
+                vol5_local  = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                vol20_local = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                reason_bits = []
+                if fx.get("rsi_drop") is not None and fx["rsi_drop"] > 5:
+                    reason_bits.append(f"RSI(5m) -{fx['rsi_drop']:.1f} pts")
+                if fx.get("macd_cross_down"):
+                    reason_bits.append("MACD(5m) croisement baissier")
+                raison = "Sortie dynamique 5m: gain ≥ +1% ; " + " + ".join(reason_bits)
+                msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, trades[symbol]["stop"], elapsed_time, raison)
+                await tg_send(msg)
+                log_trade_csv({
+                    "trade_id": trades[symbol]["trade_id"],
+                    "symbol": symbol,
+                    "event": "DYN_EXIT_5M",
+                    "strategy": "aggressive",
+                    "version": BOT_VERSION,
+                    "entry": entry,
+                    "exit": price,
+                    "price": price,
+                    "pnl_pct": gain,
+                    "position_pct": trades[symbol]["position_pct"],
+                    "sl_initial": trades[symbol]["sl_initial"],
+                    "sl_final": trades[symbol]["stop"],
+                    "atr_1h": atr_val_current, "atr_mult_at_entry": "",
+                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                    "supertrend_on": supertrend_like_on_close(klines),
+                    "ema25_1h": ema25, "ema200_1h": ema200_1h, "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
+                    "vol_ma5": vol5_local, "vol_ma20": vol20_local, "vol_ratio": vol5_local / max(vol20_local, 1e-9) if vol20_local else 0.0,
+                    "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
+                    "reason_entry": trades[symbol]["reason_entry"],
+                    "reason_exit": raison
+                })
+                log_trade(symbol, "SELL", price, gain)
+                _delete_trade(symbol)
+                return
+
+            # ---- Sortie anticipée "momentum cassé" (aggressive) ----
+            if gain < 0.8 and (rsi < 48 or macd < signal):
+                raison = "Momentum cassé (sortie anticipée)"
+                msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, trades[symbol]["stop"], elapsed_time, raison)
+                await tg_send(msg)
+                vol5_loc  = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                log_trade_csv({
+                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                    "trade_id": trades[symbol]["trade_id"],
+                    "symbol": symbol,
+                    "event": "SELL",
+                    "strategy": "aggressive",
+                    "version": BOT_VERSION,
+                    "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
+                    "position_pct": trades[symbol]["position_pct"],
+                    "sl_initial": trades[symbol]["sl_initial"],
+                    "sl_final": trades[symbol]["stop"],
+                    "atr_1h": atr_val_current,
+                    "atr_mult_at_entry": "",
+                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                    "supertrend_on": supertrend_like_on_close(klines),
+                    "ema25_1h": ema25, "ema200_1h": ema200_1h,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
+                    "vol_ma5": vol5_loc, "vol_ma20": vol20_loc, "vol_ratio": vol5_loc / max(vol20_loc, 1e-9) if vol20_loc else 0.0,
+                    "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
+                    "reason_entry": trades[symbol]["reason_entry"],
+                    "reason_exit": raison
+                })
+                log_trade(symbol, "SELL", price, gain)
+                _delete_trade(symbol)
+                return
+
+            # ---- Si TP1 pris puis le trade retombe trop ----
+            if trades[symbol].get("tp1", False) and gain < 1:
+                raison_sortie = "Perte de momentum après TP1"
+                msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, trades[symbol]["stop"], elapsed_time, raison_sortie)
+                await tg_send(msg)
+                vol5_loc  = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                log_trade_csv({
+                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                    "trade_id": trades[symbol]["trade_id"],
+                    "symbol": symbol,
+                    "event": "SELL",
+                    "strategy": "aggressive",
+                    "version": BOT_VERSION,
+                    "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
+                    "position_pct": trades[symbol]["position_pct"],
+                    "sl_initial": trades[symbol]["sl_initial"],
+                    "sl_final": trades[symbol]["stop"],
+                    "atr_1h": atr_val_current, "atr_mult_at_entry": "",
+                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                    "supertrend_on": supertrend_like_on_close(klines), "ema25_1h": ema25, "ema200_1h": ema200_1h,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
+                    "vol_ma5": vol5_loc, "vol_ma20": vol20_loc, "vol_ratio": vol5_loc / max(vol20_loc, 1e-9) if vol20_loc else 0.0,
+                    "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
+                    "reason_entry": trades[symbol]["reason_entry"], "reason_exit": raison_sortie
+                })
+                log_trade(symbol, "SELL", price, gain)
+                _delete_trade(symbol)
+                return
+
+            # ---- Stop touché ou perte max ----
+            if price < trades[symbol]["stop"] or gain <= -1.5:
+                msg = format_stop_msg(symbol, trades[symbol]["trade_id"], trades[symbol]["stop"], gain, rsi, adx_value, vol5 / max(vol20, 1e-9) if vol20 else 0.0)
+                await tg_send(msg)
+                event_name = "STOP" if price < trades[symbol]["stop"] else "SELL"
+                log_trade_csv({
+                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                    "trade_id": trades[symbol]["trade_id"],
+                    "symbol": symbol,
+                    "event": event_name,
+                    "strategy": "aggressive",
+                    "version": BOT_VERSION,
+                    "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
+                    "position_pct": trades[symbol]["position_pct"],
+                    "sl_initial": trades[symbol]["sl_initial"],
+                    "sl_final": trades[symbol]["stop"],
+                    "atr_1h": atr_val_current,
+                    "atr_mult_at_entry": "",
+                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
+                    "supertrend_on": supertrend_like_on_close(klines),
+                    "ema25_1h": ema25, "ema200_1h": ema200_1h,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
+                    "vol_ma5": vol5, "vol_ma20": vol20,
+                    "vol_ratio": vol5 / max(vol20, 1e-9) if vol20 else 0.0,
+                    "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
+                    "reason_entry": trades[symbol]["reason_entry"],
+                    "reason_exit": "Stop touché" if event_name == "STOP" else "Perte max (-1.5%)"
+                })
+                log_trade(symbol, event_name, price, gain)
+                _delete_trade(symbol)
+                return
+
+            trailing_stop_advanced(symbol, price, atr_value=atr_val_current)
+            log_trade(symbol, "HOLD", price)
+            await buffer_hold(symbol, f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}")
+            return  # <- IMPORTANT
+
         # --- Filtre marché BTC pour ALT (aggressive) ---
         if symbol != "BTCUSDT":
             btc_klines = market_cache.get("BTCUSDT", [])
@@ -2557,436 +2997,6 @@ async def process_symbol_aggressive(symbol):
         })
         log_trade(symbol, "BUY", price)
 
-        # ---- Gestion TP / HOLD / SELL ----
-        atr_val_current = atr_tv(klines)
-        entry = trades[symbol]["entry"]
-        gain  = ((price - entry) / entry) * 100
-        stop  = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_AGR_MIN)))
-        elapsed_time = (
-            datetime.now(timezone.utc)
-            - datetime.strptime(trades[symbol]["time"], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
-        ).total_seconds() / 3600
-
-
-        # --- TP progressifs (AGGRESSIVE) basés sur l'ATR ---
-        # Seuils ATR en % du prix (convertis via ATR/entry)
-        if "tp_times" not in trades[symbol]:
-            trades[symbol]["tp_times"] = {}
-
-        for tp_idx, atr_mult in enumerate(TP_ATR_MULTS_AGR, start=1):
-            # seuil de gain (en %) correspondant à atr_mult * ATR
-            threshold_pct = (atr_mult * atr_val_current / max(entry, 1e-9)) * 100.0
-
-            if gain >= threshold_pct and not trades[symbol].get(f"tp{tp_idx}", False):
-                # anti-double déclenchement : 120s entre TP successifs
-                last_tp_time = trades[symbol]["tp_times"].get(f"tp{tp_idx-1}") if tp_idx > 1 else None
-                if isinstance(last_tp_time, str):
-                    try:
-                        last_tp_time = datetime.fromisoformat(last_tp_time)
-                    except Exception:
-                        last_tp_time = None
-
-                    if (not last_tp_time) or ((datetime.now(timezone.utc) - last_tp_time).total_seconds() >= 120):
-                        trades[symbol][f"tp{tp_idx}"] = True
-                        trades[symbol]["tp_times"][f"tp{tp_idx}"] = datetime.now(timezone.utc)
-
-                        # BE au TP1 ; au-delà on remonte vers le niveau du TP atteint (léger coussin)
-                        if tp_idx == 1:
-                            new_stop_level = entry
-                        else:
-                            # coussin ~0.5% sous le niveau atteint
-                            new_stop_level = entry * (1.0 + max(0.0, threshold_pct - 0.5) / 100.0)
-
-                        trades[symbol]["stop"] = max(stop, new_stop_level)
-                        save_trades()
-
-                        msg = format_tp_msg(
-                            tp_idx, symbol, trades[symbol]["trade_id"], price, gain,
-                            trades[symbol]["stop"],
-                            ((trades[symbol]["stop"] - entry) / entry) * 100.0,
-                            elapsed_time,
-                            "Stop ajusté (ATR)"
-                        )
-                        await tg_send(msg)
-
-        # === Trailing Stop Adaptatif (en fonction de l’ADX) ===
-        adx_val = trades[symbol].get("adx_1h", 20)  # récupère l'ADX stocké, sinon valeur par défaut 20
-
-        if adx_val >= 25:
-            trail_multiplier = 0.3  # tendance forte → stop serré
-        elif adx_val >= 20:
-            trail_multiplier = 0.5  # tendance moyenne
-        else:
-            trail_multiplier = 0.8  # tendance faible → stop large
-
-        new_stop = price * (1 - trail_multiplier * atr_val_current / price)
-
-        # on garde le stop le plus haut (jamais descendre)
-        trades[symbol]["stop"] = max(stop, new_stop)
-
-
-        btc_up = is_uptrend([float(k[4]) for k in market_cache.get("BTCUSDT", [])]) if market_cache.get("BTCUSDT") else False
-        eth_up = is_uptrend([float(k[4]) for k in market_cache.get("ETHUSDT", [])]) if market_cache.get("ETHUSDT") else False
-
-        # --- Sortie anticipée si BTC tourne négatif (gain faible) ---
-        blocked, why_btc = btc_regime_blocked()
-        if blocked and gain < 0.8:
-            raison = "BTC regime turned negative"
-            msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, raison)
-            await tg_send(msg)
-
-            vol5_loc  = float(np.mean(volumes[-5:]))
-            vol20_loc = float(np.mean(volumes[-20:]))
-
-            log_trade_csv({
-                "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                "trade_id": trades[symbol]["trade_id"], "symbol": symbol,
-                "event": "SELL", "strategy": "aggressive", "version": BOT_VERSION,
-                "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
-                "position_pct": trades[symbol]["position_pct"],
-                "sl_initial": trades[symbol]["sl_initial"], "sl_final": stop,
-                "atr_1h": atr_val_current, "atr_mult_at_entry": "",
-                "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
-                "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
-                "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
-                "vol_ma5": vol5_loc, "vol_ma20": vol20_loc,
-                "vol_ratio": vol5_loc / max(vol20_loc, 1e-9),
-                "btc_uptrend": btc_up, "eth_uptrend": eth_up,
-                "reason_entry": trades[symbol]["reason_entry"],
-                "reason_exit": raison
-            })
-            log_trade(symbol, "SELL", price, gain)
-            _delete_trade(symbol)
-            return
-
-        # --- Timeout intelligent (AGGRESSIVE) ---
-        if (elapsed_time >= SMART_TIMEOUT_EARLIEST_H_AGR
-            and gain < SMART_TIMEOUT_MIN_GAIN_AGR
-            and not trades[symbol].get("tp1", False)
-            and not btc_is_bullish_strong()):
-            k1h_now = get_cached(symbol, '1h')
-            trig, why = smart_timeout_check(k1h_now, entry,
-                                            window_h=SMART_TIMEOUT_WINDOW_H,
-                                            range_pct=SMART_TIMEOUT_RANGE_PCT_AGR)
-            if trig:
-                raison = f"Timeout intelligent (aggressive): {why}"
-                msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, raison)
-                await tg_send(msg)
-
-                vol5_loc  = float(np.mean(volumes[-5:]))
-                vol20_loc = float(np.mean(volumes[-20:]))
-                log_trade_csv({
-                    "trade_id": trades[symbol]["trade_id"], "symbol": symbol, "event": "SMART_TIMEOUT",
-                    "strategy": "aggressive", "version": BOT_VERSION,
-                    "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
-                    "position_pct": trades[symbol]["position_pct"],
-                    "sl_initial": trades[symbol]["sl_initial"], "sl_final": stop,
-                    "atr_1h": atr_val_current, "atr_mult_at_entry": "",
-                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
-                    "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
-                    "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
-                    "vol_ma5": vol5_loc, "vol_ma20": vol20_loc, "vol_ratio": vol5_loc / max(vol20_loc, 1e-9),
-                    "btc_uptrend": btc_up, "eth_uptrend": eth_up,
-                    "reason_entry": trades[symbol]["reason_entry"], "reason_exit": raison
-                })
-                log_trade(symbol, "SELL", price, gain)
-                _delete_trade(symbol)
-                return
-
-        # — Sortie dynamique rapide (5m) —
-        triggered, fx = fast_exit_5m_trigger(symbol, entry, price)
-        if triggered:
-            vol5_local  = float(np.mean(volumes[-5:]))
-            vol20_local = float(np.mean(volumes[-20:]))
-            reason_bits = []
-            if fx.get("rsi_drop") is not None and fx["rsi_drop"] > 5:
-                reason_bits.append(f"RSI(5m) -{fx['rsi_drop']:.1f} pts")
-            if fx.get("macd_cross_down"):
-                reason_bits.append("MACD(5m) croisement baissier")
-            raison = "Sortie dynamique 5m: gain ≥ +1% ; " + " + ".join(reason_bits)
-
-            msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, raison)
-            await tg_send(msg)
-
-            log_trade_csv({
-                "trade_id": trades[symbol]["trade_id"],
-                "symbol": symbol,
-                "event": "DYN_EXIT_5M",
-                "strategy": "aggressive",
-                "version": BOT_VERSION,
-                "entry": entry,
-                "exit": price,
-                "price": price,
-                "pnl_pct": gain,
-                "position_pct": trades[symbol]["position_pct"],
-                "sl_initial": trades[symbol]["sl_initial"],
-                "sl_final": trades[symbol]["stop"],
-                "atr_1h": atr_val_current, "atr_mult_at_entry": "",
-                "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
-                "supertrend_on": supertrend_ok,
-                "ema25_1h": ema25, "ema200_1h": ema200_1h, "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
-                "vol_ma5": vol5_local, "vol_ma20": vol20_local, "vol_ratio": vol5_local / max(vol20_local, 1e-9),
-                "btc_uptrend": btc_up, "eth_uptrend": eth_up,
-                "reason_entry": trades[symbol]["reason_entry"],
-                "reason_exit": raison
-            })
-            log_trade(symbol, "SELL", price, gain)
-            _delete_trade(symbol)
-            return
-
-        # ---- Sortie anticipée "momentum cassé" (aggressive) ----
-        if gain < 0.8 and (rsi < 48 or macd < signal):
-            raison = "Momentum cassé (sortie anticipée)"
-            msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, stop, elapsed_time, raison)
-            await tg_send(msg)
-
-            vol5_loc  = float(np.mean(volumes[-5:]))
-            vol20_loc = float(np.mean(volumes[-20:]))
-
-            log_trade_csv({
-                "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                "trade_id": trades[symbol]["trade_id"],
-                "symbol": symbol,
-                "event": "SELL",
-                "strategy": "aggressive",
-                "version": BOT_VERSION,
-                "entry": entry,
-                "exit": price,
-                "price": price,
-                "pnl_pct": gain,
-                "position_pct": trades[symbol]["position_pct"],
-                "sl_initial": trades[symbol]["sl_initial"],
-                "sl_final": stop,
-                "atr_1h": atr_val_current,
-                "atr_mult_at_entry": "",
-                "rsi_1h": rsi,
-                "macd": macd,
-                "signal": signal,
-                "adx_1h": adx_value,
-                "supertrend_on": supertrend_ok,
-                "ema25_1h": ema25,
-                "ema200_1h": ema200_1h,
-                "ema50_4h": ema50_4h,
-                "ema200_4h": ema200_4h,
-                "vol_ma5": vol5_loc,
-                "vol_ma20": vol20_loc,
-                "vol_ratio": vol5_loc / max(vol20_loc, 1e-9),
-                "btc_uptrend": btc_up,
-                "eth_uptrend": eth_up,
-                "reason_entry": trades[symbol]["reason_entry"],
-                "reason_exit": raison
-            })
-            log_trade(symbol, "SELL", price, gain)
-            _delete_trade(symbol)
-            return
-
-        # ---- TP1 (≥ +1.5%) ----
-        if gain >= 1.5 and not trades[symbol].get("tp1", False):
-            trades[symbol]["tp1"] = True
-            trades[symbol]["tp_times"]["tp1"] = datetime.now(timezone.utc)
-            # option : remonter le stop au prix d'entrée
-            trades[symbol]["stop"] = max(stop, entry)
-            save_trades()
-
-            msg = format_tp_msg(
-                1, symbol, trades[symbol]["trade_id"], price, gain,
-                trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100,
-                elapsed_time, "Stop >= prix d'entrée"
-            )
-            await tg_send(msg)
-
-            log_trade_csv({
-                "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                "trade_id": trades[symbol]["trade_id"],
-                "symbol": symbol,
-                "event": "TP1",
-                "strategy": "aggressive",
-                "version": BOT_VERSION,
-                "entry": entry, "exit": "", "price": price, "pnl_pct": gain,
-                "position_pct": trades[symbol]["position_pct"],
-                "sl_initial": trades[symbol]["sl_initial"],
-                "sl_final": trades[symbol]["stop"],
-                "atr_1h": atr_val_current, "atr_mult_at_entry": "",
-                "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
-                "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
-                "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
-                "vol_ma5": vol5, "vol_ma20": vol20, "vol_ratio": vol5 / max(vol20, 1e-9),
-                "btc_uptrend": btc_up, "eth_uptrend": eth_up,
-                "reason_entry": trades[symbol]["reason_entry"], "reason_exit": ""
-            })
-
-        # ---- TP2 (≥ +3.0%) ----
-        if gain >= 3.0 and not trades[symbol].get("tp2", False):
-            last_tp1_time = trades[symbol]["tp_times"].get("tp1")
-            if isinstance(last_tp1_time, str):
-                try:
-                    last_tp1_time = datetime.fromisoformat(last_tp1_time)
-                except Exception:
-                    last_tp1_time = None
- 
-            if not last_tp1_time or (datetime.now(timezone.utc) - last_tp1_time).total_seconds() >= 120:
-                trades[symbol]["tp2"] = True
-                trades[symbol]["tp_times"]["tp2"] = datetime.now(timezone.utc)
-                trades[symbol]["stop"] = max(trades[symbol]["stop"], entry * 1.015)
-                save_trades()
- 
-                msg = format_tp_msg(
-                    2, symbol, trades[symbol]["trade_id"], price, gain,
-                    trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100,
-                    elapsed_time, "Stop > entrée (+1.5%)"
-                )
-                await tg_send(msg)
- 
-                log_trade_csv({
-                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                    "trade_id": trades[symbol]["trade_id"],
-                    "symbol": symbol,
-                    "event": "TP2",
-                    "strategy": "aggressive",
-                    "version": BOT_VERSION,
-                    "entry": entry, "exit": "", "price": price, "pnl_pct": gain,
-                    "position_pct": trades[symbol]["position_pct"],
-                    "sl_initial": trades[symbol]["sl_initial"],
-                    "sl_final": trades[symbol]["stop"],
-                    "atr_1h": atr_val_current, "atr_mult_at_entry": "",
-                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
-                    "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
-                    "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
-                    "vol_ma5": vol5, "vol_ma20": vol20, "vol_ratio": vol5 / max(vol20, 1e-9),
-                    "btc_uptrend": btc_up, "eth_uptrend": eth_up,
-                    "reason_entry": trades[symbol]["reason_entry"], "reason_exit": ""
-                }) 
-
-
-        # ---- TP3 (≥ +5.0%) ----
-        if gain >= 5.0 and not trades[symbol].get("tp3", False):
-            last_tp2_time = trades[symbol]["tp_times"].get("tp2")
-            if isinstance(last_tp2_time, str):
-                try:
-                    last_tp2_time = datetime.fromisoformat(last_tp2_time)
-                except Exception:
-                    last_tp2_time = None
-
-            if not last_tp2_time or (datetime.now(timezone.utc) - last_tp2_time).total_seconds() >= 120:
-                trades[symbol]["tp3"] = True
-                trades[symbol]["tp_times"]["tp3"] = datetime.now(timezone.utc)
-                trades[symbol]["stop"] = max(trades[symbol]["stop"], entry * 1.03)
-                save_trades()
-        
-                msg = format_tp_msg(
-                    3, symbol, trades[symbol]["trade_id"], price, gain,
-                    trades[symbol]["stop"], ((trades[symbol]["stop"] - entry) / entry) * 100,
-                    elapsed_time, "Stop > entrée (+3%)"
-                )
-                await tg_send(msg)
-
-                log_trade_csv({
-                    "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                    "trade_id": trades[symbol]["trade_id"],
-                    "symbol": symbol,
-                    "event": "TP3",
-                    "strategy": "aggressive",
-                    "version": BOT_VERSION,
-                    "entry": entry, "exit": "", "price": price, "pnl_pct": gain,
-                    "position_pct": trades[symbol]["position_pct"],
-                    "sl_initial": trades[symbol]["sl_initial"],
-                    "sl_final": trades[symbol]["stop"],
-                    "atr_1h": atr_val_current, "atr_mult_at_entry": "",
-                    "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
-                    "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
-                    "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
-                    "vol_ma5": vol5, "vol_ma20": vol20, "vol_ratio": vol5 / max(vol20, 1e-9),
-                    "btc_uptrend": btc_up, "eth_uptrend": eth_up,
-                    "reason_entry": trades[symbol]["reason_entry"], "reason_exit": ""
-                })
-
-                log_trade(symbol, "SELL", price, gain)
-                _delete_trade(symbol)
-                return
-
-        # ---- Si TP1 pris puis le trade retombe trop ----
-        if trades[symbol].get("tp1", False) and gain < 1:
-            raison_sortie = "Perte de momentum après TP1"
-            msg = format_exit_msg(
-                symbol, trades[symbol]["trade_id"], price, gain,
-                trades[symbol]["stop"], elapsed_time, raison_sortie
-            )
-            await tg_send(msg)
-            log_trade_csv({
-                "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                "trade_id": trades[symbol]["trade_id"],
-                "symbol": symbol,
-                "event": "SELL",
-                "strategy": "aggressive",
-                "version": BOT_VERSION,
-                "entry": entry, "exit": price, "price": price, "pnl_pct": gain,
-                "position_pct": trades[symbol]["position_pct"],
-                "sl_initial": trades[symbol]["sl_initial"],
-                "sl_final": trades[symbol]["stop"],
-                "atr_1h": atr_val_current, "atr_mult_at_entry": "",
-                "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
-                "supertrend_on": supertrend_ok, "ema25_1h": ema25, "ema200_1h": ema200_1h,
-                "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
-                "vol_ma5": vol5, "vol_ma20": vol20, "vol_ratio": vol5 / max(vol20, 1e-9),
-                "btc_uptrend": btc_up, "eth_uptrend": eth_up,
-                "reason_entry": trades[symbol]["reason_entry"], "reason_exit": raison_sortie
-            })
-            log_trade(symbol, "SELL", price, gain)
-            _delete_trade(symbol)
-            return
-
-        # ---- Stop touché ou perte max ----
-        if price < trades[symbol]["stop"] or gain <= -1.5:
-            msg = format_stop_msg(
-                symbol, trades[symbol]["trade_id"], trades[symbol]["stop"],
-                gain, rsi, adx_value, vol5 / max(vol20, 1e-9)
-            )
-            await tg_send(msg)
-
-            event_name = "STOP" if price < trades[symbol]["stop"] else "SELL"
-            log_trade_csv({
-                "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                "trade_id": trades[symbol]["trade_id"],
-                "symbol": symbol,
-                "event": event_name,
-                "strategy": "aggressive",         # <- important
-                "version": BOT_VERSION,
-                "entry": entry,
-                "exit": price,
-                "price": price,
-                "pnl_pct": gain,
-                "position_pct": trades[symbol]["position_pct"],
-                "sl_initial": trades[symbol]["sl_initial"],
-                "sl_final": trades[symbol]["stop"],
-                "atr_1h": atr_val_current,        # cohérent avec le reste de la section
-                "atr_mult_at_entry": "",
-                "rsi_1h": rsi,
-                "macd": macd,
-                "signal": signal,
-                "adx_1h": adx_value,
-                "supertrend_on": supertrend_ok,   # <- bon nom ici
-                "ema25_1h": ema25,
-                "ema200_1h": ema200_1h,
-                "ema50_4h": ema50_4h,
-                "ema200_4h": ema200_4h,
-                "vol_ma5": vol5,
-                "vol_ma20": vol20,
-                "vol_ratio": vol5 / max(vol20, 1e-9),
-                "btc_uptrend": btc_up,
-                "eth_uptrend": eth_up,
-                "reason_entry": trades[symbol]["reason_entry"],
-                "reason_exit": "Stop touché" if event_name == "STOP" else "Perte max (-1.5%)"
-            })
-
-            log_trade(symbol, event_name, price, gain)
-            _delete_trade(symbol)
-            return
-
-        # ---- Trailing stop & HOLD ----
-        trailing_stop_advanced(symbol, price, atr_value=atr_val_current)
-        log_trade(symbol, "HOLD", price)
-        # on push un court statut dans le buffer (sera envoyé en batch)
-        await buffer_hold(
             symbol,
             f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}"
         )
