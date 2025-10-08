@@ -2300,13 +2300,6 @@ async def process_symbol(symbol):
                     "reason_exit": "Stop touché" if event_name == "STOP" else "Perte max (-1.5%)"
                 })
 
-            if not sell:
-                log_trade(symbol, "HOLD", price)
-                # on push un court statut dans le buffer (sera envoyé en batch)
-                await buffer_hold(
-                    symbol,
-                    f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}"
-                )
         # ===== Patch 4 — score minimum (standard) assoupli & non bloquant =====
         SCORE_MIN_STD = 4  # au lieu de 6
 
