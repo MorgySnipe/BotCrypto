@@ -2997,6 +2997,7 @@ async def process_symbol_aggressive(symbol):
         })
         log_trade(symbol, "BUY", price)
 
+        await buffer_hold(
             symbol,
             f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}"
         )
