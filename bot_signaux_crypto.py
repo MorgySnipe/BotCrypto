@@ -44,6 +44,14 @@ from urllib3.util.retry import Retry
 
 import os, json, csv
 
+import sys, os
+try:
+    sys.stdout.reconfigure(line_buffering=True)  # flush à chaque ligne
+except Exception:
+    pass
+os.environ["PYTHONUNBUFFERED"] = "1"
+
+
 # Récupérer les variables depuis Render (Environment Variables)
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = int(os.environ["CHAT_ID"])
@@ -2948,6 +2956,8 @@ async def main_loop():
             if now.hour == 23 and (last_summary_day is None or last_summary_day != now.date()):
                 await send_daily_summary()
                 last_summary_day = now.date()
+
+            print(f"🔄 Loop tick {datetime.now(timezone.utc).strftime('%H:%M:%S')}", flush=True)
 
             # --- préchargement multi-TF ---
             symbol_cache.clear()
