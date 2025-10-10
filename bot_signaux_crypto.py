@@ -735,7 +735,8 @@ def anti_spike_check_std(klines, price, atr_period=14):
 def check_spike_and_wick(symbol: str, klines_1h, price: float, mode_label="std") -> bool:
     """
     Combine anti-spike 1h et mèche haute dominante dans un seul log.
-    Retourne True si OK, False si refus (avec log_refusal unique).
+    Retourne True si OK, False si refus.
+    Ne modifie plus indicators_soft_penalty (soft-only).
     """
     try:
         ok_spike, spike_up_pct, limit_pct = anti_spike_check_std(klines_1h, price)
@@ -744,16 +745,15 @@ def check_spike_and_wick(symbol: str, klines_1h, price: float, mode_label="std")
         if ok_spike and not wick:
             return True
 
-        # Si le spike dépasse légèrement le seuil OU si c’est une major → on ne bloque pas
+        # Spike légèrement au-dessus du seuil → on laisse passer (log seulement)
         if not ok_spike:
             if spike_up_pct <= (limit_pct + 0.8) or symbol in MAJORS:
-                log_refusal(symbol, f"Anti-excès 1h toléré (soft)", 
-                            trigger=f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}% (+tol)")
-                try:
-                    indicators_soft_penalty += 1
-                except NameError:
-                    pass
-                return True  # on continue quand même
+                log_refusal(
+                    symbol,
+                    "Anti-excès 1h toléré (soft)",
+                    trigger=f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}% (+tol)"
+                )
+                return True
             else:
                 reasons = [f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}%"]
         else:
@@ -762,12 +762,14 @@ def check_spike_and_wick(symbol: str, klines_1h, price: float, mode_label="std")
         if wick:
             reasons.append("mèche_haute_dominante")
 
-        log_refusal(symbol, f"Anti-excès 1h (soft, non bloquant)", trigger=" | ".join(reasons))
-        try:
-            indicators_soft_penalty += 1
-        except NameError:
-            pass
-        return True  # on ne bloque plus, on pénalise légèrement
+        # Log uniquement, pas de pénalité de score
+        log_refusal(symbol, "Anti-excès 1h (soft, non bloquant)", trigger=" | ".join(reasons))
+        return True  # soft: on continue quand même
+
+    except Exception:
+        # fail-open
+        return True
+
         
     except Exception as _:
         # En cas d’erreur, on ne bloque pas (fail–open)
@@ -1977,7 +1979,15 @@ async def process_symbol(symbol):
             "volume_ok": volume_ok,
             "above_ema200": price > ema200,
         }
+
+        # Coiffe les pénalités “soft”
+        indicators_soft_penalty = min(indicators_soft_penalty, 2)
+
+        # Calcul du score puis bonus marché si BTC est propre
         confidence = max(0, compute_confidence_score(indicators) - indicators_soft_penalty)
+        if btc_is_bullish_strong():
+            confidence = min(10, confidence + 1)
+
         label_conf = label_confidence(confidence)
 
         # --- Stop provisoire pour le sizing (même logique que l'entrée) ---
@@ -2053,7 +2063,7 @@ async def process_symbol(symbol):
                 reasons = [label, f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
 
         # ===== Patch 4 — score minimum (standard) assoupli & non bloquant =====
-        SCORE_MIN_STD = 4  # au lieu de 6
+        SCORE_MIN_STD = 3
 
         if confidence < SCORE_MIN_STD:
             # On LOG pour suivi, mais on ne coupe plus le trade.
@@ -2642,8 +2652,12 @@ async def process_symbol_aggressive(symbol):
             "volume_ok": volume_ok,
             "above_ema200": above_ema200,
         }
+        indicators_soft_penalty = min(indicators_soft_penalty, 2)
         score = max(0, compute_confidence_score(indicators) - indicators_soft_penalty)
+        if btc_is_bullish_strong():
+            score = min(10, score + 1)
         label_conf = label_confidence(score)
+
         SCORE_MIN_AGR = 6
         if score < SCORE_MIN_AGR:
             log_refusal(symbol, f"Score insuffisant (agr): {score:.1f} < {SCORE_MIN_AGR}")
