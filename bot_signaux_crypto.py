@@ -1869,11 +1869,25 @@ async def process_symbol(symbol):
             if volatility < 0.0008:
                 return
 
-        # --- ADX (standard) assoupli ---
-        if adx_value < (ADX_MIN if LEARNING_MODE else 18):
-            log_refusal(symbol, f"ADX trop faible (soft): {adx_value:.1f}")
-            reasons += [f"⚠️ ADX {adx_value:.1f} (soft)"]
-            # pas de return -> on continue
+        # --- ADX (standard) assoupli + tolérance momentum fort ---
+        strong_momentum = (macd > signal) and (rsi >= 55)
+        adx_min_eff = (ADX_MIN if LEARNING_MODE else 18)
+
+        if adx_value < adx_min_eff:
+            if strong_momentum and adx_value >= 14:
+                # tolérance : pas de pénalité si MACD>Signal et RSI≥55 avec ADX 14–15
+                log_refusal(symbol, f"ADX borderline toléré (soft): {adx_value:.1f} avec momentum fort")
+                # pas de reasons += ... et pas de pénalité
+                pass
+            else:
+                log_refusal(symbol, f"ADX trop faible (soft): {adx_value:.1f}")
+                reasons += [f"⚠️ ADX {adx_value:.1f} (soft)"]
+                try:
+                    indicators_soft_penalty += 1
+                except NameError:
+                    pass
+        # pas de return -> on continue
+
 
 
         # Supertrend reste obligatoire
@@ -2546,16 +2560,21 @@ async def process_symbol_aggressive(symbol):
                 if not in_trade:
                     return
 
-        # ---- Confluence principale ----
+        # Confluence principale ----
         supertrend_ok = supertrend_like_on_close(klines)
         above_ema200  = price >= ema200 * 0.98  # soft
         if not above_ema200:
             indicators_soft_penalty += 1
             tendance_soft_notes.append("Prix ~ sous EMA200(1h)")
 
-        adx_ok = adx_value >= 15
-        if not adx_ok:
+        # ADX avec tolérance si momentum fort (MACD>Signal et RSI≥55)
+        strong_momentum = (macd > signal) and (rsi >= 55)
+        if adx_value >= 15 or (strong_momentum and adx_value >= 14):
+            adx_ok = True
+        else:
+            adx_ok = False
             indicators_soft_penalty += 1
+
 
         # Momentum MACD (renforcé)
         if not (macd > signal and (macd - signal) > (macd_prev - signal_prev)):
