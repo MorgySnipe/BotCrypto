@@ -1920,11 +1920,11 @@ async def process_symbol(symbol):
                 return
             
         # ----- Garde-fous -----
+        # ⚙️ Patch : suppression de la limite de trades simultanés
         slots = min(allowed_trade_slots("standard"), perf_cap_max_trades("standard"))
         if _nb_trades("standard") >= slots:
-            log_refusal(symbol, f"Max trades standard atteints ({_nb_trades('standard')}/{slots})")
-            if not in_trade:
-                return
+            log_info(symbol, f"[Patch] Max trades standard atteints ({_nb_trades('standard')}/{slots}) — autorisé quand même")
+            # on laisse passer (pas de return)
 
         # --- Low-liquidity session -> SOFT ---
         ok_session, _sess = is_active_liquidity_session(symbol=symbol)
@@ -2536,11 +2536,11 @@ async def process_symbol_aggressive(symbol):
                     # on continue ; le blocage dur est géré par btc_regime_blocked()
 
         # ---- Garde-fous ----
+        # ⚙️ Patch : suppression de la limite de trades simultanés
         slots = min(allowed_trade_slots("aggressive"), perf_cap_max_trades("aggressive"))
         if _nb_trades("aggressive") >= slots:
-            log_refusal(symbol, f"Max trades aggressive atteints ({_nb_trades('aggressive')}/{slots})")
-            if not in_trade:
-                return
+            log_info(symbol, f"[Patch] Max trades aggressive atteints ({_nb_trades('aggressive')}/{slots}) — autorisé quand même")
+            # on laisse passer (pas de return)
 
         # --- Low-liquidity session -> SOFT ---
         indicators_soft_penalty = 0
