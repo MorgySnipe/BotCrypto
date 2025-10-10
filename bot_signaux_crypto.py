@@ -1606,39 +1606,40 @@ async def process_symbol(symbol):
         # --- Volume 1h vs médiane 30j (robuste & borné) ---
         vol_now_1h = float(klines[-1][7])
 
-        # juste après :
+        # === juste après le fallback in-trade et AVANT tout accès à klines ===
         klines = get_cached(symbol, '1h')  # 1h
         in_trade_std = (symbol in trades) and (trades[symbol].get("strategy", "standard") == "standard")
 
-        # ✅ si trade en cours ET pas assez de 1h → fallback (tu l'as déjà ci-dessous)
-        # ...
-
-        # ✅ AJOUT : si PAS de trade en cours et données 1h insuffisantes → on sort proprement
+        # ✅ si PAS de trade en cours et données 1h insuffisantes → on sort proprement
         if (not in_trade_std) and (not klines or len(klines) < 50):
             log_refusal(symbol, "Données 1h insuffisantes (entrée)")
             return
 
+        # (ici, on est garanti d'avoir au moins 50 bougies si pas en trade,
+        #  et le cas 'en trade mais pas assez de données' est géré plus haut par ton fallback)
+
+        # --- Volume 1h vs médiane 30j (robuste & borné) ---
+        vol_now_1h = float(klines[-1][7])
 
         k1h_30d = get_cached(symbol, '1h', limit=750) or []
         vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j + current
 
-        VOL_MED_MULT_EFF = 0.07     # 7% de la médiane 30j (était 0.15)
-        MIN_VOLUME_ABS   = 120_000  # 200k → 120k
+        VOL_MED_MULT_EFF = 0.07     # 7% de la médiane 30j
+        MIN_VOLUME_ABS   = 120_000
 
         if len(vols_hist) >= 200:
-            # borne haute : on limite l'influence de quelques mega-bougies
             med_30d_raw = float(np.median(vols_hist[:-1]))
             p70 = float(np.percentile(vols_hist[:-1], 70))
-            med_30d = min(med_30d_raw, p70 * 1.5)  # cap raisonnable
-
+            med_30d = min(med_30d_raw, p70 * 1.5)
             if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d):
-                log_refusal(symbol, f"Volume 1h trop faible vs med30j (...)")
-                if not in_trade:
+                log_refusal(symbol, "Volume 1h trop faible vs med30j (...)")
+                if not in_trade_std:
                     return
         else:
             if vol_now_1h < MIN_VOLUME_ABS:
                 log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
-                return
+                if not in_trade_std:
+                    return
 
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
