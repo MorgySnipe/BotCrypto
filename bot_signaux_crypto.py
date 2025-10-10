@@ -1621,6 +1621,19 @@ async def process_symbol(symbol):
         # --- Volume 1h vs médiane 30j (robuste & borné) ---
         vol_now_1h = float(klines[-1][7])
 
+        # juste après :
+        klines = get_cached(symbol, '1h')  # 1h
+        in_trade_std = (symbol in trades) and (trades[symbol].get("strategy", "standard") == "standard")
+
+        # ✅ si trade en cours ET pas assez de 1h → fallback (tu l'as déjà ci-dessous)
+        # ...
+
+        # ✅ AJOUT : si PAS de trade en cours et données 1h insuffisantes → on sort proprement
+        if (not in_trade_std) and (not klines or len(klines) < 50):
+            log_refusal(symbol, "Données 1h insuffisantes (entrée)")
+            return
+
+
         k1h_30d = get_cached(symbol, '1h', limit=750) or []
         vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j + current
 
