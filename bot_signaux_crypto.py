@@ -2959,6 +2959,10 @@ async def main_loop():
 
             print(f"🔄 Loop tick {datetime.now(timezone.utc).strftime('%H:%M:%S')}", flush=True)
 
+            print("⏬ Préchargement multi-TF…", flush=True)
+            t0 = time.monotonic()
+
+
             # --- préchargement multi-TF ---
             symbol_cache.clear()
             tasks = []
@@ -2967,7 +2971,21 @@ async def main_loop():
                 for tf, lim in TF_LIST:
                     tasks.append(get_klines_async(s, tf, lim))
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            print("⏬ Préchargement multi-TF…", flush=True)
+            t0 = time.monotonic()
+            try:
+                # Timeout global pour éviter de “geler” la boucle si Binance rame
+                results = await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=45
+                )
+            except asyncio.TimeoutError:
+                print("⚠️ Préchargement TF: TIMEOUT global (45s). On continue avec ce qu’on a.", flush=True)
+                results = [None] * len(tasks)
+
+            elapsed = time.monotonic() - t0
+            errors = sum(1 for r in results if isinstance(r, Exception) or r is None)
+            print(f"⏫ Préchargement fini en {elapsed:.1f}s — erreurs: {errors}/{len(results)}", flush=True)
 
             idx = 0
             for s in SYMBOLS:
@@ -2983,6 +3001,8 @@ async def main_loop():
             # analyses
             await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
             await asyncio.gather(*(process_symbol_aggressive(s) for s in SYMBOLS if s not in trades))
+
+            print("🧮 Planification analyses std: " + ", ".join(SYMBOLS), flush=True)
 
             # flush du buffer HOLD
             await flush_hold_buffer()
