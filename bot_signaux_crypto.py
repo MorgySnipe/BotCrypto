@@ -202,18 +202,6 @@ TRAIL_BE_AFTER = 1.5  # lock BE dès ~TP1 (≥ +1.5%)
 # --- Take-profits dynamiques (multiplicateurs d'ATR) ---
 TP_ATR_MULTS_STD = [1.0, 2.0, 3.0]      # standard : TP1=1×ATR, TP2=2×ATR, TP3=3×ATR
 TP_ATR_MULTS_AGR = [1.0, 2.0, 3.0]      # aggressive (modifiable si besoin)
-def tp_prices_from_atr(entry_price: float, atr_1h: float, mults: list[float] | tuple[float, float, float]):
-    """Retourne (tp1, tp2, tp3) en PRIX absolu, à partir des multiples d'ATR."""
-    try:
-        m1, m2, m3 = float(mults[0]), float(mults[1]), float(mults[2])
-    except Exception:
-        # fallback
-        m1, m2, m3 = 1.0, 2.0, 3.0
-    return (
-        float(entry_price + atr_1h * m1),
-        float(entry_price + atr_1h * m2),
-        float(entry_price + atr_1h * m3),
-    )
 # --- Stops init en % ---
 INIT_SL_PCT_STD_MIN = 0.010  # 1.0% (standard)
 INIT_SL_PCT_STD_MAX = 0.012  # 1.2%
@@ -443,7 +431,6 @@ def st_onoff(st_bool: bool) -> str:
 
 def format_entry_msg(symbol, trade_id, strategy, bot_version, entry, position_pct,
                      sl_initial, sl_dist_pct, atr,
-                     tp1_price, tp2_price, tp3_price, tp_mults,  # <— AJOUT
                      rsi_1h, macd, signal, adx,
                      st_on,
                      ema25, ema50_4h, ema200_1h, ema200_4h,
@@ -451,15 +438,13 @@ def format_entry_msg(symbol, trade_id, strategy, bot_version, entry, position_pc
                      btc_up, eth_up,
                      score, score_label,
                      reasons: list[str]):
-    m1, m2, m3 = tp_mults if isinstance(tp_mults, (list, tuple)) and len(tp_mults) >= 3 else (1.0, 2.0, 3.0)
     return (
         f"🟢 ACHAT | {symbol} | trade_id={trade_id}\n"
         f"⏱ UTC: {utc_now_str()} | Stratégie: {strategy} | Version: {bot_version}\n"
         f"🎯 Prix entrée: {entry:.4f} | Taille: {position_pct:.1f}%\n"
         f"🛡 Stop initial: {sl_initial:.4f} (dist: {sl_dist_pct:.2f}%) | ATR-TV(1h): {atr:.4f}\n"
-        f"🎯 TP(1/2/3): {tp1_price:.4f} / {tp2_price:.4f} / {tp3_price:.4f} "
-        f"(ATR×{m1:g}/{m2:g}/{m3:g})\n\n"
-        f"📊 Indicateurs 1H: RSI {rsi_1h:.2f} | MACD {macd:.4f}/{signal:.4f} | ADX {adx:.2f} | Supertrend {st_onoff(st_on)}\n"
+        f"🎯 TP1/TP2/TP3: +1.5% / +3% / +5% (dynamiques)\n\n"
+        f"📊 Indicateurs 1H: RSI {rsi_1h:.2f} | MACD {macd:.4f}/{signal:.4f} | ADX {adx:.2f} | Supertrend {'ON' if st_on else 'OFF'}\n"
         f"📈 Tendances: EMA25 {ema25:.4f} | EMA50(4h) {ema50_4h:.4f} | EMA200(1h) {ema200_1h:.4f} | EMA200(4h) {ema200_4h:.4f}\n"
         f"📦 Volume: MA5 {vol5:.0f} | MA20 {vol20:.0f} | Ratio {vol_ratio:.2f}x\n"
         f"🌐 Contexte marché: BTC uptrend={btc_up} | ETH uptrend={eth_up}\n"
@@ -2182,7 +2167,6 @@ async def process_symbol(symbol):
             msg = format_entry_msg(
                 symbol, trade_id, "standard", BOT_VERSION, price, position_pct,
                 sl_initial, ((price - sl_initial) / price) * 100, atr,
-                tp1_p, tp2_p, tp3_p, tp_mults,     # <— AJOUT
                 rsi, macd, signal, adx_value, supertrend_signal,
                 ema25, ema50_4h, ema200, ema200_4h,
                 np.mean(volumes[-5:]), np.mean(volumes[-20:]),
@@ -2190,6 +2174,7 @@ async def process_symbol(symbol):
                 btc_up, eth_up,
                 confidence, label_conf, reasons
             )
+
 
             await tg_send(msg)
             log_trade(symbol, "BUY", price)
@@ -2813,7 +2798,6 @@ async def process_symbol_aggressive(symbol):
         msg = format_entry_msg(
             symbol, trade_id, "aggressive", BOT_VERSION, price, position_pct,
             sl_initial, ((price - sl_initial) / price) * 100, atr,
-            tp1_p, tp2_p, tp3_p, tp_mults,    # <— AJOUT
             rsi, macd, signal, adx_value,
             supertrend_ok,
             ema25,
@@ -2822,6 +2806,7 @@ async def process_symbol_aggressive(symbol):
             btc_up, eth_up,
             score, label_conf, reasons
         )
+
 
         await tg_send(msg)
 
