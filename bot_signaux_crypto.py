@@ -170,10 +170,10 @@ VOL_CONFIRM_TF = "15m"
 VOL_CONFIRM_LOOKBACK = 12
 VOL_CONFIRM_MULT = 1.00
 ANTI_SPIKE_UP_STD = 0.8   # 0.8% mini (std)
-ANTI_SPIKE_UP_AGR = 2.4   # % max d'extension (stratégie agressive)
+ANTI_SPIKE_UP_AGR = 3.0  # au lieu de 2.4
 # --- Anti-spike adaptatif (bonus) ---
 # plus tolérant : accepte des extensions intraday raisonnables
-ANTI_SPIKE_ATR_MULT = 2.20   # au lieu de 1.60
+ANTI_SPIKE_ATR_MULT = 2.40
 ANTI_SPIKE_MAX_PCT  = 7.00   # au lieu de 5.00
 # ===== Learning phase (assouplissements) =====
 LEARNING_MODE = True
@@ -181,7 +181,7 @@ LEARNING_MODE = True
 ADX_MIN = 15                 # au lieu de 18/22
 RSI_MIN = 50                 # RSI >= 50 accepté
 RSI_MAX = 65                 # RSI <= 65 accepté
-VOL15M_MIN_RATIO = 0.60      # au lieu de 1.0 strict
+VOL15M_MIN_RATIO = 0.50  # assoupli : 0.50
 ANTI_SPIKE_OPEN_MAX = 0.035  # 3.5% max vs open (1h)
 
 # --- Trailing stop harmonisé (ATR TV) ---
@@ -1783,16 +1783,29 @@ async def process_symbol(symbol):
             return
 
 
-        # --- filtre de marché BTC pour les ALT ---
+        # --- Filtre marché BTC (assoupli) pour ALT (STANDARD) ---
         if symbol != "BTCUSDT":
             btc = market_cache.get("BTCUSDT", [])
             if len(btc) >= 50:
                 closes_btc = [float(k[4]) for k in btc]
-                btc_rsi = rsi_tv(closes_btc, 14)               # ✅ RSI scalaire
-                btc_macd, btc_signal = compute_macd(closes_btc) # ✅ MACD/Signal
-                if (btc_rsi < 45) or (btc_macd <= btc_signal):
-                    log_refusal(symbol, "Blocage ALT: BTC faible (RSI<50 ou MACD<=Signal)")
-                    return
+                btc_rsi = rsi_tv(closes_btc, 14)
+                btc_macd, btc_signal = compute_macd(closes_btc)
+
+                # ET + seuil RSI 43
+                WEAK_BTC = (btc_rsi < 43) and (btc_macd <= btc_signal)
+
+                # Exemptions: MAJORS + high-liq
+                HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
+
+                if WEAK_BTC and (symbol not in MAJORS) and (symbol not in HIGH_LIQ):
+                    # pénalité soft (pas de blocage dur ici)
+                    try:
+                        indicators_soft_penalty += 1
+                    except NameError:
+                        indicators_soft_penalty = 1
+                    log_refusal(symbol, "BTC faible (soft): RSI<43 ET MACD<=Signal")
+                    # ⚠️ on continue: seul btc_regime_blocked() peut bloquer (panic)
+
                     
         # --- 4h ---
         klines_4h = get_cached(symbol, '4h')
@@ -1939,21 +1952,22 @@ async def process_symbol(symbol):
                 return
 
             
-        # — Pré-filtre: prix trop loin de l’EMA25 (plus strict)
-        # seuils plus larges + pénalité soft (ne bloque pas)
-        EMA25_PREFILTER_STD = (1.05 if symbol in MAJORS else 1.08)
+        # — Pré-filtre: prix trop loin de l’EMA25 (pénalité soft, seuil relevé)
+        EMA25_PREFILTER_STD = (1.06 if symbol in MAJORS else 1.10)
 
         if price > ema25 * EMA25_PREFILTER_STD:
             dist = (price / max(ema25, 1e-9) - 1) * 100
+            seuil_pct = (EMA25_PREFILTER_STD - 1) * 100
             log_refusal(
                 symbol,
-                f"Prix éloigné EMA25 (soft > +{(EMA25_PREFILTER_STD-1)*100:.0f}%)",
+                f"Prix éloigné EMA25 (soft > +{seuil_pct:.0f}%)",
                 trigger=f"dist_ema25={dist:.2f}%"
             )
             try:
                 indicators_soft_penalty += 1
             except NameError:
                 pass
+                
             # pas de return : on continue
         if not check_spike_and_wick(symbol, klines, price, mode_label="std"):
             if not in_trade:
@@ -1967,11 +1981,11 @@ async def process_symbol(symbol):
             if not in_trade:
                 return
 
-        # APRÈS (standard) — MA12 + seuil 1.10
-        # --- volume-confirm-standard (MA12 + seuil 1.00) ---
+        # APRÈS (standard) — MA10 + seuil 0.50
+        # --- volume-confirm-standard (MA10) ---
         vol_now = float(k15[-2][7])
-        vol_ma12 = float(np.mean(vols15[-13:-1]))
-        vol_ratio_15m = vol_now / max(vol_ma12, 1e-9)
+        vol_ma10 = float(np.mean(vols15[-11:-1]))
+        vol_ratio_15m = vol_now / max(vol_ma10, 1e-9)
 
         if vol_ratio_15m < VOL15M_MIN_RATIO:
             log_refusal(symbol, f"Vol 15m faible (soft): {vol_ratio_15m:.2f}")
@@ -2016,7 +2030,7 @@ async def process_symbol(symbol):
         # --- Décision d'achat (standard) avec filtre 15m ---
         brk_ok, br_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
         last3_change = (closes[-1] - closes[-4]) / closes[-4]
-        if last3_change > 0.022:
+        if last3_change > 0.028:  # 2.8% au lieu de 2.2%
             brk_ok = False
 
         buy = False
@@ -2502,16 +2516,24 @@ async def process_symbol_aggressive(symbol):
             await buffer_hold(symbol, f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}")
             return
 
-        # --- Filtre marché BTC pour ALT (aggressive) ---
+        # --- Filtre marché BTC (assoupli) pour ALT (AGGRESSIVE) ---
         if symbol != "BTCUSDT":
             btc_klines = market_cache.get("BTCUSDT", [])
             if len(btc_klines) >= 50:
                 closes_btc = [float(k[4]) for k in btc_klines]
                 btc_rsi = rsi_tv(closes_btc, period=14)
                 btc_macd, btc_signal = compute_macd(closes_btc)
-                if (btc_rsi < 45) or (btc_macd <= btc_signal):
-                    log_refusal(symbol, "Blocage ALT: BTC faible (RSI<50 ou MACD<=Signal)")
-                    return
+
+                WEAK_BTC = (btc_rsi < 43) and (btc_macd <= btc_signal)
+                HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
+    
+                if WEAK_BTC and (symbol not in MAJORS) and (symbol not in HIGH_LIQ):
+                    try:
+                        indicators_soft_penalty += 1
+                    except NameError:
+                        indicators_soft_penalty = 1
+                    log_refusal(symbol, "BTC faible (soft): RSI<43 ET MACD<=Signal")
+                    # on continue ; le blocage dur est géré par btc_regime_blocked()
 
         # ---- Garde-fous ----
         slots = min(allowed_trade_slots("aggressive"), perf_cap_max_trades("aggressive"))
@@ -2599,27 +2621,28 @@ async def process_symbol_aggressive(symbol):
 
         # ----- Breakout + Retest -----
         last10_high = max(highs[-10:])
-        breakout = price > last10_high * 1.002
+        breakout = price > last10_high * 1.001  # 0.1% au lieu de 0.2%
         if not breakout:
             log_refusal(symbol, "Pas de breakout (last10_high non dépassé)")
             if not in_trade:
                 return
 
         last3_change = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
-        if last3_change > 0.022:
-            log_refusal(symbol, "Mouvement 3 bougies trop fort (>2.2%)")
+        if last3_change > 0.028:  # 2.8% au lieu de 2.2%
+            log_refusal(symbol, "Mouvement 3 bougies trop fort (>2.8%)")
             if not in_trade:
                 return
-
+    
         RETEST_BAND_AGR = 0.003
         near_level = abs(price - last10_high) / last10_high <= RETEST_BAND_AGR
         near_ema25  = abs(price - ema25)      / ema25      <= RETEST_BAND_AGR
 
-        # Pré-filtre EMA25 éloignée
-        EMA25_PREFILTER_STD = (1.05 if symbol in MAJORS else 1.08)
+        # Pré-filtre EMA25 éloignée (seuil relevé)
+        EMA25_PREFILTER_STD = (1.06 if symbol in MAJORS else 1.10)
         if price >= ema25 * EMA25_PREFILTER_STD:
             dist = (price / max(ema25, 1e-9) - 1) * 100
-            log_refusal(symbol, "Prix éloigné EMA25 (soft)", trigger=f"dist_ema25={dist:.2f}%")
+            log_refusal(symbol, f"Prix éloigné EMA25 (soft > +{(EMA25_PREFILTER_STD-1)*100:.0f}%)",
+                        trigger=f"dist_ema25={dist:.2f}%")
             indicators_soft_penalty += 1
 
         # Anti-spike 1h brut
