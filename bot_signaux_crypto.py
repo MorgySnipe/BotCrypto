@@ -2942,7 +2942,16 @@ async def main_loop():
     last_summary_day = None
     last_audit_day = None
 
+    # 🔒 anti-overlap entre itérations
+    is_running = False
+
     while True:
+        if is_running:
+            print("⚠️ Boucle précédente encore en cours — on saute cette itération", flush=True)
+            await asyncio.sleep(SLEEP_SECONDS)
+            continue
+
+        is_running = True
         try:
             now = datetime.now(timezone.utc)
 
@@ -2959,11 +2968,10 @@ async def main_loop():
 
             print(f"🔄 Loop tick {datetime.now(timezone.utc).strftime('%H:%M:%S')}", flush=True)
 
+            # --- préchargement multi-TF ---
             print("⏬ Préchargement multi-TF…", flush=True)
             t0 = time.monotonic()
 
-
-            # --- préchargement multi-TF ---
             symbol_cache.clear()
             tasks = []
             for s in SYMBOLS:
@@ -2971,10 +2979,8 @@ async def main_loop():
                 for tf, lim in TF_LIST:
                     tasks.append(get_klines_async(s, tf, lim))
 
-            print("⏬ Préchargement multi-TF…", flush=True)
-            t0 = time.monotonic()
+            # Timeout global pour éviter de “geler” la boucle si Binance rame
             try:
-                # Timeout global pour éviter de “geler” la boucle si Binance rame
                 results = await asyncio.wait_for(
                     asyncio.gather(*tasks, return_exceptions=True),
                     timeout=45
@@ -2987,33 +2993,36 @@ async def main_loop():
             errors = sum(1 for r in results if isinstance(r, Exception) or r is None)
             print(f"⏫ Préchargement fini en {elapsed:.1f}s — erreurs: {errors}/{len(results)}", flush=True)
 
+            # Remplissage du cache
             idx = 0
             for s in SYMBOLS:
                 for tf, lim in TF_LIST:
                     r = results[idx]; idx += 1
                     symbol_cache[s][tf] = [] if isinstance(r, Exception) or r is None else r
 
-            # contexte marché
+            # Contexte marché
             market_cache['BTCUSDT'] = symbol_cache.get('BTCUSDT', {}).get('1h', [])
             market_cache['ETHUSDT'] = symbol_cache.get('ETHUSDT', {}).get('1h', [])
             update_market_state()
 
-            # analyses
+            # Analyses
             await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
             await asyncio.gather(*(process_symbol_aggressive(s) for s in SYMBOLS if s not in trades))
-
-            print("🧮 Planification analyses std: " + ", ".join(SYMBOLS), flush=True)
 
             # flush du buffer HOLD
             await flush_hold_buffer()
 
             print("✔️ Itération terminée", flush=True)
 
-
         except Exception as e:
+            # on loggue l'erreur sans interrompre le service
             await tg_send(f"⚠️ Erreur : {e}")
+        finally:
+            # 🔓 on libère l’itération en cours quoi qu’il arrive
+            is_running = False
 
         await asyncio.sleep(SLEEP_SECONDS)
+
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
