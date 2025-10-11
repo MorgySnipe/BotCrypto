@@ -1958,22 +1958,23 @@ async def process_symbol(symbol):
                 if not in_trade:
                     return
 
+        # --- BTC drift : hard seulement sur low-liq sans edge, sinon soft ---
         if symbol != "BTCUSDT" and btc_market_drift():
-        rs = rel_strength_vs_btc(symbol)  # edge ALT vs BTC (sur 3 bougies 1h)
-        HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
-        # Hard uniquement si alts low-liq, RS faible et momentum pas fou
-        if (symbol not in HIGH_LIQ) and (rs <= 0.006) and (adx_value < 22):
-            log_refusal(symbol, "BTC drift (hard on low-liq)", trigger=f"RSvsBTC={rs:.3%}")
-            if not in_trade:
-                return
-        else:
-            # Soft penalty sinon (on laisse passer)
-            try:
-                indicators_soft_penalty += 1
-            except NameError:
-                indicators_soft_penalty = 1
-            log_info(symbol, "BTC drift (soft) — high-liq ou RS>BTC")
-            
+            rs = rel_strength_vs_btc(symbol)  # edge ALT vs BTC (3 bougies 1h)
+            HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
+            # Hard uniquement si alts low-liq, RS faible et momentum pas fou
+            if (symbol not in HIGH_LIQ) and (rs <= 0.006) and (adx_value < 22):
+                log_refusal(symbol, "BTC drift (hard on low-liq)", trigger=f"RSvsBTC={rs:.3%}")
+                if not in_trade:
+                    return
+            else:
+                # Soft penalty sinon (on laisse passer)
+                try:
+                    indicators_soft_penalty += 1
+                except NameError:
+                    indicators_soft_penalty = 1
+                log_info(symbol, "BTC drift (soft) — high-liq ou RS>BTC")
+     
         # — Pré-filtre: prix trop loin de l’EMA25 (pénalité soft, seuil relevé)
         EMA25_PREFILTER_STD = (1.06 if symbol in MAJORS else 1.10)
 
