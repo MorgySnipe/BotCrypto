@@ -2911,7 +2911,6 @@ async def main_loop():
 
     # Charger les trades + history sauvegardés
     trades.update(load_trades())
-    # garde la même liste en mémoire (référence) et remplit depuis disque
     history_loaded = load_history()
     history.clear()
     history.extend(history_loaded)
@@ -2935,6 +2934,7 @@ async def main_loop():
     last_summary_day = None
     last_audit_day = None
 
+    # 🔒 anti-overlap
     is_running = False
 
     while True:
@@ -2958,40 +2958,35 @@ async def main_loop():
                 await send_daily_summary()
                 last_summary_day = now.date()
 
+            # 🔄 plus AUCUN préchargement global
+            #    → on garde un cache vide (accès lazy dans process_symbol si tu veux)
             symbol_cache.clear()
-            tasks = []
             for s in SYMBOLS:
-                symbol_cache.setdefault(s, {})
-                for tf, lim in TF_LIST:
-                    tasks.append(get_klines_async(s, tf, lim))
+                symbol_cache[s] = {}
 
-            # Remplissage du cache
-            idx = 0
-            for s in SYMBOLS:
-                for tf, lim in TF_LIST:
-                    r = results[idx]; idx += 1
-                    symbol_cache[s][tf] = [] if isinstance(r, Exception) or r is None else r
+            # 🌐 Contexte marché minimal (BTC/ETH) — direct, sans results
+            try:
+                market_cache['BTCUSDT'] = get_klines('BTCUSDT', '1h', 200) or []
+                market_cache['ETHUSDT'] = get_klines('ETHUSDT', '1h', 200) or []
+            except Exception:
+                market_cache['BTCUSDT'] = []
+                market_cache['ETHUSDT'] = []
 
-            # Contexte marché
-            market_cache['BTCUSDT'] = symbol_cache.get('BTCUSDT', {}).get('1h', [])
-            market_cache['ETHUSDT'] = symbol_cache.get('ETHUSDT', {}).get('1h', [])
             update_market_state()
 
-            # Analyses
+            # 🔍 Analyses
             await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
             await asyncio.gather(*(process_symbol_aggressive(s) for s in SYMBOLS if s not in trades))
 
-            # flush du buffer HOLD
+            # 📡 flush du buffer HOLD
             await flush_hold_buffer()
 
             print("✔️ Itération terminée", flush=True)
 
         except Exception as e:
-            # on loggue l'erreur sans interrompre le service
             await tg_send(f"⚠️ Erreur : {e}")
+        finally:
+            # 🔓 libère le flag pour éviter un blocage permanent
+            is_running = False
+
         await asyncio.sleep(SLEEP_SECONDS)
-
-
-if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main_loop())
