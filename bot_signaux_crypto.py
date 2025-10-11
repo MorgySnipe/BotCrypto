@@ -1602,23 +1602,26 @@ async def process_symbol(symbol):
             )
             return
 
-        # --- Volume 1h vs médiane 30j (robuste & borné) ---
-        vol_now_1h = float(klines[-1][7])
-
-        # === juste après le fallback in-trade et AVANT tout accès à klines ===
+        # --- Récup 1h et garde-fous AVANT toute lecture de klines[-1] ---
         klines = get_cached(symbol, '1h')  # 1h
         in_trade_std = (symbol in trades) and (trades[symbol].get("strategy", "standard") == "standard")
 
-        # ✅ si PAS de trade en cours et données 1h insuffisantes → on sort proprement
+        # Si trade en cours ET pas assez de 1h → tu as déjà le fallback juste au-dessus
+        # (ne rien changer à ce bloc)
+
+        # ✅ Si PAS de trade en cours et données 1h insuffisantes → on sort proprement
         if (not in_trade_std) and (not klines or len(klines) < 50):
             log_refusal(symbol, "Données 1h insuffisantes (entrée)")
             return
 
-        # (ici, on est garanti d'avoir au moins 50 bougies si pas en trade,
-        #  et le cas 'en trade mais pas assez de données' est géré plus haut par ton fallback)
+        # ✅ Mini-vérification supplémentaire : dernière bougie complète
+        if (not klines) or (len(klines[-1]) < 8):
+            log_refusal(symbol, "Dernière bougie 1h incomplète")
+            return
 
         # --- Volume 1h vs médiane 30j (robuste & borné) ---
         vol_now_1h = float(klines[-1][7])
+
 
         k1h_30d = get_cached(symbol, '1h', limit=750) or []
         vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j + current
@@ -2931,6 +2934,8 @@ async def main_loop():
     last_heartbeat = None
     last_summary_day = None
     last_audit_day = None
+
+    is_running = False
 
     while True:
         if is_running:
