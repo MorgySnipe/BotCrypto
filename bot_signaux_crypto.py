@@ -44,14 +44,6 @@ from urllib3.util.retry import Retry
 
 import os, json, csv
 
-import sys, os
-try:
-    sys.stdout.reconfigure(line_buffering=True)  # flush à chaque ligne
-except Exception:
-    pass
-os.environ["PYTHONUNBUFFERED"] = "1"
-
-
 # Récupérer les variables depuis Render (Environment Variables)
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = int(os.environ["CHAT_ID"])
@@ -70,9 +62,6 @@ LOG_FILE         = os.path.join(DATA_DIR, "trade_log.csv")
 
 
 nest_asyncio.apply()
-# === Anti-overlap global (mutex) ===
-ITERATION_LOCK = asyncio.Lock()
-
 
 # [#http-session]
 REQUEST_TIMEOUT = (5, 15)  # (connexion, lecture) en secondes
@@ -435,6 +424,7 @@ def st_onoff(st_bool: bool) -> str:
 def format_entry_msg(symbol, trade_id, strategy, bot_version, entry, position_pct,
                      sl_initial, sl_dist_pct, atr,
                      rsi_1h, macd, signal, adx,
+                     st_on,  # <— NOUVEAU paramètre: bool supertrend
                      ema25, ema50_4h, ema200_1h, ema200_4h,
                      vol5, vol20, vol_ratio,
                      btc_up, eth_up,
@@ -446,7 +436,7 @@ def format_entry_msg(symbol, trade_id, strategy, bot_version, entry, position_pc
         f"🎯 Prix entrée: {entry:.4f} | Taille: {position_pct:.1f}%\n"
         f"🛡 Stop initial: {sl_initial:.4f} (dist: {sl_dist_pct:.2f}%) | ATR-TV(1h): {atr:.4f}\n"
         f"🎯 TP1/TP2/TP3: +1.5% / +3% / +5% (dynamiques)\n\n"
-        f"📊 Indicateurs 1H: RSI {rsi_1h:.2f} | MACD {macd:.4f}/{signal:.4f} | ADX {adx:.2f} | Supertrend {'ON' if st_on else 'OFF'}\n"
+        f"📊 Indicateurs 1H: RSI {rsi_1h:.2f} | MACD {macd:.4f}/{signal:.4f} | ADX {adx:.2f} | Supertrend {st_onoff(st_on)}\n"
         f"📈 Tendances: EMA25 {ema25:.4f} | EMA50(4h) {ema50_4h:.4f} | EMA200(1h) {ema200_1h:.4f} | EMA200(4h) {ema200_4h:.4f}\n"
         f"📦 Volume: MA5 {vol5:.0f} | MA20 {vol20:.0f} | Ratio {vol_ratio:.2f}x\n"
         f"🌐 Contexte marché: BTC uptrend={btc_up} | ETH uptrend={eth_up}\n"
@@ -1605,46 +1595,29 @@ async def process_symbol(symbol):
             )
             return
 
-        # --- Récup 1h et garde-fous AVANT toute lecture de klines[-1] ---
-        klines = get_cached(symbol, '1h')  # 1h
-        in_trade_std = (symbol in trades) and (trades[symbol].get("strategy", "standard") == "standard")
-
-        # Si trade en cours ET pas assez de 1h → tu as déjà le fallback juste au-dessus
-        # (ne rien changer à ce bloc)
-
-        # ✅ Si PAS de trade en cours et données 1h insuffisantes → on sort proprement
-        if (not in_trade_std) and (not klines or len(klines) < 50):
-            log_refusal(symbol, "Données 1h insuffisantes (entrée)")
-            return
-
-        # ✅ Mini-vérification supplémentaire : dernière bougie complète
-        if (not klines) or (len(klines[-1]) < 8):
-            log_refusal(symbol, "Dernière bougie 1h incomplète")
-            return
-
         # --- Volume 1h vs médiane 30j (robuste & borné) ---
         vol_now_1h = float(klines[-1][7])
-
 
         k1h_30d = get_cached(symbol, '1h', limit=750) or []
         vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j + current
 
-        VOL_MED_MULT_EFF = 0.07     # 7% de la médiane 30j
-        MIN_VOLUME_ABS   = 120_000
+        VOL_MED_MULT_EFF = 0.07     # 7% de la médiane 30j (était 0.15)
+        MIN_VOLUME_ABS   = 120_000  # 200k → 120k
 
         if len(vols_hist) >= 200:
+            # borne haute : on limite l'influence de quelques mega-bougies
             med_30d_raw = float(np.median(vols_hist[:-1]))
             p70 = float(np.percentile(vols_hist[:-1], 70))
-            med_30d = min(med_30d_raw, p70 * 1.5)
+            med_30d = min(med_30d_raw, p70 * 1.5)  # cap raisonnable
+
             if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d):
-                log_refusal(symbol, "Volume 1h trop faible vs med30j (...)")
-                if not in_trade_std:
+                log_refusal(symbol, f"Volume 1h trop faible vs med30j (...)")
+                if not in_trade:
                     return
         else:
             if vol_now_1h < MIN_VOLUME_ABS:
                 log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
-                if not in_trade_std:
-                    return
+                return
 
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
@@ -2167,18 +2140,15 @@ async def process_symbol(symbol):
             save_trades()
 
             msg = format_entry_msg(
-            symbol, trade_id, "standard", BOT_VERSION, price, position_pct,
-            sl_initial, ((price - sl_initial) / price) * 100, atr,
-            rsi, macd, signal, adx_value, supertrend_signal,
-            ema25, ema50_4h, ema200, ema200_4h,
-            np.mean(volumes[-5:]), np.mean(volumes[-20:]),
-            np.mean(volumes[-5:]) / max(np.mean(volumes[-20:]), 1e-9),
-            btc_up, eth_up,
-            confidence, label_conf, reasons
-        )
-
-
-
+                symbol, trade_id, "standard", BOT_VERSION, price, position_pct,
+                sl_initial, ((price - sl_initial) / price) * 100, atr,
+                rsi, macd, signal, adx_value, supertrend_signal,
+                ema25, ema50_4h, ema200, ema200_4h,
+                np.mean(volumes[-5:]), np.mean(volumes[-20:]),
+                np.mean(volumes[-5:]) / max(np.mean(volumes[-20:]), 1e-9),
+                btc_up, eth_up,
+                confidence, label_conf, reasons
+            )
             await tg_send(msg)
             log_trade(symbol, "BUY", price)
 
@@ -2795,17 +2765,16 @@ async def process_symbol_aggressive(symbol):
         eth_up = is_uptrend([float(k[4]) for k in market_cache.get("ETHUSDT", [])]) if market_cache.get("ETHUSDT") else False
 
         msg = format_entry_msg(
-        symbol, trade_id, "aggressive", BOT_VERSION, price, position_pct,
-        sl_initial, ((price - sl_initial) / price) * 100, atr,
-        rsi, macd, signal, adx_value,
-        supertrend_ok,
-        ema25,
-        ema50_4h, ema200_1h, ema200_4h,
-        vol5, vol20, vol5 / max(vol20, 1e-9),
-        btc_up, eth_up,
-        score, label_conf, reasons
-    )
-
+            symbol, trade_id, "aggressive", BOT_VERSION, price, position_pct,
+            sl_initial, ((price - sl_initial) / price) * 100, atr,
+            rsi, macd, signal, adx_value,
+            supertrend_ok,
+            ema25,
+            ema50_4h, ema200_1h, ema200_4h,
+            vol5, vol20, vol5 / max(vol20, 1e-9),
+            btc_up, eth_up,
+            score, label_conf, reasons
+        )
         await tg_send(msg)
 
         log_trade_csv({
@@ -2914,6 +2883,7 @@ async def main_loop():
 
     # Charger les trades + history sauvegardés
     trades.update(load_trades())
+    # garde la même liste en mémoire (référence) et remplit depuis disque
     history_loaded = load_history()
     history.clear()
     history.extend(history_loaded)
@@ -2937,65 +2907,7 @@ async def main_loop():
     last_summary_day = None
     last_audit_day = None
 
-    # 🔒 anti-overlap via mutex (empêche 2 itérations en parallèle, même si 2 boucles sont lancées)
     while True:
-        try:
-            async with ITERATION_LOCK:
-                now = datetime.now(timezone.utc)
-
-                # ✅ heartbeat horaire
-                if last_heartbeat != now.hour:
-                    await tg_send(f"✅ Bot actif {now.strftime('%H:%M')}")
-                    await send_refusal_top(60, 8)
-                    last_heartbeat = now.hour
-
-                # ✅ résumé quotidien 23:00 UTC
-                if now.hour == 23 and (last_summary_day is None or last_summary_day != now.date()):
-                    await send_daily_summary()
-                    last_summary_day = now.date()
-
-                # 🔄 plus AUCUN préchargement global
-                symbol_cache.clear()
-                for s in SYMBOLS:
-                    symbol_cache[s] = {}
-
-                # 🌐 Contexte marché minimal (BTC/ETH)
-                try:
-                    market_cache['BTCUSDT'] = get_klines('BTCUSDT', '1h', 200) or []
-                    market_cache['ETHUSDT'] = get_klines('ETHUSDT', '1h', 200) or []
-                except Exception:
-                    market_cache['BTCUSDT'] = []
-                    market_cache['ETHUSDT'] = []
-
-                update_market_state()
-
-                # 🔍 Analyses (on collecte les exceptions au lieu de casser toute l’itération)
-                res1 = await asyncio.gather(
-                    *(process_symbol(s) for s in SYMBOLS),
-                    return_exceptions=True
-                )
-                res2 = await asyncio.gather(
-                    *(process_symbol_aggressive(s) for s in SYMBOLS if s not in trades),
-                    return_exceptions=True
-                )
-                for r in (*res1, *res2):
-                    if isinstance(r, Exception):
-                        print("task error:", r)
-
-                # 📡 flush du buffer HOLD
-                await flush_hold_buffer()
-                print("✔️ Itération terminée", flush=True)
-
-        except Exception as e:
-            await tg_send(f"⚠️ Erreur : {e}")
-            traceback.print_exc()
-
-        # ⏲️ tempo entre deux itérations (en dehors du lock)
-        await asyncio.sleep(SLEEP_SECONDS)
-
-        continue
-
-        is_running = True
         try:
             now = datetime.now(timezone.utc)
 
@@ -3010,35 +2922,42 @@ async def main_loop():
                 await send_daily_summary()
                 last_summary_day = now.date()
 
-            # 🔄 plus AUCUN préchargement global
-            #    → on garde un cache vide (accès lazy dans process_symbol si tu veux)
+            # --- préchargement multi-TF ---
             symbol_cache.clear()
+            tasks = []
             for s in SYMBOLS:
-                symbol_cache[s] = {}
+                symbol_cache.setdefault(s, {})
+                for tf, lim in TF_LIST:
+                    tasks.append(get_klines_async(s, tf, lim))
 
-            # 🌐 Contexte marché minimal (BTC/ETH) — direct, sans results
-            try:
-                market_cache['BTCUSDT'] = get_klines('BTCUSDT', '1h', 200) or []
-                market_cache['ETHUSDT'] = get_klines('ETHUSDT', '1h', 200) or []
-            except Exception:
-                market_cache['BTCUSDT'] = []
-                market_cache['ETHUSDT'] = []
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
+            idx = 0
+            for s in SYMBOLS:
+                for tf, lim in TF_LIST:
+                    r = results[idx]; idx += 1
+                    symbol_cache[s][tf] = [] if isinstance(r, Exception) or r is None else r
+
+            # contexte marché
+            market_cache['BTCUSDT'] = symbol_cache.get('BTCUSDT', {}).get('1h', [])
+            market_cache['ETHUSDT'] = symbol_cache.get('ETHUSDT', {}).get('1h', [])
             update_market_state()
 
-            # 🔍 Analyses
+            # analyses
             await asyncio.gather(*(process_symbol(s) for s in SYMBOLS))
             await asyncio.gather(*(process_symbol_aggressive(s) for s in SYMBOLS if s not in trades))
 
-            # 📡 flush du buffer HOLD
+            # flush du buffer HOLD
             await flush_hold_buffer()
 
             print("✔️ Itération terminée", flush=True)
 
+
         except Exception as e:
             await tg_send(f"⚠️ Erreur : {e}")
-        finally:
-            # 🔓 libère le flag pour éviter un blocage permanent
-            is_running = False
 
         await asyncio.sleep(SLEEP_SECONDS)
+
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main_loop())
