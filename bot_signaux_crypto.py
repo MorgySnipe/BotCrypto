@@ -432,7 +432,6 @@ def st_onoff(st_bool: bool) -> str:
 def format_entry_msg(symbol, trade_id, strategy, bot_version, entry, position_pct,
                      sl_initial, sl_dist_pct, atr,
                      rsi_1h, macd, signal, adx,
-                     st_on,
                      ema25, ema50_4h, ema200_1h, ema200_4h,
                      vol5, vol20, vol_ratio,
                      btc_up, eth_up,
@@ -2161,20 +2160,17 @@ async def process_symbol(symbol):
             last_trade_time[symbol] = datetime.now(timezone.utc)
             save_trades()
 
-            # -- TP en prix (standard) --
-            tp_mults = TP_ATR_MULTS_STD
-            tp1_p, tp2_p, tp3_p = tp_prices_from_atr(price, atr, tp_mults)
-
             msg = format_entry_msg(
-                symbol, trade_id, "standard", BOT_VERSION, price, position_pct,
-                sl_initial, ((price - sl_initial) / price) * 100, atr,
-                rsi, macd, signal, adx_value, supertrend_signal,
-                ema25, ema50_4h, ema200, ema200_4h,
-                np.mean(volumes[-5:]), np.mean(volumes[-20:]),
-                np.mean(volumes[-5:]) / max(np.mean(volumes[-20:]), 1e-9),
-                btc_up, eth_up,
-                confidence, label_conf, reasons
-            )
+            symbol, trade_id, "standard", BOT_VERSION, price, position_pct,
+            sl_initial, ((price - sl_initial) / price) * 100, atr,
+            rsi, macd, signal, adx_value, supertrend_signal,
+            ema25, ema50_4h, ema200, ema200_4h,
+            np.mean(volumes[-5:]), np.mean(volumes[-20:]),
+            np.mean(volumes[-5:]) / max(np.mean(volumes[-20:]), 1e-9),
+            btc_up, eth_up,
+            confidence, label_conf, reasons
+        )
+
 
 
             await tg_send(msg)
@@ -2792,22 +2788,17 @@ async def process_symbol_aggressive(symbol):
         btc_up = is_uptrend([float(k[4]) for k in market_cache.get("BTCUSDT", [])]) if market_cache.get("BTCUSDT") else False
         eth_up = is_uptrend([float(k[4]) for k in market_cache.get("ETHUSDT", [])]) if market_cache.get("ETHUSDT") else False
 
-        # -- TP en prix (aggressive) --
-        tp_mults = TP_ATR_MULTS_AGR
-        tp1_p, tp2_p, tp3_p = tp_prices_from_atr(price, atr, tp_mults)
-
         msg = format_entry_msg(
-            symbol, trade_id, "aggressive", BOT_VERSION, price, position_pct,
-            sl_initial, ((price - sl_initial) / price) * 100, atr,
-            rsi, macd, signal, adx_value,
-            supertrend_ok,
-            ema25,
-            ema50_4h, ema200_1h, ema200_4h,
-            vol5, vol20, vol5 / max(vol20, 1e-9),
-            btc_up, eth_up,
-            score, label_conf, reasons
-        )
-
+        symbol, trade_id, "aggressive", BOT_VERSION, price, position_pct,
+        sl_initial, ((price - sl_initial) / price) * 100, atr,
+        rsi, macd, signal, adx_value,
+        supertrend_ok,
+        ema25,
+        ema50_4h, ema200_1h, ema200_4h,
+        vol5, vol20, vol5 / max(vol20, 1e-9),
+        btc_up, eth_up,
+        score, label_conf, reasons
+    )
 
         await tg_send(msg)
 
@@ -2941,9 +2932,6 @@ async def main_loop():
     last_summary_day = None
     last_audit_day = None
 
-    # 🔒 anti-overlap entre itérations
-    is_running = False
-
     while True:
         if is_running:
             print("⚠️ Boucle précédente encore en cours — on saute cette itération", flush=True)
@@ -2965,32 +2953,12 @@ async def main_loop():
                 await send_daily_summary()
                 last_summary_day = now.date()
 
-            print(f"🔄 Loop tick {datetime.now(timezone.utc).strftime('%H:%M:%S')}", flush=True)
-
-            # --- préchargement multi-TF ---
-            print("⏬ Préchargement multi-TF…", flush=True)
-            t0 = time.monotonic()
-
             symbol_cache.clear()
             tasks = []
             for s in SYMBOLS:
                 symbol_cache.setdefault(s, {})
                 for tf, lim in TF_LIST:
                     tasks.append(get_klines_async(s, tf, lim))
-
-            # Timeout global pour éviter de “geler” la boucle si Binance rame
-            try:
-                results = await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=45
-                )
-            except asyncio.TimeoutError:
-                print("⚠️ Préchargement TF: TIMEOUT global (45s). On continue avec ce qu’on a.", flush=True)
-                results = [None] * len(tasks)
-
-            elapsed = time.monotonic() - t0
-            errors = sum(1 for r in results if isinstance(r, Exception) or r is None)
-            print(f"⏫ Préchargement fini en {elapsed:.1f}s — erreurs: {errors}/{len(results)}", flush=True)
 
             # Remplissage du cache
             idx = 0
@@ -3016,10 +2984,6 @@ async def main_loop():
         except Exception as e:
             # on loggue l'erreur sans interrompre le service
             await tg_send(f"⚠️ Erreur : {e}")
-        finally:
-            # 🔓 on libère l’itération en cours quoi qu’il arrive
-            is_running = False
-
         await asyncio.sleep(SLEEP_SECONDS)
 
 
