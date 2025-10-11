@@ -70,6 +70,9 @@ LOG_FILE         = os.path.join(DATA_DIR, "trade_log.csv")
 
 
 nest_asyncio.apply()
+# === Anti-overlap global (mutex) ===
+ITERATION_LOCK = asyncio.Lock()
+
 
 # [#http-session]
 REQUEST_TIMEOUT = (5, 15)  # (connexion, lecture) en secondes
@@ -2934,13 +2937,62 @@ async def main_loop():
     last_summary_day = None
     last_audit_day = None
 
-    # 🔒 anti-overlap
-    is_running = False
-
+    # 🔒 anti-overlap via mutex (empêche 2 itérations en parallèle, même si 2 boucles sont lancées)
     while True:
-        if is_running:
-            print("⚠️ Boucle précédente encore en cours — on saute cette itération", flush=True)
-            await asyncio.sleep(SLEEP_SECONDS)
+        try:
+            async with ITERATION_LOCK:
+                now = datetime.now(timezone.utc)
+
+                # ✅ heartbeat horaire
+                if last_heartbeat != now.hour:
+                    await tg_send(f"✅ Bot actif {now.strftime('%H:%M')}")
+                    await send_refusal_top(60, 8)
+                    last_heartbeat = now.hour
+
+                # ✅ résumé quotidien 23:00 UTC
+                if now.hour == 23 and (last_summary_day is None or last_summary_day != now.date()):
+                    await send_daily_summary()
+                    last_summary_day = now.date()
+
+                # 🔄 plus AUCUN préchargement global
+                symbol_cache.clear()
+                for s in SYMBOLS:
+                    symbol_cache[s] = {}
+
+                # 🌐 Contexte marché minimal (BTC/ETH)
+                try:
+                    market_cache['BTCUSDT'] = get_klines('BTCUSDT', '1h', 200) or []
+                    market_cache['ETHUSDT'] = get_klines('ETHUSDT', '1h', 200) or []
+                except Exception:
+                    market_cache['BTCUSDT'] = []
+                    market_cache['ETHUSDT'] = []
+
+                update_market_state()
+
+                # 🔍 Analyses (on collecte les exceptions au lieu de casser toute l’itération)
+                res1 = await asyncio.gather(
+                    *(process_symbol(s) for s in SYMBOLS),
+                    return_exceptions=True
+                )
+                res2 = await asyncio.gather(
+                    *(process_symbol_aggressive(s) for s in SYMBOLS if s not in trades),
+                    return_exceptions=True
+                )
+                for r in (*res1, *res2):
+                    if isinstance(r, Exception):
+                        print("task error:", r)
+
+                # 📡 flush du buffer HOLD
+                await flush_hold_buffer()
+                print("✔️ Itération terminée", flush=True)
+
+        except Exception as e:
+            await tg_send(f"⚠️ Erreur : {e}")
+            traceback.print_exc()
+
+        # ⏲️ tempo entre deux itérations (en dehors du lock)
+        await asyncio.sleep(SLEEP_SECONDS)
+
             continue
 
         is_running = True
