@@ -1522,6 +1522,18 @@ def btc_market_drift() -> bool:
     macd_btc, signal_btc = compute_macd(closes)
     return (closes[-1] < ema200_btc) and (macd_btc < signal_btc)
 
+# === Relative strength ALT vs BTC (autorise si l'ALT surperforme) ===
+def rel_strength_vs_btc(symbol, klines_1h_alt=None, lookback=3):
+    k_alt = klines_1h_alt or get_cached(symbol, '1h')
+    k_btc = market_cache.get('BTCUSDT', [])
+    if not k_alt or not k_btc or len(k_alt) < lookback+1 or len(k_btc) < lookback+1:
+        return 0.0
+    a0, aN = float(k_alt[-lookback-1][4]), float(k_alt[-1][4])
+    b0, bN = float(k_btc[-lookback-1][4]), float(k_btc[-1][4])
+    alt_chg = (aN - a0) / max(a0, 1e-9)
+    btc_chg = (bN - b0) / max(b0, 1e-9)
+    return alt_chg - btc_chg  # positif = ALT > BTC
+
 def _nb_trades(strategy=None):
     """
     Compte les trades actifs.
@@ -1601,8 +1613,8 @@ async def process_symbol(symbol):
         k1h_30d = get_cached(symbol, '1h', limit=750) or []
         vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j + current
 
-        VOL_MED_MULT_EFF = 0.07     # 7% de la médiane 30j (était 0.15)
-        MIN_VOLUME_ABS   = 120_000  # 200k → 120k
+        VOL_MED_MULT_EFF = (0.05 if symbol in MAJORS else 0.07)
+        MIN_VOLUME_ABS   = (80_000 if symbol in MAJORS else 120_000)
 
         if len(vols_hist) >= 200:
             # borne haute : on limite l'influence de quelques mega-bougies
@@ -1947,10 +1959,20 @@ async def process_symbol(symbol):
                     return
 
         if symbol != "BTCUSDT" and btc_market_drift():
-            log_refusal(symbol, "BTC drift (1h < EMA200 & MACD<signal)")
+        rs = rel_strength_vs_btc(symbol)  # edge ALT vs BTC (sur 3 bougies 1h)
+        HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
+        # Hard uniquement si alts low-liq, RS faible et momentum pas fou
+        if (symbol not in HIGH_LIQ) and (rs <= 0.006) and (adx_value < 22):
+            log_refusal(symbol, "BTC drift (hard on low-liq)", trigger=f"RSvsBTC={rs:.3%}")
             if not in_trade:
                 return
-
+        else:
+            # Soft penalty sinon (on laisse passer)
+            try:
+                indicators_soft_penalty += 1
+            except NameError:
+                indicators_soft_penalty = 1
+            log_info(symbol, "BTC drift (soft) — high-liq ou RS>BTC")
             
         # — Pré-filtre: prix trop loin de l’EMA25 (pénalité soft, seuil relevé)
         EMA25_PREFILTER_STD = (1.06 if symbol in MAJORS else 1.10)
@@ -1987,16 +2009,20 @@ async def process_symbol(symbol):
         vol_ma10 = float(np.mean(vols15[-11:-1]))
         vol_ratio_15m = vol_now / max(vol_ma10, 1e-9)
 
-        if vol_ratio_15m < VOL15M_MIN_RATIO:
+        min_ratio15 = 0.45 if symbol in MAJORS else VOL15M_MIN_RATIO
+        if vol_ratio_15m < min_ratio15:
             log_refusal(symbol, f"Vol 15m faible (soft): {vol_ratio_15m:.2f}")
             reasons += [f"⚠️ Vol15m {vol_ratio_15m:.2f} (soft)"]
             # pas de return -> on continue
 
         # === Confluence & scoring (final) ===
         volume_ok   = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
-        trend_ok    = (price > ema200) and supertrend_signal
-        momentum_ok = (macd > signal) and (rsi >= 55)
+        trend_ok = (
+            (price >= ema200 * 0.99)                             # tolérance -1%
+            or (closes_4h[-1] > ema50_4h and ema50_4h > ema200_4h)  # 4h propre
+        ) and supertrend_signal
 
+        momentum_ok = (macd > signal) and (rsi >= (52 if adx_value >= 20 else 55))
 
         indicators = {
             "rsi": rsi,
@@ -2029,8 +2055,11 @@ async def process_symbol(symbol):
 
         # --- Décision d'achat (standard) avec filtre 15m ---
         brk_ok, br_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
-        last3_change = (closes[-1] - closes[-4]) / closes[-4]
-        if last3_change > 0.028:  # 2.8% au lieu de 2.2%
+        last3_change = (closes[-1] - closes[-4]) / max(closes[-4], 1e-9)
+        atr_pct = atr / max(price, 1e-9)
+        limit = (0.032 if symbol in MAJORS else 0.030)
+        limit = max(limit, 2.0 * atr_pct)  # tolère davantage si vol élevé
+        if last3_change > limit:
             brk_ok = False
 
         buy = False
@@ -2247,8 +2276,8 @@ async def process_symbol_aggressive(symbol):
         k1h_30d = get_cached(symbol, '1h', limit=750) or []
         vols_hist = volumes_series(k1h_30d, quote=True)[-721:]
 
-        VOL_MED_MULT_EFF = 0.07
-        MIN_VOLUME_ABS   = 120_000
+        VOL_MED_MULT_EFF = (0.05 if symbol in MAJORS else 0.07)
+        MIN_VOLUME_ABS   = (80_000 if symbol in MAJORS else 120_000)
 
         if len(vols_hist) >= 200:
             med_30d_raw = float(np.median(vols_hist[:-1]))
@@ -2603,7 +2632,7 @@ async def process_symbol_aggressive(symbol):
             return
 
         # RSI zone constructive
-        if not (52 <= rsi < 82):
+        if not (51 <= rsi < 82):
             return
 
         # ---- Confluence 4h ----
