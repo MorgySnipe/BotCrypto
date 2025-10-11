@@ -2993,7 +2993,7 @@ async def main_loop():
         # ⏲️ tempo entre deux itérations (en dehors du lock)
         await asyncio.sleep(SLEEP_SECONDS)
 
-            continue
+        continue
 
         is_running = True
         try:
