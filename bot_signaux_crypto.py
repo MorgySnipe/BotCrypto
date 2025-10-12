@@ -227,23 +227,9 @@ from typing import Final
 MAJORS: Final = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 
 def allowed_trade_slots(strategy: str | None = None) -> int:
-    """
-    Nombre de positions autorisées en parallèle.
-    - base = 3 (au lieu de 1)
-    - +1 slot pour chaque trade "confiant" (confidence >= 8), max 7.
-    - si `strategy` est fourni, on ne compte que cette stratégie.
-    """
-    base = 3
-    try:
-        high = sum(
-            1 for t in trades.values()
-            if (strategy is None or t.get("strategy") == strategy)
-            and float(t.get("confidence", 0)) >= 8
-        )
-    except Exception:
-        high = 0
-    return min(7, base + high)
-
+    # Illimité
+    return 10**9
+    
 def daily_pnl_pct_utc() -> float:
     """
     Somme des P&L (en %) des trades clôturés 'aujourd'hui' (UTC) d'après `history`.
@@ -294,18 +280,8 @@ def pnl_7d_pct_utc() -> float:
     return total
 
 def perf_cap_max_trades(strategy: str) -> int:
-    """
-    Cap 'machine à sous':
-    - Si P&L 7j < 0  → cap bas (prudence)
-      standard: 1   | aggressive: 1
-    - Si P&L 7j ≥ 0 → cap haut
-      standard: 3   | aggressive: 4
-    """
-    pnl7 = pnl_7d_pct_utc()
-    if pnl7 < 0:
-        return 1 if strategy == "standard" else 1
-    else:
-        return 3 if strategy == "standard" else 4
+    # Aucun plafonnement basé sur la perf
+    return 10**9
 
 def build_tg_bot(connect=20, read=60, pool=20):
     req = HTTPXRequest(connect_timeout=connect, read_timeout=read, pool_timeout=pool)
@@ -1933,12 +1909,8 @@ async def process_symbol(symbol):
                 )
                 return
             
-        # ----- Garde-fous -----
-        # ⚙️ Patch : suppression de la limite de trades simultanés
-        slots = min(allowed_trade_slots("standard"), perf_cap_max_trades("standard"))
-        if _nb_trades("standard") >= slots:
-            log_info(symbol, f"[Patch] Max trades standard atteints ({_nb_trades('standard')}/{slots}) — autorisé quand même")
-            # on laisse passer (pas de return)
+        # aucune limite de positions simultanées (standard)
+        pass
 
         # --- Low-liquidity session -> SOFT ---
         ok_session, _sess = is_active_liquidity_session(symbol=symbol)
@@ -2568,14 +2540,7 @@ async def process_symbol_aggressive(symbol):
                         indicators_soft_penalty = 1
                     log_refusal(symbol, "BTC faible (soft): RSI<43 ET MACD<=Signal")
                     # on continue ; le blocage dur est géré par btc_regime_blocked()
-
-        # ---- Garde-fous ----
-        # ⚙️ Patch : suppression de la limite de trades simultanés
-        slots = min(allowed_trade_slots("aggressive"), perf_cap_max_trades("aggressive"))
-        if _nb_trades("aggressive") >= slots:
-            log_info(symbol, f"[Patch] Max trades aggressive atteints ({_nb_trades('aggressive')}/{slots}) — autorisé quand même")
-            # on laisse passer (pas de return)
-
+        
         # --- Low-liquidity session -> SOFT ---
         indicators_soft_penalty = 0
         tendance_soft_notes = []
