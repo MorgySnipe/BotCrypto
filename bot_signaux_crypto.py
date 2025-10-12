@@ -657,32 +657,31 @@ def ema_tv_series(values, period):
     """
     return compute_ema_series(np.asarray(values, dtype=float), period)
 
-def is_bull_structure_15m(highs, lows, n=3):
+def is_bull_structure_15m(highs, lows, n=3, tol=0.001):
     """
-    True si les 'n' dernières bougies complètes forment une structure haussière :
-    HH en progression ET HL en progression (strictement croissants).
+    Structure haussière tolérante :
+    - On demande n bougies complètes, mais on accepte des plateaux (>=) avec marge 'tol'
+    - Suffit que TOUTES les comparaisons soient non-bear (>= (1 - tol))
     """
     if len(highs) < n or len(lows) < n:
         return False
     hh = highs[-n:]
     hl = lows[-n:]
-    hh_up = all(hh[i] < hh[i+1] for i in range(n-1))
-    hl_up = all(hl[i] < hl[i+1] for i in range(n-1))
+    hh_up = all(hh[i+1] >= hh[i] * (1 - tol) for i in range(n-1))
+    hl_up = all(hl[i+1] >= hl[i] * (1 - tol) for i in range(n-1))
     return hh_up and hl_up
 
-def check_15m_filter(k15, breakout_level=None):
+def check_15m_filter(k15, breakout_level=None, n_struct=3, tol_struct=0.0015):
     """
-    Vérifie le filtre 15m avant achat.
-    - EMA20(15m) pente positive (EMA20[t] > EMA20[t-1])
-    - Structure haussière sur 3 bougies complètes (HH & HL progressent)
+    Vérifie le filtre 15m avant achat (tolérant).
+    - EMA20 pente positive
+    - Structure haussière tolérante (n_struct = 2 sur majors / ADX fort)
     - Close15m > EMA20(15m)
-    - Si breakout_level fourni (breakout+retest), Close15m >= breakout_level
-    Retourne (ok: bool, details: str)
+    - Si breakout_level: accepte close >= level * (1 - tol_struct)
     """
     if not k15 or len(k15) < 25:
         return False, "Données 15m insuffisantes"
 
-    # On ne prend que les bougies COMPLÈTES (on exclut la bougie en cours)
     k = k15[:-1] if len(k15) >= 2 else k15
     closes = [float(x[4]) for x in k]
     highs  = [float(x[2]) for x in k]
@@ -692,10 +691,13 @@ def check_15m_filter(k15, breakout_level=None):
     if len(ema20_series) < 2:
         return False, "EMA20(15m) insuffisante"
 
-    ema20_up   = ema20_series[-1] > ema20_series[-2]
-    close_ok   = closes[-1] > ema20_series[-1]
-    struct_ok  = is_bull_structure_15m(highs, lows, n=3)
-    retest_ok  = True if breakout_level is None else (closes[-1] >= breakout_level)
+    ema20_up  = ema20_series[-1] > ema20_series[-2]
+    close_ok  = closes[-1] >= ema20_series[-1]
+    struct_ok = is_bull_structure_15m(highs, lows, n=n_struct, tol=tol_struct)
+    if breakout_level is not None:
+        retest_ok = closes[-1] >= breakout_level * (1 - tol_struct)
+    else:
+        retest_ok = True
 
     ok = ema20_up and close_ok and struct_ok and retest_ok
     details = (f"EMA20_up={ema20_up}, Struct={struct_ok}, Close>EMA20={close_ok}"
@@ -2067,7 +2069,8 @@ async def process_symbol(symbol):
 
         if brk_ok and trend_ok and momentum_ok and volume_ok:
             # Filtre 15m avec niveau de breakout
-            ok15, det15 = check_15m_filter(k15, breakout_level=br_level)
+            n_struct = 2 if (symbol in MAJORS or adx_value >= 20) else 3
+            ok15, det15 = check_15m_filter(k15, breakout_level=br_level, n_struct=n_struct, tol_struct=0.0015)
             if not ok15:
                 log_refusal(symbol, f"Filtre 15m non validé (BRK): {det15}")
                 if not in_trade:
@@ -2101,7 +2104,8 @@ async def process_symbol(symbol):
 
             if near_ema25 and candle_ok:
                 # Filtre 15m sans niveau de breakout
-                ok15, det15 = check_15m_filter(k15, breakout_level=None)
+                n_struct = 2 if (symbol in MAJORS or adx_value >= 20) else 3
+                ok15, det15 = check_15m_filter(k15, breakout_level=None, n_struct=n_struct, tol_struct=0.0015)
                 if not ok15:
                     log_refusal(symbol, f"Filtre 15m non validé (PB EMA25): {det15}")
                     return
@@ -2705,10 +2709,13 @@ async def process_symbol_aggressive(symbol):
             # on continue (soft)
 
         # --- Filtre structure 15m (aggressive) ---
-        if near_level:
-            ok15, det15 = check_15m_filter(k15, breakout_level=last10_high)
-        else:
-            ok15, det15 = check_15m_filter(k15, breakout_level=None)
+        n_struct = 2 if (symbol in MAJORS or adx_value >= 20) else 3
+        ok15, det15 = check_15m_filter(
+            k15,
+            breakout_level=(last10_high if near_level else None),
+            n_struct=n_struct,
+            tol_struct=0.0015
+        )
         if not ok15:
             log_refusal(symbol, f"Filtre 15m non validé (aggressive): {det15}")
             if not in_trade:
