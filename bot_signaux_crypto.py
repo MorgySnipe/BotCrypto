@@ -186,11 +186,11 @@ ANTI_SPIKE_OPEN_MAX = 0.035  # 3.5% max vs open (1h)
 
 # --- Trailing stop harmonisé (ATR TV) ---
 TRAIL_TIERS = [
-    (1.8, 0.9),   # dès +1.8% ⇒ stop = P - 0.9*ATR
-    (3.5, 0.6),
-    (6.0, 0.45),
+    (1.4, 0.9),   # 1er palier avancé
+    (2.8, 0.6),
+    (5.0, 0.45),
 ]
-TRAIL_BE_AFTER = 1.5  # lock BE dès ~TP1 (≥ +1.5%)
+TRAIL_BE_AFTER = 1.2
 # --- Take-profits dynamiques (multiplicateurs d'ATR) ---
 TP_ATR_MULTS_STD = [1.0, 2.0, 3.0]      # standard : TP1=1×ATR, TP2=2×ATR, TP3=3×ATR
 TP_ATR_MULTS_AGR = [1.0, 2.0, 3.0]      # aggressive (modifiable si besoin)
@@ -1145,49 +1145,64 @@ def is_bearish_engulfing_5m(k5):
 
 def fast_exit_5m_trigger(symbol: str, entry: float, current_price: float):
     """
-    Sortie dynamique (timeframe 5m) :
-    - Si gain >= +0.8% ET (RSI(5m) chute > 5 pts OU MACD croise baissier OU bearish engulfing 5m) -> True
-    Retourne (trigger: bool, info: dict)
+    Sortie dynamique 5m (version sélective) :
+    - Gain >= +1.2%
+    - ET (RSI drop >= 8 & MACD croise baissier) OU (bearish engulfing & close<EMA20(5m))
+    - Flag "strong" si RSI drop >= 10 ET MACD croise baissier
     """
     try:
         if entry <= 0 or current_price is None:
             return False, {}
         gain_pct = ((current_price - entry) / entry) * 100.0
-        if gain_pct < 0.8:
+        if gain_pct < 1.2:
             return False, {"gain_pct": gain_pct}
 
-        k5 = get_cached(symbol, '5m', limit=60)
-        if not k5 or len(k5) < 20:
+        k5 = get_cached(symbol, '5m', limit=80)
+        if not k5 or len(k5) < 25:
             return False, {"gain_pct": gain_pct}
 
-        # On travaille sur les bougies COMPLÈTES
-        closes5 = [float(k[4]) for k in k5[:-1]] if len(k5) >= 2 else [float(k5[-1][4])]
+        # bougies 5m COMPLÈTES
+        ks = k5[:-1] if len(k5) >= 2 else k5
+        closes5 = [float(k[4]) for k in ks]
 
-        # RSI(5m) : chute entre les 2 dernières clôtures complètes
+        # RSI drop
         rsi5_series = rsi_tv_series(closes5, period=14)
-        rsi_prev, rsi_now = _last_two_finite(rsi5_series)
-        rsi_drop = (not np.isnan(rsi_prev) and not np.isnan(rsi_now) and (rsi_prev - rsi_now) > 5.0)
+        rsi_prev = rsi5_series[~np.isnan(rsi5_series)][-2] if np.isfinite(rsi5_series).sum() >= 2 else np.nan
+        rsi_now  = rsi5_series[~np.isnan(rsi5_series)][-1] if np.isfinite(rsi5_series).sum() >= 1 else np.nan
+        rsi_drop_pts = (rsi_prev - rsi_now) if (not np.isnan(rsi_prev) and not np.isnan(rsi_now)) else 0.0
+        rsi_drop = rsi_drop_pts >= 8.0
+        rsi_drop_strong = rsi_drop_pts >= 10.0
 
-        # MACD(5m) : croisement baissier récent (entre -2 et -1 complètes)
+        # MACD cross
         macd_now,  signal_now  = compute_macd(closes5)
         macd_prev, signal_prev = compute_macd(closes5[:-1])
         macd_cross_down = (macd_prev >= signal_prev) and (macd_now < signal_now)
 
-        # Bearish engulfing 5m (sur les 2 dernières bougies complètes)
+        # Bearish engulfing
         bearish_5m = is_bearish_engulfing_5m(k5)
 
-        trigger = gain_pct >= 0.8 and (rsi_drop or macd_cross_down or bearish_5m)
+        # Close vs EMA20(5m)
+        ema20_5 = ema_tv_series(closes5, 20)
+        close_below_ema20 = closes5[-1] < ema20_5[-1] if len(ema20_5) else False
+
+        # Règles : (RSI_drop & MACD_cross) OU (bearish & close<EMA20)
+        combo1 = rsi_drop and macd_cross_down
+        combo2 = bearish_5m and close_below_ema20
+        trigger = gain_pct >= 1.2 and (combo1 or combo2)
+
         return trigger, {
             "gain_pct": gain_pct,
             "rsi5_prev": rsi_prev, "rsi5_now": rsi_now,
-            "rsi_drop": (rsi_prev - rsi_now) if (not np.isnan(rsi_prev) and not np.isnan(rsi_now)) else None,
+            "rsi_drop": rsi_drop_pts,
             "macd5": macd_now, "signal5": signal_now,
             "macd5_prev": macd_prev, "signal5_prev": signal_prev,
             "macd_cross_down": macd_cross_down,
-            "bearish_engulfing_5m": bearish_5m
+            "bearish_engulfing_5m": bearish_5m,
+            "close_below_ema20_5m": close_below_ema20,
+            "strong": (rsi_drop_strong and macd_cross_down)
         }
     except Exception:
-        return False, {}  
+        return False, {}
 
 
 def detect_breakout_retest(closes, highs, lookback=10, tol=0.0015):
@@ -1688,14 +1703,20 @@ async def process_symbol(symbol):
                 _finalize_exit(symbol, price, gain, f"Timeout intelligent (standard): {why}", "SMART_TIMEOUT", ctx)
                 return
 
-            # ====== 3) Sortie dynamique 5m ======
+            # ====== 3) Sortie dynamique 5m (gated) ======
             triggered, fx = fast_exit_5m_trigger(symbol, entry, price)
-            if triggered:
+            strong_trend_1h = (adx_value >= 28) and supertrend_signal
+            allow_fast = triggered and ((not trades[symbol].get("tp1", False)) or fx.get("strong")) \
+                         and not (strong_trend_1h and fx.get("gain_pct", 0.0) < 2.2)
+
+            if allow_fast:
                 vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
                 vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
                 bits = []
                 if fx.get("rsi_drop") is not None and fx["rsi_drop"] > 5: bits.append(f"RSI(5m) -{fx['rsi_drop']:.1f} pts")
                 if fx.get("macd_cross_down"): bits.append("MACD(5m) croisement baissier")
+                if fx.get("bearish_engulfing_5m"): bits.append("Bearish engulfing 5m")
+                if fx.get("close_below_ema20_5m"): bits.append("Close<EMA20(5m)")
                 raison = "Sortie dynamique 5m: " + " ; ".join(bits) if bits else "Sortie dynamique 5m"
                 ctx = {
                     "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
@@ -1710,6 +1731,9 @@ async def process_symbol(symbol):
                 }
                 _finalize_exit(symbol, price, gain, raison, "DYN_EXIT_5M", ctx)
                 return
+            else:
+                # on resserre le trailing si un fast-exit a été déclenché mais bloqué
+                trailing_stop_advanced(symbol, price, atr_value=atr)
 
             # ====== 4) Momentum cassé ======
             if gain < 0.8 and (rsi < 48 or macd < signal):
@@ -2374,9 +2398,22 @@ async def process_symbol_aggressive(symbol):
                     _delete_trade(symbol)
                     return
 
-            # Sortie dynamique 5m
+            # Sortie dynamique 5m (gated)
             triggered, fx = fast_exit_5m_trigger(symbol, entry, price)
-            if triggered:
+
+            # tendance 1h forte → on évite la sortie précoce
+            supertrend_ok_local = supertrend_like_on_close(klines)
+            strong_trend_1h = (adx_value >= 28) and supertrend_ok_local
+
+            allow_fast = bool(triggered) and (
+                (not trades[symbol].get("tp1", False)) or fx.get("strong")
+            )
+
+            # si tendance 1h forte et gain encore < 2.2%, on bloque la sortie rapide
+            if strong_trend_1h and float(fx.get("gain_pct", 0.0)) < 2.2:
+                allow_fast = False
+
+            if allow_fast:
                 vol5_local  = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
                 vol20_local = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
                 reason_bits = []
@@ -2384,7 +2421,12 @@ async def process_symbol_aggressive(symbol):
                     reason_bits.append(f"RSI(5m) -{fx['rsi_drop']:.1f} pts")
                 if fx.get("macd_cross_down"):
                     reason_bits.append("MACD(5m) croisement baissier")
-                raison = "Sortie dynamique 5m: gain ≥ +1% ; " + " + ".join(reason_bits)
+                if fx.get("bearish_engulfing_5m"):
+                    reason_bits.append("Bearish engulfing 5m")
+                if fx.get("close_below_ema20_5m"):
+                    reason_bits.append("Close<EMA20(5m)")
+
+                raison = "Sortie dynamique 5m: " + " + ".join(reason_bits) if reason_bits else "Sortie dynamique 5m"
                 msg = format_exit_msg(symbol, trades[symbol]["trade_id"], price, gain, trades[symbol]["stop"], elapsed_time, raison)
                 await tg_send(msg)
                 log_trade_csv({
@@ -2402,10 +2444,12 @@ async def process_symbol_aggressive(symbol):
                     "sl_final": trades[symbol]["stop"],
                     "atr_1h": atr_val_current, "atr_mult_at_entry": "",
                     "rsi_1h": rsi, "macd": macd, "signal": signal, "adx_1h": adx_value,
-                    "supertrend_on": supertrend_like_on_close(klines),
-                    "ema25_1h": ema25, "ema200_1h": ema200_1h, "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "supertrend_on": supertrend_ok_local,
+                    "ema25_1h": ema25, "ema200_1h": ema200_1h,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
                     "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
-                    "vol_ma5": vol5_local, "vol_ma20": vol20_local, "vol_ratio": vol5_local / max(vol20_local, 1e-9) if vol20_local else 0.0,
+                    "vol_ma5": vol5_local, "vol_ma20": vol20_local,
+                    "vol_ratio": vol5_local / max(vol20_local, 1e-9) if vol20_local else 0.0,
                     "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
                     "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
                     "reason_entry": trades[symbol]["reason_entry"],
@@ -2414,6 +2458,9 @@ async def process_symbol_aggressive(symbol):
                 log_trade(symbol, "SELL", price, gain)
                 _delete_trade(symbol)
                 return
+            else:
+                # on serre simplement le trailing si un fast-exit a été déclenché mais bloqué
+                trailing_stop_advanced(symbol, price, atr_value=atr_val_current)
 
             # Momentum cassé
             if gain < 0.8 and (rsi < 48 or macd < signal):
