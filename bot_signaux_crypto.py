@@ -2280,48 +2280,46 @@ async def process_symbol_aggressive(symbol):
             if price is None:
                 await tg_send(f"⚠️ {symbol} en position (aggressive) mais données 1h indisponibles. Pas d’update.")
                 return
+
             entry = float(trades[symbol].get("entry", price))
             stop  = float(trades[symbol].get("stop", trades[symbol].get("sl_initial", price)))
             gain  = ((price - entry) / max(entry, 1e-9)) * 100.0
 
             if price <= stop or gain <= -1.5:
-            # Essaie de récupérer un minimum de contexte pour l'affichage
-            k1h_any = get_cached(symbol, '1h', limit=50) or []
-            if len(k1h_any) >= 20:
-                _cl   = [float(k[4]) for k in k1h_any]
-                _vols = volumes_series(k1h_any, quote=True)
-                _rsi  = rsi_tv(_cl, 14)
-                _adx  = adx_tv(k1h_any, period=14)
-                _vr   = (float(np.mean(_vols[-5:])) / max(float(np.mean(_vols[-20:])), 1e-9)) if len(_vols) >= 20 else 0.0
-            else:
-                _rsi = 0.0; _adx = 0.0; _vr = 0.0
+                # Essaie de récupérer un minimum de contexte pour l'affichage
+                k1h_any = get_cached(symbol, '1h', limit=50) or []
+                if len(k1h_any) >= 20:
+                    _cl   = [float(k[4]) for k in k1h_any]
+                    _vols = volumes_series(k1h_any, quote=True)
+                    _rsi  = rsi_tv(_cl, 14)
+                    _adx  = adx_tv(k1h_any, period=14)
+                    _vr   = (float(np.mean(_vols[-5:])) / max(float(np.mean(_vols[-20:])), 1e-9)) if len(_vols) >= 20 else 0.0
+                else:
+                    _rsi = 0.0; _adx = 0.0; _vr = 0.0
 
-            event  = "STOP" if price <= stop else "SELL"
-            reason = "Stop touché" if event == "STOP" else "Perte max (-1.5%)"
+                event  = "STOP" if price <= stop else "SELL"
+                reason = "Stop touché" if event == "STOP" else "Perte max (-1.5%)"
 
-            entry_time = _parse_dt_flex(trades[symbol].get("time","")) or datetime.now(timezone.utc)
-            ctx = {
-                "rsi": _rsi, "macd": 0.0, "signal": 0.0, "adx": _adx,
-                "atr": 0.0, "st_on": False,
-                "ema25": 0.0, "ema200": 0.0, "ema50_4h": 0.0, "ema200_4h": 0.0,
-                "vol5": 0.0, "vol20": 0.0, "vol_ratio": _vr,
-                "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
-                "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
-                "elapsed_h": (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600.0,
-            }
+                entry_time = _parse_dt_flex(trades[symbol].get("time","")) or datetime.now(timezone.utc)
+                ctx = {
+                    "rsi": _rsi, "macd": 0.0, "signal": 0.0, "adx": _adx,
+                    "atr": 0.0, "st_on": False,
+                    "ema25": 0.0, "ema200": 0.0, "ema50_4h": 0.0, "ema200_4h": 0.0,
+                    "vol5": 0.0, "vol20": 0.0, "vol_ratio": _vr,
+                    "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
+                    "elapsed_h": (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600.0,
+                }
 
-            pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
-            _finalize_exit(symbol, price, pnl_pct, reason, event, ctx)
-            return
+                pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
+                _finalize_exit(symbol, price, pnl_pct, reason, event, ctx)
+                return
 
+            # HOLD fallback
             log_trade(symbol, "HOLD", price)
             await buffer_hold(symbol, f"{utc_now_str()} | {symbol} HOLD (fallback) | prix {price:.4f} | stop {stop:.4f}")
             return
 
-        if not klines or len(klines) < 50:
-            log_refusal(symbol, "Données 1h insuffisantes")
-            if not in_trade:
-                return
 
         closes  = [float(k[4]) for k in klines]
         highs   = [float(k[2]) for k in klines]
