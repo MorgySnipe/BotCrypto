@@ -222,6 +222,12 @@ BTC_REGIME_BLOCK_MIN = 90    # minutes de blocage des ALTS
 # === Money management (global) ===
 RISK_PER_TRADE   = 0.005   # 0.5% du capital par trade
 DAILY_MAX_LOSS   = -0.03   # -3% cumulé sur la journée (UTC)
+# --- Anti-excès (STANDARD) ---
+RSI_HARD_STD = 74.0          # seuil RSI 1h "étiré"
+DIST_EMA25_HARD_STD = 0.05    # 5% au-dessus de l'EMA25 => hard block
+
+# --- Early scratch ---
+EARLY_SCRATCH_MAX_MIN_STD = 25   # minutes post-entrée
 
 from typing import Final
 MAJORS: Final = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
@@ -446,13 +452,15 @@ def format_exit_msg(symbol, trade_id, exit_price, pnl_pct, stop, elapsed_h, exit
         f"⏳ Durée du trade: {elapsed_h:.2f} h"
     )
 
-def format_stop_msg(symbol, trade_id, stop_price, pnl_pct, rsi_1h, adx, vol_ratio):
+def format_stop_msg(symbol, trade_id, exit_price, stop_price, pnl_pct, rsi_1h, adx, vol_ratio):
+    slippage = (exit_price - stop_price)
     return (
         f"🔴 STOP TOUCHÉ | {symbol} | trade_id={trade_id}\n"
-        f"⏱ UTC: {utc_now_str()} | Stop: {stop_price:.4f} | P&L: {pnl_pct:.2f}%\n"
+        f"⏱ UTC: {utc_now_str()} | Sortie: {exit_price:.4f} | Stop: {stop_price:.4f} | P&L: {pnl_pct:.2f}%\n"
+        f"↕️ Slippage: {slippage:+.4f}\n"
         f"📊 Contexte à la sortie: RSI {rsi_1h:.1f} | ADX {adx:.1f} | Vol ratio {vol_ratio:.2f}x"
     )
-
+    
 def format_autoclose_msg(symbol, trade_id, exit_price, pnl_pct, mode="soft"):
     label = "AUTO-CLOSE 24h (sécurité)" if mode == "hard" else "AUTO-CLOSE 12h (soft)"
     return (
@@ -1358,17 +1366,23 @@ def _finalize_exit(symbol, exit_price, pnl_pct, reason, event_name, ctx):
         if not trade:
             return  # déjà supprimé
 
-        # 1) Message unique
         if event_name == "STOP":
             msg = format_stop_msg(
-                symbol, trade["trade_id"], trade.get("stop", exit_price),
-                pnl_pct, ctx.get("rsi", 0), ctx.get("adx", 0), ctx.get("vol_ratio", 0)
+                symbol,
+                trade["trade_id"],
+                exit_price,                                # ✅ prix réel exécuté
+                trade.get("stop", exit_price),             # niveau du stop affiché
+                pnl_pct,
+                ctx.get("rsi", 0),
+                ctx.get("adx", 0),
+                ctx.get("vol_ratio", 0)
             )
         else:
             msg = format_exit_msg(
                 symbol, trade["trade_id"], exit_price, pnl_pct,
                 trade.get("stop", exit_price), ctx.get("elapsed_h", 0), reason
             )
+
         # on ne bloque pas la loop si tg_send est async
         asyncio.create_task(tg_send(msg))
 
@@ -1665,6 +1679,15 @@ async def process_symbol(symbol):
         adx_value = adx_tv(klines, period=14)
         ema25 = ema_tv(closes, 25)
         supertrend_signal = supertrend_like_on_close(klines)
+
+        # -- Accélération du momentum (histogramme MACD non décroissant)
+        if len(closes) >= 2:
+            macd_prev, signal_prev = compute_macd(closes[:-1])
+        else:
+            macd_prev, signal_prev = macd, signal  # fallback sûr
+
+        hist_now  = macd - signal
+        hist_prev = macd_prev - signal_prev
 
         in_trade = (symbol in trades) and (trades[symbol].get("strategy", "standard") == "standard")
         if in_trade:
@@ -2000,7 +2023,14 @@ async def process_symbol(symbol):
                 except NameError:
                     indicators_soft_penalty = 1
                 log_info(symbol, "BTC drift (soft) — high-liq ou RS>BTC")
-     
+
+        # --- Anti-excès 1h (HARD) : trop étiré -> on bloque l'entrée ---
+        dist_ema25 = (price / max(ema25, 1e-9) - 1.0)
+        if (rsi >= RSI_HARD_STD) and (dist_ema25 >= DIST_EMA25_HARD_STD):
+            log_refusal(symbol, f"Anti-excès 1h (hard): RSI {rsi:.1f} & dist EMA25 {dist_ema25:.1%}")
+            if not in_trade:
+                return
+
         # — Pré-filtre: prix trop loin de l’EMA25 (pénalité soft, seuil relevé)
         EMA25_PREFILTER_STD = (1.06 if symbol in MAJORS else 1.10)
 
@@ -2049,7 +2079,7 @@ async def process_symbol(symbol):
             or (closes_4h[-1] > ema50_4h and ema50_4h > ema200_4h)  # 4h propre
         ) and supertrend_signal
 
-        momentum_ok = (macd > signal) and (rsi >= (52 if adx_value >= 20 else 55))
+        momentum_ok = (macd > signal) and (rsi >= 55) and (hist_now >= hist_prev)
 
         indicators = {
             "rsi": rsi,
@@ -2247,7 +2277,18 @@ async def process_symbol_aggressive(symbol):
             gain  = ((price - entry) / max(entry, 1e-9)) * 100.0
 
             if price <= stop or gain <= -1.5:
-                msg = format_stop_msg(symbol, trades[symbol]["trade_id"], stop, gain, 0, 0, 0)
+                # -- contexte minimal pour le message STOP (fallback 1h indisponible) --
+                k1h_any = get_cached(symbol, '1h', limit=50) or []
+                if len(k1h_any) >= 20:
+                    _cl   = [float(k[4]) for k in k1h_any]
+                    _vols = volumes_series(k1h_any, quote=True)
+                    _rsi  = rsi_tv(_cl, 14)
+                    _adx  = adx_tv(k1h_any, 14)
+                    _vr   = (float(np.mean(_vols[-5:])) / max(float(np.mean(_vols[-20:])), 1e-9)) if len(_vols) >= 20 else 0.0
+                else:
+                    _rsi = _adx = _vr = 0.0
+
+                msg = format_stop_msg(symbol, trades[symbol]["trade_id"], stop, gain, _rsi, _adx, _vr)
                 await tg_send(msg)
                 log_trade_csv({
                     "ts_utc": utc_now_str(),
@@ -2264,10 +2305,11 @@ async def process_symbol_aggressive(symbol):
                     "sl_initial": trades[symbol].get("sl_initial", ""),
                     "sl_final": stop,
                     "atr_1h": 0.0, "atr_mult_at_entry": "",
-                    "rsi_1h": 0.0, "macd": 0.0, "signal": 0.0, "adx_1h": 0.0,
+                    "rsi_1h": _rsi, "macd": 0.0, "signal": 0.0, "adx_1h": _adx,
                     "supertrend_on": False,
-                    "ema25_1h": 0.0, "ema200_1h": 0.0, "ema50_4h": 0.0, "ema200_4h": 0.0,
-                    "vol_ma5": 0.0, "vol_ma20": 0.0, "vol_ratio": 0.0,
+                    "ema25_1h": 0.0, "ema200_1h": 0.0,
+                    "ema50_4h": 0.0, "ema200_4h": 0.0,
+                    "vol_ma5": 0.0, "vol_ma20": 0.0, "vol_ratio": _vr,
                     "btc_uptrend": MARKET_STATE.get("btc", {}).get("up", False),
                     "eth_uptrend": MARKET_STATE.get("eth", {}).get("up", False),
                     "reason_entry": trades[symbol].get("reason_entry", ""),
