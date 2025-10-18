@@ -199,6 +199,14 @@ INIT_SL_PCT_STD_MIN = 0.010  # 1.0% (standard)
 INIT_SL_PCT_STD_MAX = 0.012  # 1.2%
 INIT_SL_PCT_AGR_MIN = 0.010  # 1.0% (aggressive)
 INIT_SL_PCT_AGR_MAX = 0.012  # 1.2%
+# --- Trailing safety guards / anti-mèche ---
+TRAIL_MIN_BUFFER_ATR_STRONG = 0.8
+TRAIL_MIN_BUFFER_ATR_WEAK   = 0.6
+TRAIL_STEP_CAP_ATR          = 0.5
+TRAIL_BEFORE_TP1_MAX        = 0.0
+VSTOP_CONFIRM_1M            = True
+VSTOP_CONFIRM_1M_N          = 2
+VSTOP_TOLERANCE_PCT         = 0.0005
 # --- Auto-close (nouvelle logique) ---
 AUTO_CLOSE_MIN_H = 12   # seuil souple: on évalue mais on NE coupe pas systématiquement
 AUTO_CLOSE_HARD_H = 24  # sécurité: on coupe quoi qu'il arrive après 24h
@@ -1356,6 +1364,15 @@ def compute_pnl_pct(entry, exit_price) -> float:
     exit_price = float(exit_price)
     return ((exit_price - entry) / max(entry, 1e-9)) * 100.0
 
+def confirm_stop_breach_1m(symbol, stop_lvl, n=2, tol_pct=0.0005):
+    """True si on a n clôtures 1m <= stop_lvl*(1 - tol_pct)."""
+    k = get_cached(symbol, '1m', limit=max(5, n+1)) or []
+    if len(k) < n:
+        return True  # pas assez de data -> on confirme (sécurité)
+    closes = [float(x[4]) for x in k[-n:]]
+    thr = stop_lvl * (1 - tol_pct)
+    return all(c <= thr for c in closes)
+
 def strong_trend_soft_stop(symbol, stop, adx_value, st_on):
     """
     True  -> on CONFIRME la sortie maintenant
@@ -1457,58 +1474,63 @@ def _finalize_exit(symbol, exit_price, pnl_pct, reason, event_name, ctx):
 # ====== /CSV détaillé ======
 def trailing_stop_advanced(symbol, current_price, atr_value=None, atr_period=14):
     """
-    Trailing stop ATR (TV) amélioré :
-      - paliers ATR (TRAIL_TIERS) multipliés par un facteur ADX
-      - en tendance 1h très forte (ST ON, ADX>=32, MACD>Signal, RSI>=55), on applique
-        un 'structure cushion' basé sur EMA25(1h) pour éviter d'être stoppé sur un simple pullback.
-      - stop jamais abaissé ; BE après TP1 ou dès TRAIL_BE_AFTER.
+    Trailing stop 'pro' avec garde-fous :
+      - trailing plus LARGE quand la tendance est forte (ADX élevé)
+      - écart minimum au prix (>= 0.5% du prix OU 0.25×ATR)
+      - buffer mini dépendant de la tendance (0.8×ATR fort / 0.6×ATR faible)
+      - cap de remontée par itération (<= 0.5×ATR)
+      - pas de break-even+ avant TP1 (selon TRAIL_BEFORE_TP1_MAX)
+      - stop jamais abaissé et toujours < prix courant
     """
     if symbol not in trades:
         return
 
-    entry = float(trades[symbol]["entry"])
-    gain_pct = ((current_price - entry) / max(entry, 1e-9)) * 100.0
+    entry = float(trades[symbol].get("entry", current_price))
+    prev_stop = float(trades[symbol].get("stop", trades[symbol].get("sl_initial", entry)))
+    tp1_done = bool(trades[symbol].get("tp1", False))
 
     k1h = get_cached(symbol, "1h")
     if not k1h:
         return
 
+    # Données & indicateurs 1h
     closes = [float(k[4]) for k in k1h]
-    atr_val = atr_value if (atr_value is not None) else atr_tv_cached(symbol, k1h, period=atr_period)
+    atr_val = float(atr_value) if (atr_value is not None) else float(atr_tv(k1h, period=atr_period))
+    adx_now = float(adx_tv(k1h, period=14))
+    st_on   = bool(supertrend_like_on_close(k1h))
 
-    # lecture momentum 1h
-    adx_now = adx_tv(k1h, 14)
-    macd_now, sig_now = compute_macd(closes)
-    rsi_now = rsi_tv(closes, 14)
-    st_on   = supertrend_like_on_close(k1h)
-    k_adx   = trail_factor_from_adx(adx_now)
+    # 1) trailing 'large quand fort'
+    if adx_now >= 30:
+        base_mult = 0.60
+    elif adx_now >= 22:
+        base_mult = 0.45
+    else:
+        base_mult = 0.35
 
-    prev_stop = float(trades[symbol].get("stop", trades[symbol].get("sl_initial", entry)))
-    new_stop = prev_stop
+    # 2) plancher d'écart vs prix (évite un stop trop collé)
+    min_gap = max(0.005 * current_price, 0.25 * atr_val)
+    proposed = current_price - max(base_mult * atr_val, min_gap)
 
-    for thresh_gain, atr_mult in TRAIL_TIERS:
-        if gain_pct >= thresh_gain:
-            tier_stop = current_price - (atr_mult * k_adx) * atr_val
+    # 3) buffer mini selon tendance (forte = encore plus de marge)
+    min_buffer_atr = (TRAIL_MIN_BUFFER_ATR_STRONG if (adx_now >= 28 and st_on)
+                      else TRAIL_MIN_BUFFER_ATR_WEAK)
+    proposed = min(proposed, current_price - min_buffer_atr * atr_val)
 
-            # Structure cushion en tendance très forte pour éviter le stop sur micro-pullback
-            if (st_on and adx_now >= 32 and macd_now > sig_now and rsi_now >= 55 and gain_pct >= 2.2):
-                ema25_1h = ema_tv(closes, 25)
-                # looser si ATR-trail trop proche : on autorise un coussin sous EMA25
-                structure_based = ema25_1h - 0.40 * atr_val
-                tier_stop = min(tier_stop, structure_based)
+    # 4) pas de BE+ avant TP1
+    if not tp1_done:
+        proposed = min(proposed, entry + TRAIL_BEFORE_TP1_MAX * atr_val)
 
-            new_stop = max(new_stop, tier_stop)
+    # 5) cap de remontée par itération
+    proposed = min(proposed, prev_stop + TRAIL_STEP_CAP_ATR * atr_val)
 
-    # lock BE après TP1 ou gain suffisant
-    if trades[symbol].get("tp1", False) or gain_pct >= TRAIL_BE_AFTER:
-        new_stop = max(new_stop, entry)
-
-    # garde-fou: stop < prix courant
-    new_stop = min(new_stop, current_price * 0.999)
+    # 6) garde-fous finaux
+    proposed = min(proposed, current_price * 0.999)  # toujours < prix
+    new_stop = max(prev_stop, proposed)              # jamais abaisser
 
     if new_stop > prev_stop:
-        trades[symbol]["stop"] = new_stop
+        trades[symbol]["stop"] = float(new_stop)
         save_trades()
+
         
 def compute_confidence_score(indicators):
     score = 0
@@ -1740,23 +1762,12 @@ async def process_symbol(symbol):
             gain = ((price - entry) / max(entry, 1e-9)) * 100.0
             stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN)))
 
-            # Trailing stop adaptatif (ADX)
-            adx_val = trades[symbol].get("adx_1h", 20)
-            # trailing “pro” : large en tendance forte, serré quand c’est faible
-            if adx_val >= 30:
-                trail_multiplier = 0.60   # laisse respirer les trends costauds
-            elif adx_val >= 22:
-                trail_multiplier = 0.45
-            else:
-                trail_multiplier = 0.35   # marché mou → on coupe plus vite
-
-            # ajoute un plancher de marge (évite un trailing ridiculement court)
-            min_gap = max(0.005 * price, 0.25 * atr)  # ≥ 0.5% du prix ou 0.25×ATR
-            target_stop = price - max(trail_multiplier * atr, min_gap)
-            trades[symbol]["stop"] = max(stop, target_stop)
-
-            new_stop = price * (1 - trail_multiplier * atr / max(price, 1e-9))
-            trades[symbol]["stop"] = max(stop, new_stop)
+            # Trailing stop adaptatif (ADX) — version avancée (centralisée)
+            trailing_stop_advanced(
+                symbol,
+                price,
+                atr_value=atr,      # ATR 1h (standard)
+            )
 
             # ====== 1) Filtre régime BTC (sortie anticipée légère) ======
             blocked, _why_btc = btc_regime_blocked()
@@ -1877,18 +1888,31 @@ async def process_symbol(symbol):
 
             # ====== 6) Stop touché / perte max ======
             stop_hit = price <= trades[symbol]["stop"]
+
+            # anti-mèche si tendance forte (ADX élevé + ST ON)
+            if stop_hit and VSTOP_CONFIRM_1M and adx_value >= 28 and supertrend_like_on_close(klines):
+                stop_hit = confirm_stop_breach_1m(symbol, trades[symbol]["stop"],
+                                      n=VSTOP_CONFIRM_1M_N, tol_pct=VSTOP_TOLERANCE_PCT)
+
             if stop_hit or gain <= -1.5:
                 event  = "STOP" if stop_hit else "SELL"
                 reason = "Stop touché" if stop_hit else "Perte max (-1.5%)"
-            
-                # garde “soft stop” si tendance 1h forte pour éviter les mèches
-                if stop_hit:
-                    st_on_now = supertrend_like_on_close(klines)
-                    if not strong_trend_soft_stop(symbol, trades[symbol]["stop"], adx_value, st_on_now):
-                        # on ignore cette mèche une fois, on resserre juste un peu le trailing
-                        trailing_stop_advanced(symbol, price, atr_value=atr)
-                        log_info(symbol, "Soft stop guard: mèche sous le stop en tendance forte -> HOLD")
-                        return
+                vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
+                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                ctx = {
+                    "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
+                    "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,
+                    "vol5": vol5_loc, "vol20": vol20_loc,
+                    "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
+                    "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
+                    "elapsed_h": elapsed_time
+                }
+                pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
+                _finalize_exit(symbol, price, pnl_pct, reason, event, ctx)
+                return
 
                 vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
                 vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
@@ -2460,22 +2484,13 @@ async def process_symbol_aggressive(symbol):
                         )
                         await tg_send(msg)
 
-            # Trailing stop adaptatif (ADX)
-            adx_val = trades[symbol].get("adx_1h", 20)
-            # trailing “pro” : large en tendance forte, serré quand c’est faible
-            if adx_val >= 30:
-                trail_multiplier = 0.60   # laisse respirer les trends costauds
-            elif adx_val >= 22:
-                trail_multiplier = 0.45
-            else:
-                trail_multiplier = 0.35   # marché mou → on coupe plus vite
+            trailing_stop_advanced(
+                symbol, price,
+                atr_value=atr_val_current,
+                adx_value=adx_value,
+                supertrend_on=supertrend_like_on_close(klines)
+            )
 
-            # ajoute un plancher de marge (évite un trailing ridiculement court)
-            min_gap = max(0.005 * price, 0.25 * atr)  # ≥ 0.5% du prix ou 0.25×ATR
-            target_stop = price - max(trail_multiplier * atr, min_gap)
-            trades[symbol]["stop"] = max(stop, target_stop)
-
-            trades[symbol]["stop"] = max(stop, price * (1 - trail_multiplier * atr_val_current / max(price, 1e-9)))
 
             # Filtre régime BTC (définir blocked AVANT)
             blocked, _why_btc = btc_regime_blocked()
@@ -2617,9 +2632,14 @@ async def process_symbol_aggressive(symbol):
                 _finalize_exit(symbol, price, pnl_pct, "Perte de momentum après TP1", "SELL", ctx)
                 return
 
-            # Stop touché / perte max
-            if price <= trades[symbol]["stop"] or gain <= -1.5:
-                event  = "STOP" if price <= trades[symbol]["stop"] else "SELL"
+            stop_hit = price <= trades[symbol]["stop"]
+
+            if stop_hit and VSTOP_CONFIRM_1M and adx_value >= 28 and supertrend_like_on_close(klines):
+                stop_hit = confirm_stop_breach_1m(symbol, trades[symbol]["stop"],
+                                      n=VSTOP_CONFIRM_1M_N, tol_pct=VSTOP_TOLERANCE_PCT)
+
+            if stop_hit or gain <= -1.5:
+                event  = "STOP" if stop_hit else "SELL"
                 reason = "Stop touché" if event == "STOP" else "Perte max (-1.5%)"
 
                 vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
@@ -2630,15 +2650,14 @@ async def process_symbol_aggressive(symbol):
                     "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
                     "atr": atr_val_current, "st_on": supertrend_like_on_close(klines),
                     "ema25": ema25, "ema200": ema200_1h,
-                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol,'4h') else 0.0,
-                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol,'4h') else 0.0,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,
                     "vol5": vol5_loc, "vol20": vol20_loc,
                     "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
                     "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
                     "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
                     "elapsed_h": (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600.0,
                 }
-
                 pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
                 _finalize_exit(symbol, price, pnl_pct, reason, event, ctx)
                 return
