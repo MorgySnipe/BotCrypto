@@ -2113,12 +2113,20 @@ async def process_symbol(symbol):
                     indicators_soft_penalty = 1
                 log_info(symbol, "BTC drift (soft) — high-liq ou RS>BTC")
 
-        # --- Anti-excès 1h (HARD) : trop étiré -> on bloque l'entrée ---
+        # --- Anti-excès 1h (HARD) : trop étiré ---
         dist_ema25 = (price / max(ema25, 1e-9) - 1.0)
-        if (rsi >= RSI_HARD_STD) and (dist_ema25 >= DIST_EMA25_HARD_STD):
-            log_refusal(symbol, f"Anti-excès 1h (hard): RSI {rsi:.1f} & dist EMA25 {dist_ema25:.1%}")
-            if not in_trade:
-                return
+        EXCESS_HARD = (rsi >= RSI_HARD_STD) and (dist_ema25 >= DIST_EMA25_HARD_STD)
+        if EXCESS_HARD:
+            STRONG_TREND = (adx_value >= 28 and supertrend_signal and closes_4h[-1] > ema50_4h and ema50_4h > ema200_4h)
+            HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
+            if (symbol in MAJORS or symbol in HIGH_LIQ) and STRONG_TREND:
+                log_info(symbol, "Anti-excès 1h (hard) relâché (trend fort high-liq) → pénalité soft")
+                try: indicators_soft_penalty += 1
+                except NameError: indicators_soft_penalty = 1
+            else:
+                log_refusal(symbol, f"Anti-excès 1h (hard): RSI {rsi:.1f} & dist EMA25 {dist_ema25:.1%}")
+                if not in_trade:
+                    return
 
         # — Pré-filtre: prix trop loin de l’EMA25 (pénalité soft, seuil relevé)
         EMA25_PREFILTER_STD = (1.06 if symbol in MAJORS else 1.10)
@@ -2180,8 +2188,8 @@ async def process_symbol(symbol):
             "above_ema200": price > ema200,
         }
 
-        # Coiffe les pénalités “soft”
-        indicators_soft_penalty = min(indicators_soft_penalty, 2)
+        cap = 1 if (adx_value >= 28 and supertrend_signal) else 2
+        indicators_soft_penalty = min(indicators_soft_penalty, cap)
 
         # Calcul du score puis bonus marché si BTC est propre
         confidence = max(0, compute_confidence_score(indicators) - indicators_soft_penalty)
@@ -2203,21 +2211,38 @@ async def process_symbol(symbol):
         brk_ok, br_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
         last3_change = (closes[-1] - closes[-4]) / max(closes[-4], 1e-9)
         atr_pct = atr / max(price, 1e-9)
-        limit = (0.032 if symbol in MAJORS else 0.030)
-        limit = max(limit, 2.0 * atr_pct)  # tolère davantage si vol élevé
+        base_limit = (0.032 if symbol in MAJORS else 0.030)
+        limit = max(base_limit, 2.3 * atr_pct)
+
         if last3_change > limit:
-            brk_ok = False
+            HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
+            if (symbol in MAJORS or symbol in HIGH_LIQ) and adx_value >= 28 and supertrend_signal:
+                # continuation autorisée : on laissera le filtre 15m décider
+                pass
+            else:
+                brk_ok = False
+
 
         buy = False
 
         if brk_ok and trend_ok and momentum_ok and volume_ok:
             # Filtre 15m avec niveau de breakout
-            n_struct = 2 if (symbol in MAJORS or adx_value >= 20) else 3
-            ok15, det15 = check_15m_filter(k15, breakout_level=br_level, n_struct=n_struct, tol_struct=0.0015)
+            tol_struct = 0.0022 if (symbol in MAJORS or adx_value >= 22) else 0.0017
+            n_struct   = 2 if (symbol in MAJORS or adx_value >= 22) else 3
+
+            ok15, det15 = check_15m_filter(
+                k15,
+                breakout_level=br_level,
+                n_struct=n_struct,
+                tol_struct=tol_struct
+            )
+
             if not ok15:
-                log_refusal(symbol, f"Filtre 15m non validé (BRK): {det15}")
-                if not in_trade:
-                    return
+                log_refusal(symbol, f"Filtre 15m non validé (BRK): {det15} (soft)")
+                # on ne bloque vraiment l’entrée que si les conditions de trend/volume sont faibles
+                if not (adx_value >= 25 and vol_ratio_15m >= 0.45):
+                    if not in_trade:
+                        return
 
             if not confirm_15m_after_signal(symbol, breakout_level=br_level, ema25_1h=ema25):
                 log_refusal(symbol, "Anti-chasse: ...")
@@ -2239,19 +2264,30 @@ async def process_symbol(symbol):
 
         elif trend_ok and momentum_ok and volume_ok:
             # Bande "retest" serrée autour de l'EMA25 (±0.2%)
-            RETEST_BAND_STD = 0.004
+            RETEST_BAND_STD = 0.006 if symbol in MAJORS else 0.005
             near_ema25 = (abs(price - ema25) / max(ema25, 1e-9)) <= RETEST_BAND_STD
-
-            # On garde le contrôle de bougie, mais un peu plus permissif (3.5% au lieu de 3%)
-            candle_ok = (abs(highs[-1] - lows[-1]) / max(lows[-1], 1e-9)) <= 0.035
+            candle_ok = (abs(highs[-1] - lows[-1]) / max(lows[-1], 1e-9)) <= 0.038
 
             if near_ema25 and candle_ok:
                 # Filtre 15m sans niveau de breakout
-                n_struct = 2 if (symbol in MAJORS or adx_value >= 20) else 3
-                ok15, det15 = check_15m_filter(k15, breakout_level=None, n_struct=n_struct, tol_struct=0.0015)
+                # tolérance dynamique 15m (plus large si tendance/majors)
+                tol_struct = 0.0022 if (symbol in MAJORS or adx_value >= 22) else 0.0017
+                n_struct   = 2 if (symbol in MAJORS or adx_value >= 22) else 3
+
+                ok15, det15 = check_15m_filter(
+                    k15,
+                    breakout_level=None,
+                    n_struct=n_struct,
+                    tol_struct=tol_struct
+                )
+
                 if not ok15:
-                    log_refusal(symbol, f"Filtre 15m non validé (PB EMA25): {det15}")
-                    return
+                    # soft-gate : on n’annule que si pas de trend ni de volume court terme
+                    log_refusal(symbol, f"Filtre 15m non validé (PB EMA25): {det15} (soft)")
+                    # ⚠️ on *continue* si la tendance est correcte ET qu’il y a un minimum de flux
+                    if not (adx_value >= 25 and vol_ratio_15m >= 0.45):
+                        return
+
                     
                 # pour PB: on exige close 15m > EMA25(1h) ±0.1%
                 if not confirm_15m_after_signal(symbol, breakout_level=None, ema25_1h=ema25):
@@ -2428,13 +2464,32 @@ async def process_symbol_aggressive(symbol):
             med_30d_raw = float(np.median(vols_hist[:-1]))
             p70 = float(np.percentile(vols_hist[:-1], 70))
             med_30d = min(med_30d_raw, p70 * 1.5)
-            if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d):
-                log_refusal(symbol, f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})")
-                return
+
+            # assouplissement : MAJORS/HIGH_LIQ -> pénalité soft au lieu de blocage « hard »
+            HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
+
+            # seuils un poil plus permissifs
+            VOL_MED_MULT_EFF_MAJ = 0.04   # avant 0.05
+            VOL_MED_MULT_EFF_ALT = 0.06   # avant 0.07
+
+            mult_need = (VOL_MED_MULT_EFF_MAJ if symbol in HIGH_LIQ or symbol in MAJORS else VOL_MED_MULT_EFF_ALT)
+            need = max(MIN_VOLUME_ABS, mult_need * med_30d)
+
+            if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < need:
+                if (symbol in HIGH_LIQ or symbol in MAJORS):
+                    indicators_soft_penalty += 1
+                    log_info(symbol, f"Volume 1h faible vs med30j (soft) {vol_now_1h:.0f} < {mult_need:.2f}×{med_30d:.0f}")
+                else:
+                    log_refusal(symbol, f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {mult_need:.2f}×{med_30d:.0f})")
+                    return
         else:
             if vol_now_1h < MIN_VOLUME_ABS:
-                log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
-                return
+                if (symbol in HIGH_LIQ or symbol in MAJORS):
+                    indicators_soft_penalty += 1
+                    log_info(symbol, f"Volume 1h faible (abs, soft) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
+                else:
+                    log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
+                    return
 
         # ---- Indicateurs (TV-like) ----
         rsi       = rsi_tv(closes, period=14)
