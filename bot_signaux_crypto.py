@@ -1635,7 +1635,10 @@ async def process_symbol(symbol):
     try:
         # [PATCH-COOLDOWN std]
         in_trade = symbol in trades  # pour ne pas bloquer la gestion d'une position déjà ouverte
-
+        # --- INIT SOFT GUARDS ---
+        indicators_soft_penalty = 0
+        tendance_soft_notes = []
+        reasons = []
         # --- Auto-close SOUPLE (ne coupe plus automatiquement à 12h) ---
         if symbol in trades and trades[symbol].get("strategy", "standard") == "standard":
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
@@ -2448,7 +2451,10 @@ async def process_symbol(symbol):
 async def process_symbol_aggressive(symbol):
     try:
         in_trade = symbol in trades
-
+        # --- INIT SOFT GUARDS ---
+        indicators_soft_penalty = 0
+        tendance_soft_notes = []
+        reasons = []
         # --- Paramètres VOLUME (aggressive) ---
         MIN_VOLUME_LOCAL = 50_000
         VOL_MED_MULT_AGR = 0.15
