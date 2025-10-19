@@ -1719,23 +1719,36 @@ async def process_symbol(symbol):
             p70 = float(np.percentile(vols_hist[:-1], 70))
             med_30d = min(med_30d_raw, p70 * 1.5)
             need = max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d)
+
             if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < need:
-                # OVERRIDE: si le 15m est >0.60x, on passe en soft (pas de return)
+                # OVERRIDE : si le 15m est ≥ 0.60×, on passe en soft (pas de return)
                 if vol_ratio_15m >= 0.60:
-                    log_info(symbol, f"Volume 1h faible vs med30j mais 15m OK ({vol_ratio_15m:.2f}) -> soft")
-                    indicators_soft_penalty += 1   # petite pénalité
+                    log_info(
+                        symbol,
+                        f"Volume 1h faible vs med30j mais 15m OK ({vol_ratio_15m:.2f}) => soft"
+                    )
+                    indicators_soft_penalty += 1
                 else:
-                    log_refusal(symbol, f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})")
+                    log_refusal(
+                        symbol,
+                        f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})"
+                    )
                     return
         else:
+            # Fallback si on n'a pas assez d'historique pour la médiane 30j
             if vol_now_1h < MIN_VOLUME_ABS and vol_ratio_15m < 0.60:
-                log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
+                log_refusal(
+                    symbol,
+                    f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS} et vol15m < 0.60×"
+                )
+                return
+            elif vol_now_1h < MIN_VOLUME_ABS:
+                log_refusal(
+                    symbol,
+                    f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}"
+                )
                 return
 
-                else:
-                    if vol_now_1h < MIN_VOLUME_ABS:
-                        log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
-                        return
 
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
