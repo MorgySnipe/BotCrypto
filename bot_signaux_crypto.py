@@ -2543,31 +2543,50 @@ async def process_symbol_aggressive(symbol):
         vol_ma10_15 = float(np.mean(vols15[-11:-1])) if len(vols15) >= 12 else 0.0
         vol_ratio_15m = (vol_now_15 / max(vol_ma10_15, 1e-9)) if vol_ma10_15 else 0.0
 
+        # --- Contrôle volume 1h vs médiane 30j + fallback absolu ---
         if len(vols_hist) >= 200:
             med_30d_raw = float(np.median(vols_hist[:-1]))
-            p70 = float(np.percentile(vols_hist[:-1], 70))
-            med_30d = min(med_30d_raw, p70 * 1.5)
-            need = max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d)
+            p70         = float(np.percentile(vols_hist[:-1], 70))
+            med_30d     = min(med_30d_raw, p70 * 1.5)
+            need        = max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d)
+
             if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < need:
-                # OVERRIDE: si le 15m est >0.60x, on passe en soft (pas de return)
+                # OVERRIDE : si le 15m tient ≥0.60× sa MA12, on passe en SOFT (pas de return)
                 if vol_ratio_15m >= 0.60:
-                    log_info(symbol, f"Volume 1h faible vs med30j mais 15m OK ({vol_ratio_15m:.2f}) -> soft")
-                    indicators_soft_penalty += 1   # petite pénalité
+                    log_info(
+                        symbol,
+                        f"Volume 1h faible vs med30j mais 15m OK ({vol_ratio_15m:.2f}) => soft"
+                    )
+                    indicators_soft_penalty += 1
                 else:
-                    log_refusal(symbol, f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})")
+                    log_refusal(
+                        symbol,
+                        f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})"
+                    )
                     return
         else:
-            if vol_now_1h < MIN_VOLUME_ABS and vol_ratio_15m < 0.60:
-                log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
-                return
+            # Fallback si pas assez d'historique pour la médiane 30j
+            HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
 
-        else:
-            if vol_now_1h < MIN_VOLUME_ABS:
-                if (symbol in HIGH_LIQ or symbol in MAJORS):
+            if vol_now_1h < MIN_VOLUME_ABS and vol_ratio_15m < 0.60:
+                log_refusal(
+                    symbol,
+                    f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS} et vol15m < 0.60×"
+                )
+                return
+            elif vol_now_1h < MIN_VOLUME_ABS:
+                # Sur paires high-liq ou MAJORS: on tolère en SOFT si le 15m n'est pas catastrophique
+                if (symbol in HIGH_LIQ) or (symbol in MAJORS):
                     indicators_soft_penalty += 1
-                    log_info(symbol, f"Volume 1h faible (abs, soft) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
+                    log_info(
+                        symbol,
+                        f"Volume 1h faible (abs, soft) ({vol_now_1h:.0f} < {MIN_VOLUME_ABS})"
+                    )
                 else:
-                    log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
+                    log_refusal(
+                        symbol,
+                        f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}"
+                    )
                     return
 
         # ---- Indicateurs (TV-like) ----
