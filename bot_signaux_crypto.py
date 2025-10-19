@@ -3055,7 +3055,7 @@ async def process_symbol_aggressive(symbol):
             "volume_ok": volume_ok,
             "above_ema200": above_ema200,
         }
-        indicators_soft_penalty = min(indicators_soft_penalty, 2)
+        indicators_soft_penalty = min(indicators_soft_penalty, 1)
         score = max(0, compute_confidence_score(indicators) - indicators_soft_penalty)
         if btc_is_bullish_strong():
             score = min(10, score + 1)
