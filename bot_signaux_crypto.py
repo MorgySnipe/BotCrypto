@@ -1703,23 +1703,39 @@ async def process_symbol(symbol):
         k1h_30d = get_cached(symbol, '1h', limit=750) or []
         vols_hist = volumes_series(k1h_30d, quote=True)[-721:]  # ~30j + current
 
-        VOL_MED_MULT_EFF = (0.05 if symbol in MAJORS else 0.07)
-        MIN_VOLUME_ABS   = (80_000 if symbol in MAJORS else 120_000)
+        # seuils un peu plus souples + override si le 15m pulse
+        VOL_MED_MULT_EFF = (0.04 if symbol in MAJORS else 0.06)
+        MIN_VOLUME_ABS   = (60_000 if symbol in MAJORS else 100_000)
+
+        # calcule vol_ratio_15m si pas déjà fait:
+        k15 = get_cached(symbol, '15m', limit=25) or []
+        vols15 = volumes_series(k15, quote=True) if k15 else []
+        vol_now_15 = float(k15[-2][7]) if len(k15) >= 2 else 0.0
+        vol_ma10_15 = float(np.mean(vols15[-11:-1])) if len(vols15) >= 12 else 0.0
+        vol_ratio_15m = (vol_now_15 / max(vol_ma10_15, 1e-9)) if vol_ma10_15 else 0.0
 
         if len(vols_hist) >= 200:
-            # borne haute : on limite l'influence de quelques mega-bougies
             med_30d_raw = float(np.median(vols_hist[:-1]))
             p70 = float(np.percentile(vols_hist[:-1], 70))
-            med_30d = min(med_30d_raw, p70 * 1.5)  # cap raisonnable
-
-            if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d):
-                log_refusal(symbol, f"Volume 1h trop faible vs med30j (...)")
-                if not in_trade:
+            med_30d = min(med_30d_raw, p70 * 1.5)
+            need = max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d)
+            if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < need:
+                # OVERRIDE: si le 15m est >0.60x, on passe en soft (pas de return)
+                if vol_ratio_15m >= 0.60:
+                    log_info(symbol, f"Volume 1h faible vs med30j mais 15m OK ({vol_ratio_15m:.2f}) -> soft")
+                    indicators_soft_penalty += 1   # petite pénalité
+                else:
+                    log_refusal(symbol, f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})")
                     return
         else:
-            if vol_now_1h < MIN_VOLUME_ABS:
+            if vol_now_1h < MIN_VOLUME_ABS and vol_ratio_15m < 0.60:
                 log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
                 return
+
+                else:
+                    if vol_now_1h < MIN_VOLUME_ABS:
+                        log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
+                        return
 
         closes = [float(k[4]) for k in klines]
         highs = [float(k[2]) for k in klines]
@@ -2036,26 +2052,35 @@ async def process_symbol(symbol):
             if volatility < 0.0008:
                 return
 
-        # --- ADX (standard) assoupli + tolérance momentum fort ---
+        # --- ADX (standard) dynamique + gate 15m ---
+        # petit pouls de volume 15m (indépendant du bloc "Confirmation volume 15m")
+        k15q = get_cached(symbol, '15m', limit=25) or []
+        vols15q = volumes_series(k15q, quote=True) if k15q else []
+        if len(k15q) >= 2 and len(vols15q) >= 12:
+            vol_now_15  = float(k15q[-2][7])
+            vol_ma10_15 = float(np.mean(vols15q[-11:-1]))
+            vol_ratio_15m = (vol_now_15 / max(vol_ma10_15, 1e-9)) if vol_ma10_15 else 0.0
+        else:
+            vol_ratio_15m = 0.0
+
         strong_momentum = (macd > signal) and (rsi >= 55)
-        adx_min_eff = (ADX_MIN if LEARNING_MODE else 18)
 
-        if adx_value < adx_min_eff:
-            if strong_momentum and adx_value >= 14:
-                # tolérance : pas de pénalité si MACD>Signal et RSI≥55 avec ADX 14–15
-                log_refusal(symbol, f"ADX borderline toléré (soft): {adx_value:.1f} avec momentum fort")
-                # pas de reasons += ... et pas de pénalité
+        # Seuils: OK direct si ADX>=17 ; sinon on tolère si momentum fort + pulse 15m
+        if adx_value >= 17:
+            pass  # OK, aucune pénalité
+        elif strong_momentum and (rsi >= 56) and (vol_ratio_15m >= 0.45):
+            # borderline toléré → pas de pénalité, simple info
+            try:
+                log_info(symbol, f"ADX borderline toléré (soft): {adx_value:.1f} avec momentum fort (vol15m {vol_ratio_15m:.2f})")
+            except Exception:
                 pass
-            else:
-                log_refusal(symbol, f"ADX trop faible (soft): {adx_value:.1f}")
-                reasons += [f"⚠️ ADX {adx_value:.1f} (soft)"]
-                try:
-                    indicators_soft_penalty += 1
-                except NameError:
-                    pass
-        # pas de return -> on continue
-
-
+        else:
+            log_refusal(symbol, f"ADX trop faible (soft): {adx_value:.1f}")
+            reasons += [f"⚠️ ADX {adx_value:.1f} (soft)"]
+            try:
+                indicators_soft_penalty += 1
+            except NameError:
+                pass
 
         # Supertrend reste obligatoire
         if not supertrend_signal:
@@ -2080,49 +2105,57 @@ async def process_symbol(symbol):
         ok_session, _sess = is_active_liquidity_session(symbol=symbol)
         if not ok_session:
             if symbol in MAJORS:
-                # On laisse passer sans pénalité sur les majeures
+                # Majeures : on laisse passer sans pénalité
                 log_info(symbol, "Low-liquidity session (tolérée sur major)")
             else:
-                # Soft penalty sur les autres paires
+                # Autres paires : pénalité soft
                 indicators_soft_penalty += 1
                 tendance_soft_notes.append("Session à faible liquidité")
                 log_info(symbol, "Low-liquidity session (soft)")
-            # Pas de return: on continue le flux
+        # pas de return : on continue
 
-        if symbol not in MAJORS:
+        # --- BTC regime / drift guards ---
+        # ALT : blocage dur uniquement si régime BTC = panic
+        if symbol != "BTCUSDT":
             blocked, why = btc_regime_blocked()
             if blocked:
                 log_refusal(symbol, f"Filtre régime BTC: {why}")
                 if not in_trade:
                     return
 
-        # --- BTC drift : hard seulement sur low-liq sans edge, sinon soft ---
+        # BTC : drift dur seulement en session low-liq, sinon pénalité soft
+        if symbol == "BTCUSDT" and btc_market_drift():
+            if not ok_session:
+                log_refusal(symbol, "BTC drift (hard on low-liq)")
+                return
+            else:
+                indicators_soft_penalty += 1
+                log_info(symbol, "BTC drift (soft)")
+
+        # ALT : drift dur seulement si low-liq + RS faible + momentum mou ; sinon soft
         if symbol != "BTCUSDT" and btc_market_drift():
             rs = rel_strength_vs_btc(symbol)  # edge ALT vs BTC (3 bougies 1h)
             HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
-            # Hard uniquement si alts low-liq, RS faible et momentum pas fou
-            if (symbol not in HIGH_LIQ) and (rs <= 0.006) and (adx_value < 22):
+            if (symbol not in HIGH_LIQ) and (rs <= 0.006) and (adx_value < 22) and (not ok_session):
                 log_refusal(symbol, "BTC drift (hard on low-liq)", trigger=f"RSvsBTC={rs:.3%}")
                 if not in_trade:
                     return
             else:
-                # Soft penalty sinon (on laisse passer)
-                try:
-                    indicators_soft_penalty += 1
-                except NameError:
-                    indicators_soft_penalty = 1
-                log_info(symbol, "BTC drift (soft) — high-liq ou RS>BTC")
+                indicators_soft_penalty += 1
+                log_info(symbol, "BTC drift (soft) — high-liq ou RS>BTC ou session active")
 
         # --- Anti-excès 1h (HARD) : trop étiré ---
         dist_ema25 = (price / max(ema25, 1e-9) - 1.0)
         EXCESS_HARD = (rsi >= RSI_HARD_STD) and (dist_ema25 >= DIST_EMA25_HARD_STD)
         if EXCESS_HARD:
-            STRONG_TREND = (adx_value >= 28 and supertrend_signal and closes_4h[-1] > ema50_4h and ema50_4h > ema200_4h)
+            # tendance forte multi-TF → on requalifie en soft sur high-liq/majors
+            st_on_now = supertrend_like_on_close(klines)
+            # c4/ema50_4h/ema200_4h doivent avoir été calculés plus haut (4h)
+            STRONG_TREND = (adx_value >= 28 and st_on_now and c4[-1] > ema50_4h and ema50_4h > ema200_4h)
             HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
             if (symbol in MAJORS or symbol in HIGH_LIQ) and STRONG_TREND:
                 log_info(symbol, "Anti-excès 1h (hard) relâché (trend fort high-liq) → pénalité soft")
-                try: indicators_soft_penalty += 1
-                except NameError: indicators_soft_penalty = 1
+                indicators_soft_penalty += 1
             else:
                 log_refusal(symbol, f"Anti-excès 1h (hard): RSI {rsi:.1f} & dist EMA25 {dist_ema25:.1%}")
                 if not in_trade:
@@ -2130,7 +2163,6 @@ async def process_symbol(symbol):
 
         # — Pré-filtre: prix trop loin de l’EMA25 (pénalité soft, seuil relevé)
         EMA25_PREFILTER_STD = (1.06 if symbol in MAJORS else 1.10)
-
         if price > ema25 * EMA25_PREFILTER_STD:
             dist = (price / max(ema25, 1e-9) - 1) * 100
             seuil_pct = (EMA25_PREFILTER_STD - 1) * 100
@@ -2139,16 +2171,14 @@ async def process_symbol(symbol):
                 f"Prix éloigné EMA25 (soft > +{seuil_pct:.0f}%)",
                 trigger=f"dist_ema25={dist:.2f}%"
             )
-            try:
-                indicators_soft_penalty += 1
-            except NameError:
-                pass
-                
-            # pas de return : on continue
+            indicators_soft_penalty += 1
+        # pas de return : on continue
+
+        # Anti-spike + wick (soft)
         if not check_spike_and_wick(symbol, klines, price, mode_label="std"):
             if not in_trade:
                 return
-            
+      
         # [#volume-confirm-standard]
         k15 = get_cached(symbol, VOL_CONFIRM_TF, limit=max(25, VOL_CONFIRM_LOOKBACK + 5))
         vols15 = volumes_series(k15, quote=True)
@@ -2209,6 +2239,7 @@ async def process_symbol(symbol):
 
         # --- Décision d'achat (standard) avec filtre 15m ---
         brk_ok, br_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
+
         last3_change = (closes[-1] - closes[-4]) / max(closes[-4], 1e-9)
         atr_pct = atr / max(price, 1e-9)
         base_limit = (0.032 if symbol in MAJORS else 0.030)
@@ -2216,11 +2247,42 @@ async def process_symbol(symbol):
 
         if last3_change > limit:
             HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
-            if (symbol in MAJORS or symbol in HIGH_LIQ) and adx_value >= 28 and supertrend_signal:
-                # continuation autorisée : on laissera le filtre 15m décider
-                pass
+
+            # petit pouls de volume 15m pour juger l'excès
+            k15q = get_cached(symbol, '15m', limit=25) or []
+            vols15q = volumes_series(k15q, quote=True) if k15q else []
+            if len(k15q) >= 2 and len(vols15q) >= 12:
+                vol_now_15  = float(k15q[-2][7])
+                vol_ma10_15 = float(np.mean(vols15q[-11:-1]))
+                vol_ratio_15m = vol_now_15 / max(vol_ma10_15, 1e-9)
             else:
-                brk_ok = False
+                vol_ratio_15m = 0.0
+
+            strong_flow = (
+                adx_value >= 22
+                or vol_ratio_15m >= 0.55
+                or ((symbol in MAJORS or symbol in HIGH_LIQ) and adx_value >= 28 and supertrend_signal)
+            )
+
+            if strong_flow:
+                # toléré : info uniquement, on laisse le filtre 15m décider
+                log_info(
+                    symbol,
+                    f"Anti-excès 1h toléré (soft): +{last3_change:.2%} > {limit:.2%} | "
+                    f"vol15m {vol_ratio_15m:.2f} | ADX {adx_value:.1f}"
+                )
+                # NE PAS toucher à brk_ok ici (on ne bloque pas)
+            else:
+                log_refusal(
+                    symbol,
+                    f"Anti-excès 1h (soft, non bloquant): +{last3_change:.2%} > {limit:.2%}"
+                )
+                try:
+                    indicators_soft_penalty += 1
+                except NameError:
+                    indicators_soft_penalty = 1
+            # pas de return et pas de brk_ok = False  -> on continue vers le filtre 15m
+
 
 
         buy = False
@@ -2457,31 +2519,35 @@ async def process_symbol_aggressive(symbol):
         k1h_30d = get_cached(symbol, '1h', limit=750) or []
         vols_hist = volumes_series(k1h_30d, quote=True)[-721:]
 
-        VOL_MED_MULT_EFF = (0.05 if symbol in MAJORS else 0.07)
-        MIN_VOLUME_ABS   = (80_000 if symbol in MAJORS else 120_000)
+        # seuils un peu plus souples + override si le 15m pulse
+        VOL_MED_MULT_EFF = (0.04 if symbol in MAJORS else 0.06)
+        MIN_VOLUME_ABS   = (60_000 if symbol in MAJORS else 100_000)
+
+        # calcule vol_ratio_15m si pas déjà fait:
+        k15 = get_cached(symbol, '15m', limit=25) or []
+        vols15 = volumes_series(k15, quote=True) if k15 else []
+        vol_now_15 = float(k15[-2][7]) if len(k15) >= 2 else 0.0
+        vol_ma10_15 = float(np.mean(vols15[-11:-1])) if len(vols15) >= 12 else 0.0
+        vol_ratio_15m = (vol_now_15 / max(vol_ma10_15, 1e-9)) if vol_ma10_15 else 0.0
 
         if len(vols_hist) >= 200:
             med_30d_raw = float(np.median(vols_hist[:-1]))
             p70 = float(np.percentile(vols_hist[:-1], 70))
             med_30d = min(med_30d_raw, p70 * 1.5)
-
-            # assouplissement : MAJORS/HIGH_LIQ -> pénalité soft au lieu de blocage « hard »
-            HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
-
-            # seuils un poil plus permissifs
-            VOL_MED_MULT_EFF_MAJ = 0.04   # avant 0.05
-            VOL_MED_MULT_EFF_ALT = 0.06   # avant 0.07
-
-            mult_need = (VOL_MED_MULT_EFF_MAJ if symbol in HIGH_LIQ or symbol in MAJORS else VOL_MED_MULT_EFF_ALT)
-            need = max(MIN_VOLUME_ABS, mult_need * med_30d)
-
+            need = max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d)
             if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < need:
-                if (symbol in HIGH_LIQ or symbol in MAJORS):
-                    indicators_soft_penalty += 1
-                    log_info(symbol, f"Volume 1h faible vs med30j (soft) {vol_now_1h:.0f} < {mult_need:.2f}×{med_30d:.0f}")
+                # OVERRIDE: si le 15m est >0.60x, on passe en soft (pas de return)
+                if vol_ratio_15m >= 0.60:
+                    log_info(symbol, f"Volume 1h faible vs med30j mais 15m OK ({vol_ratio_15m:.2f}) -> soft")
+                    indicators_soft_penalty += 1   # petite pénalité
                 else:
-                    log_refusal(symbol, f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {mult_need:.2f}×{med_30d:.0f})")
+                    log_refusal(symbol, f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})")
                     return
+        else:
+            if vol_now_1h < MIN_VOLUME_ABS and vol_ratio_15m < 0.60:
+                log_refusal(symbol, f"Volume 1h trop faible (abs) {vol_now_1h:.0f} < {MIN_VOLUME_ABS}")
+                return
+
         else:
             if vol_now_1h < MIN_VOLUME_ABS:
                 if (symbol in HIGH_LIQ or symbol in MAJORS):
@@ -2747,16 +2813,33 @@ async def process_symbol_aggressive(symbol):
         tendance_soft_notes = []
         reasons = []
 
+        # --- Low-liquidity session -> SOFT (aggressive) ---
         ok_session, _sess = is_active_liquidity_session(symbol=symbol)
         if not ok_session:
             if symbol in MAJORS:
+                # tolérance totale sur les majors
                 log_info(symbol, "Low-liquidity session (tolérée sur major)")
             else:
+                # pénalité douce unique, mais pas de return
                 indicators_soft_penalty += 1
                 tendance_soft_notes.append("Session à faible liquidité")
                 log_info(symbol, "Low-liquidity session (soft)")
 
-        # Contexte marché global soft
+        # --- BTC drift : HARD uniquement si low-liq ET pas d'edge vs BTC, sinon soft ---
+        # (laisse passer BTCUSDT; garde 'soft' si relative strength > 0)
+        if symbol != "BTCUSDT" and not ok_session:
+            if btc_market_drift():
+                try:
+                    rs = rel_strength_vs_btc(symbol)  # edge ALT vs BTC (sur 3 bougies 1h chez toi)
+                except Exception:
+                    rs = 0.0
+                if rs < 0.0:
+                    log_refusal(symbol, "BTC drift (hard) sur low-liq sans edge")
+                    return
+                else:
+                    log_info(symbol, f"BTC drift (soft): edge RS {rs:.2f} -> on continue")
+
+        # --- Contexte marché global -> SOFT (aggressive) ---
         if not is_market_bullish():
             b = MARKET_STATE.get("btc", {})
             e = MARKET_STATE.get("eth", {})
@@ -2765,7 +2848,9 @@ async def process_symbol_aggressive(symbol):
             if not (btc_ok or eth_ok):
                 log_refusal(symbol, "Blocage ALT: BTC & ETH faibles (soft)")
                 return
+            # marché pas franchement bull mais OK -> on continue avec une pénalité soft
             indicators_soft_penalty += 1
+
 
         # Cooldown (nouvelles entrées uniquement)
         if (symbol in last_trade_time) and (not in_trade):
@@ -2789,13 +2874,26 @@ async def process_symbol_aggressive(symbol):
             indicators_soft_penalty += 1
             tendance_soft_notes.append("Prix ~ sous EMA200(1h)")
 
-        # ADX avec tolérance si momentum fort (MACD>Signal et RSI≥55)
+        # --- ADX gate (dynamique, agressif) : on ouvre si le 15m pulse ---
+        # mini ratio 15m rapide (indépendant du bloc "Confirmation volume 15m" plus bas)
+        k15q = get_cached(symbol, '15m', limit=25) or []
+        vols15q = volumes_series(k15q, quote=True) if k15q else []
+        if len(k15q) >= 2 and len(vols15q) >= 12:
+            vol_now_15   = float(k15q[-2][7])
+            vol_ma10_15  = float(np.mean(vols15q[-11:-1]))
+            vol_ratio_15m = (vol_now_15 / max(vol_ma10_15, 1e-9)) if vol_ma10_15 else 0.0
+        else:
+            vol_ratio_15m = 0.0
+
         strong_momentum = (macd > signal) and (rsi >= 55)
-        if adx_value >= 15 or (strong_momentum and adx_value >= 14):
+
+        if adx_value >= 17:
+            adx_ok = True
+        elif strong_momentum and (rsi >= 56) and (vol_ratio_15m >= 0.45):
             adx_ok = True
         else:
             adx_ok = False
-            indicators_soft_penalty += 1
+            indicators_soft_penalty += 1   # on pénalise mais on ne bloque pas d’office (aggressive)
 
 
         # Momentum MACD (renforcé)
@@ -2827,11 +2925,33 @@ async def process_symbol_aggressive(symbol):
             if not in_trade:
                 return
 
-        last3_change = (closes[-1] - closes[-4]) / closes[-4] if len(closes) >= 4 else 0
-        if last3_change > 0.028:  # 2.8% au lieu de 2.2%
-            log_refusal(symbol, "Mouvement 3 bougies trop fort (>2.8%)")
-            if not in_trade:
-                return
+        # --- Anti-excès 1h (soft) — non bloquant + pondéré vol/ADX ---
+        last3_change = ((closes[-1] - closes[-4]) / max(closes[-4], 1e-9)) if len(closes) >= 4 else 0.0
+        if last3_change > 0.028:  # +2.8% en 3 bougies 1h -> excès
+            # pouls de volume 15m (indépendant du confirm_15m_after_signal)
+            k15q = get_cached(symbol, '15m', limit=25) or []
+            vols15q = volumes_series(k15q, quote=True) if k15q else []
+            if len(k15q) >= 2 and len(vols15q) >= 12:
+                vol_now_15  = float(k15q[-2][7])
+                vol_ma10_15 = float(np.mean(vols15q[-11:-1]))
+                vol_ratio_15m = vol_now_15 / max(vol_ma10_15, 1e-9)
+            else:
+                vol_ratio_15m = 0.0
+
+            # Si ADX >= 22 OU vol 15m pulse >= 0.55 -> on TOLÈRE (info, pas de pénalité)
+            if adx_value >= 22 or vol_ratio_15m >= 0.55:
+                try:
+                    log_info(symbol, f"Anti-excès 1h toléré (soft): +{last3_change:.2%} | vol15m {vol_ratio_15m:.2f} | ADX {adx_value:.1f}")
+                except Exception:
+                    pass
+            else:
+                log_refusal(symbol, "Anti-excès 1h (soft, non bloquant)")
+                try:
+                    indicators_soft_penalty += 1
+                except NameError:
+                    indicators_soft_penalty = 1
+            # pas de return -> soft uniquement
+
     
         RETEST_BAND_AGR = 0.003
         near_level = abs(price - last10_high) / last10_high <= RETEST_BAND_AGR
