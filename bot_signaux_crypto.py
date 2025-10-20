@@ -1995,25 +1995,7 @@ async def process_symbol(symbol):
                 _finalize_exit(symbol, price, gain, "Momentum cassé (gated, multi-confirmations)", "SELL", ctx)
                 return
 
-            # ====== 5) Perte de momentum après TP1 ======
-            if trades[symbol].get("tp1", False) and gain < 1:
-                vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
-                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
-                ctx = {
-                    "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
-                    "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,
-                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,
-                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,
-                    "vol5": vol5_loc, "vol20": vol20_loc,
-                    "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
-                    "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
-                    "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
-                    "elapsed_h": elapsed_time
-                }
-                _finalize_exit(symbol, price, gain, "Perte de momentum après TP1", "SELL", ctx)
-                return
-
-            # ====== 6) Stop touché / perte max ======
+            # ====== 5) Perte de momentum après TP1 ====== if trades[symbol].get("tp1", False) and gain < 1:     vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0     vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0     ctx = {         "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,         "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,         "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,         "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,         "vol5": vol5_loc, "vol20": vol20_loc,         "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,         "btc_up": MARKET_STATE.get("btc", {}).get("up", False),         "eth_up": MARKET_STATE.get("eth", {}).get("up", False),         "elapsed_h": elapsed_time     }     pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)     _finalize_exit(symbol, price, pnl_pct, "Perte de momentum après TP1", "SELL", ctx)     return  # ====== 6) Stop touché / perte max ======# ====== 6) Stop touché / perte max ======
             stop_hit = price <= trades[symbol]["stop"]
 
             # anti-mèche si tendance forte (ADX élevé + ST ON)
@@ -2038,30 +2020,17 @@ async def process_symbol(symbol):
                     "elapsed_h": elapsed_time
                 }
                 pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
-                _finalize_exit(symbol, price, pnl_pct, reason, event, ctx)
-                return
-
-                vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
-                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
-                ctx = {
-                    "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
-                    "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,
-                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,
-                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,
-                    "vol5": vol5_loc, "vol20": vol20_loc,
-                    "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
-                    "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
-                    "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
-                    "elapsed_h": elapsed_time
-                }
-                pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
-                _finalize_exit(symbol, price, pnl_pct, reason, event, ctx)
-                return
+                \1
 
             # sinon: HOLD
+            trailing_stop_advanced(symbol, price, atr_value=atr)
             log_trade(symbol, "HOLD", price)
-            await buffer_hold(symbol, f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}")
+            await buffer_hold(
+                symbol,
+                f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}"
+            )
             return
+
 
 
         # --- Filtre marché BTC (assoupli) pour ALT (STANDARD) ---
@@ -2740,9 +2709,7 @@ async def process_symbol_aggressive(symbol):
 
             trailing_stop_advanced(
                 symbol, price,
-                atr_value=atr_val_current,
-                adx_value=adx_value,
-                supertrend_on=supertrend_like_on_close(klines)
+                atr_value=atr_val_current
             )
 
 
