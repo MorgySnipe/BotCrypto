@@ -2020,7 +2020,6 @@ async def process_symbol(symbol):
                     "elapsed_h": elapsed_time
                 }
                 pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
-                \1
 
             # sinon: HOLD
             trailing_stop_advanced(symbol, price, atr_value=atr)
