@@ -367,24 +367,41 @@ def log_trade_csv(row: dict):
             w.writerow(clean)
 
 async def send_refusal_top(n_minutes=60, topk=8):
+    """
+    Lit refusal_log.csv et envoie le top des raisons de refus sur la fenêtre [n_minutes].
+    Robuste aux lignes partielles / encodage / concurrence d'écriture.
+    """
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=n_minutes)
         counts = {}
-        if not os.path.exists(REFUSAL_LOG_FILE):
+
+        if not os.path.exists(REFUSAL_LOG_FILE) or os.path.getsize(REFUSAL_LOG_FILE) == 0:
             return
-        with open(REFUSAL_LOG_FILE) as f:
+
+        # Lecture tolérante (encodage + erreurs), et sans bloquer les writers
+        with open(REFUSAL_LOG_FILE, "r", encoding="utf-8", errors="ignore", newline="") as f:
             r = csv.DictReader(f)
             for row in r:
-                ts = _parse_dt_flex(row.get("ts_utc", ""))
-                if ts and ts >= cutoff:
-                    key = row.get("reason", "")
+                try:
+                    ts = _parse_dt_flex(row.get("ts_utc", ""))
+                    if not ts or ts < cutoff:
+                        continue
+                    key = (row.get("reason") or "").strip()
+                    if not key:
+                        key = "(raison vide)"
                     counts[key] = counts.get(key, 0) + 1
+                except Exception:
+                    # saute la ligne si elle est corrompue (écriture concurrente en cours)
+                    continue
+
         if counts:
             top = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:topk]
             lines = [f"• {k}: {v}" for k, v in top]
             await tg_send("🧪 Top refus (dernière heure):\n" + "\n".join(lines))
+        # sinon: silence (pas de refus récents)
     except Exception as e:
-        print("top refus err:", e)
+        print("[send_refusal_top] err:", e)
+
 
 def _delete_trade(symbol):
     if symbol in trades:
@@ -1335,24 +1352,33 @@ _ensure_csv(REFUSAL_LOG_FILE, REFUSAL_FIELDS)
 
 
 def log_refusal(symbol: str, reason: str, trigger: str = "", cooldown_left_min: int | None = None):
-    """Append une ligne dans refusal_log.csv (diagnostic des refus).
-       - trigger : valeur déclenchante (ex. 'adx=17.8', 'vol15_ratio=1.12', 'dist_ema25=2.4%')
-       - cooldown_left_min : minutes restantes de cooldown si pertinent
     """
-    import os, csv
-    header_needed = (not os.path.exists(REFUSAL_LOG_FILE)
-                     or os.path.getsize(REFUSAL_LOG_FILE) == 0)
-    with open(REFUSAL_LOG_FILE, "a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=REFUSAL_FIELDS)
-        if header_needed:
-            w.writeheader()
-        w.writerow({
+    Append une ligne dans refusal_log.csv (diagnostic des refus).
+    - trigger : valeur déclenchante (ex. 'adx=17.8', 'vol15_ratio=1.12', 'dist_ema25=2.4%')
+    - cooldown_left_min : minutes restantes de cooldown si pertinent
+    Écriture protégée par file_lock pour éviter les interférences.
+    """
+    try:
+        row = {
             "ts_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             "symbol": symbol,
             "reason": reason,
             "trigger": trigger or "",
             "cooldown_left_min": "" if cooldown_left_min is None else int(cooldown_left_min),
-        })
+        }
+
+        header_needed = (not os.path.exists(REFUSAL_LOG_FILE)
+                         or os.path.getsize(REFUSAL_LOG_FILE) == 0)
+
+        with file_lock:
+            with open(REFUSAL_LOG_FILE, "a", encoding="utf-8", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=REFUSAL_FIELDS)
+                if header_needed:
+                    w.writeheader()
+                w.writerow(row)
+                f.flush()  # pousse sur disque tout de suite
+    except Exception as e:
+        print("[log_refusal] err:", e)
 
 def log_info(symbol: str, reason: str, trigger: str = ""):
     # log "neutre" (juste en console) pour info/diagnostic
@@ -1995,17 +2021,8 @@ async def process_symbol(symbol):
                 _finalize_exit(symbol, price, gain, "Momentum cassé (gated, multi-confirmations)", "SELL", ctx)
                 return
 
-            # ====== 5) Perte de momentum après TP1 ====== if trades[symbol].get("tp1", False) and gain < 1:     vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0     vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0     ctx = {         "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,         "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,         "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,         "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,         "vol5": vol5_loc, "vol20": vol20_loc,         "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,         "btc_up": MARKET_STATE.get("btc", {}).get("up", False),         "eth_up": MARKET_STATE.get("eth", {}).get("up", False),         "elapsed_h": elapsed_time     }     pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)     _finalize_exit(symbol, price, pnl_pct, "Perte de momentum après TP1", "SELL", ctx)     return  # ====== 6) Stop touché / perte max ======# ====== 6) Stop touché / perte max ======
-            stop_hit = price <= trades[symbol]["stop"]
-
-            # anti-mèche si tendance forte (ADX élevé + ST ON)
-            if stop_hit and VSTOP_CONFIRM_1M and adx_value >= 28 and supertrend_like_on_close(klines):
-                stop_hit = confirm_stop_breach_1m(symbol, trades[symbol]["stop"],
-                                      n=VSTOP_CONFIRM_1M_N, tol_pct=VSTOP_TOLERANCE_PCT)
-
-            if stop_hit or gain <= -1.5:
-                event  = "STOP" if stop_hit else "SELL"
-                reason = "Stop touché" if stop_hit else "Perte max (-1.5%)"
+            # ====== 5) Perte de momentum après TP1 ======
+            if trades[symbol].get("tp1", False) and gain < 1:
                 vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
                 vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
                 ctx = {
@@ -2020,17 +2037,37 @@ async def process_symbol(symbol):
                     "elapsed_h": elapsed_time
                 }
                 pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
-
-                # sinon: HOLD
-                trailing_stop_advanced(symbol, price, atr_value=atr)
-                log_trade(symbol, "HOLD", price)
-                await buffer_hold(
-                    symbol,
-                    f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}"
-                )
+                _finalize_exit(symbol, price, pnl_pct, "Perte de momentum après TP1", "SELL", ctx)
                 return
+        
+            # ====== 6) Stop touché / perte max ======#
+            stop_hit = price <= trades[symbol]["stop"]
 
+            # anti-mèche si tendance forte (ADX élevé + ST ON)
+            if stop_hit and VSTOP_CONFIRM_1M and adx_value >= 28 and supertrend_like_on_close(klines):
+                stop_hit = confirm_stop_breach_1m(symbol, trades[symbol]["stop"],
+                                      n=VSTOP_CONFIRM_1M_N, tol_pct=VSTOP_TOLERANCE_PCT)
 
+            if stop_hit or gain <= -1.5:
+                event  = "STOP" if stop_hit else "SELL"
+                reason = "Stop touché" if stop_hit else "Perte max (-1.5%)"
+
+                vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
+                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                ctx = {
+                    "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
+                    "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,
+                    "vol5": vol5_loc, "vol20": vol20_loc,
+                    "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
+                    "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
+                    "elapsed_h": elapsed_time
+                }
+                pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
+                _finalize_exit(symbol, price, pnl_pct, reason, event, ctx)
+                return
 
         # --- Filtre marché BTC (assoupli) pour ALT (STANDARD) ---
         if symbol != "BTCUSDT":
