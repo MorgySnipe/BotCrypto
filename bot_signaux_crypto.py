@@ -1794,6 +1794,43 @@ async def process_symbol(symbol):
             gain = ((price - entry) / max(entry, 1e-9)) * 100.0
             stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN)))
 
+            # [F1] === TP dynamiques (STANDARD) — même logique que 'aggressive' ===
+            if "tp_times" not in trades[symbol]:
+                trades[symbol]["tp_times"] = {}
+            atr_val_current = atr_tv(klines)  # ATR 1h actuel
+            for tp_idx, atr_mult in enumerate(TP_ATR_MULTS_STD, start=1):
+                threshold_pct = (atr_mult * atr_val_current / max(entry, 1e-9)) * 100.0
+                if gain >= threshold_pct and not trades[symbol].get(f"tp{tp_idx}", False):
+                    last_tp_time = trades[symbol]["tp_times"].get(f"tp{tp_idx-1}") if tp_idx > 1 else None
+                    if isinstance(last_tp_time, str):
+                        try:
+                            last_tp_time = datetime.fromisoformat(last_tp_time)
+                        except Exception:
+                            last_tp_time = None
+                    # anti-spam: 120s mini entre 2 TP
+                    if not last_tp_time or (datetime.now(timezone.utc) - last_tp_time).total_seconds() >= 120:
+                        trades[symbol][f"tp{tp_idx}"] = True
+                        trades[symbol]["tp_times"][f"tp{tp_idx}"] = datetime.now(timezone.utc)
+
+                        # BE après TP1 ; après TP2/TP3 on pousse le stop progressivement
+                        if tp_idx == 1:
+                            new_stop_level = entry  # break-even
+                        else:
+                            # petit BE+ conditionné au seuil atteint
+                            new_stop_level = max(entry, entry * (1.0 + max(0.0, threshold_pct - 0.6) / 100.0))
+
+                        trades[symbol]["stop"] = max(stop, new_stop_level)
+                        save_trades()
+
+                        # message TP
+                        msg = format_tp_msg(
+                            tp_idx, symbol, trades[symbol]["trade_id"], price, gain,
+                            trades[symbol]["stop"],
+                            ((trades[symbol]["stop"] - entry) / entry) * 100.0,
+                            elapsed_time, "Stop ajusté (ATR)"
+                        )
+                        await tg_send(msg)
+
             # Trailing stop adaptatif (ADX) — version avancée (centralisée)
             trailing_stop_advanced(
                 symbol,
@@ -1882,8 +1919,66 @@ async def process_symbol(symbol):
                 # on resserre le trailing si un fast-exit a été déclenché mais bloqué
                 trailing_stop_advanced(symbol, price, atr_value=atr)
 
-            # ====== 4) Momentum cassé ======
-            if gain < 0.8 and (rsi < 48 or macd < signal):
+            # [F2] ====== 4) Momentum cassé (gated & multi-confirmations) ======
+            # On n'autorise la vente "momentum cassé" que :
+            # - AVANT TP1,
+            # - APRÈS le délai de contrôle (>= SMART_TIMEOUT_EARLIEST_H_STD),
+            # - ET seulement si plusieurs signaux concordent,
+            # - ET si on n'est pas dans une forte tendance 1h,
+            # - ET si le gain est vraiment faible (<= +0.30%) et proche du stop.
+
+            tp1_done = bool(trades[symbol].get("tp1", False))
+            strong_trend_1h = (adx_value >= 28) and supertrend_like_on_close(klines)
+
+            # confirmations 15m/5m
+            k15_loc = get_cached(symbol, '15m', limit=30) or []
+            cl15 = [float(k[4]) for k in k15_loc[:-1]] if len(k15_loc) >= 2 else []
+            ema20_15 = ema_tv(cl15, 20) if len(cl15) >= 20 else None
+            close_below_ema20_15 = (len(cl15) >= 20 and cl15[-1] < ema20_15)
+
+            k5_loc = get_cached(symbol, '5m', limit=80) or []
+            bearish_5m = is_bearish_engulfing_5m(k5_loc)
+            # RSI 5m drop (si dispo)
+            if k5_loc and len(k5_loc) >= 30:
+                c5 = [float(x[4]) for x in k5_loc[:-1]]
+                rsi5_series = rsi_tv_series(c5, 14)
+                rsi5_prev = rsi5_series[~np.isnan(rsi5_series)][-2] if np.isfinite(rsi5_series).sum() >= 2 else np.nan
+                rsi5_now  = rsi5_series[~np.isnan(rsi5_series)][-1] if np.isfinite(rsi5_series).sum() >= 1 else np.nan
+                rsi5_drop = (rsi5_prev - rsi5_now) if (np.isfinite(rsi5_prev) and np.isfinite(rsi5_now)) else 0.0
+            else:
+                rsi5_drop = 0.0
+
+            # histogramme MACD décroissant
+            hist_now_std  = macd - signal
+            macd_prev_std, signal_prev_std = compute_macd(closes[:-1]) if len(closes) >= 2 else (macd, signal)
+            hist_prev_std = macd_prev_std - signal_prev_std
+            hist_falling = (hist_now_std < hist_prev_std)
+
+            # distance au stop (proximité = pas la peine de couper plus haut que le stop)
+            dist_stop_pct = ((price - trades[symbol]["stop"]) / max(price, 1e-9)) * 100.0
+
+            if (not tp1_done
+                and elapsed_time >= SMART_TIMEOUT_EARLIEST_H_STD
+                and not strong_trend_1h
+                and gain <= 0.30
+                and dist_stop_pct <= (0.60 * (atr / max(price, 1e-9)) * 100.0)  # proche du stop (<= 0.6×ATR%)
+                and (
+                    # exiger au moins 3 signaux faibles OU 2 forts
+                    (
+                        sum([
+                            (rsi <= 47.0),
+                            (macd < signal),
+                            hist_falling,
+                            (close_below_ema20_15),
+                            bearish_5m,
+                            (rsi5_drop > 6.0),
+                        ]) >= 3
+                    ) or (
+                        # combo fort
+                        ((macd < signal) and hist_falling and (rsi <= 47.0))
+                        or (bearish_5m and (rsi5_drop > 8.0))
+                    )
+                )):
                 vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
                 vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
                 ctx = {
@@ -1897,7 +1992,7 @@ async def process_symbol(symbol):
                     "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
                     "elapsed_h": elapsed_time
                 }
-                _finalize_exit(symbol, price, gain, "Momentum cassé (sortie anticipée)", "SELL", ctx)
+                _finalize_exit(symbol, price, gain, "Momentum cassé (gated, multi-confirmations)", "SELL", ctx)
                 return
 
             # ====== 5) Perte de momentum après TP1 ======
