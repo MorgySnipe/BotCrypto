@@ -2021,14 +2021,14 @@ async def process_symbol(symbol):
                 }
                 pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
 
-            # sinon: HOLD
-            trailing_stop_advanced(symbol, price, atr_value=atr)
-            log_trade(symbol, "HOLD", price)
-            await buffer_hold(
-                symbol,
-                f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}"
-            )
-            return
+                # sinon: HOLD
+                trailing_stop_advanced(symbol, price, atr_value=atr)
+                log_trade(symbol, "HOLD", price)
+                await buffer_hold(
+                    symbol,
+                    f"{utc_now_str()} | {symbol} HOLD | prix {price:.4f} | gain {gain:.2f}% | stop {trades[symbol].get('stop', trades[symbol].get('sl_initial', price)):.4f}"
+                )
+                return
 
 
 
