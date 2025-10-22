@@ -214,6 +214,9 @@ SMART_TIMEOUT_MIN_GAIN_STD   = 0.8    # on ne coupe pas si déjà > +0.8% (stand
 SMART_TIMEOUT_ADX_MAX        = 18     # ADX faible
 SMART_TIMEOUT_RSI_MAX        = 50     # RSI <= 50 = mou
 SMART_TIMEOUT_VOLRATIO_MAX   = 0.90   # MA5/MA20 volume <= 0.90x
+# [#patch-time-tightening]
+TIME_TIGHTEN_AFTER_H = 6         # à partir de 6h en position, on resserre
+TIME_TIGHTEN_K_DELTA = 0.10      # on réduit k_adx de 0.10 toutes les 2h après 6h (cap 0.20)
 # === Filtre régime BTC ===
 BTC_1H_DROP_PCT      = 1.0   # blocage si -1.0% sur 1h
 BTC_3H_DROP_PCT      = 2.2   # ou -2.2% sur 3h
@@ -1169,57 +1172,66 @@ def is_bearish_engulfing_5m(k5):
     open_b, close_b = float(b[1]), float(b[4])
     return (close_a > open_a) and (close_b < open_b) and (open_b >= close_a) and (close_b <= open_a)
 
+# [#patch-fast-exit-v2]
 def fast_exit_5m_trigger(symbol: str, entry: float, current_price: float):
     """
-    Sortie dynamique 5m *robuste* :
-      - trigger si gain >= +0.8% ET (2 signaux faibles ou 1 signal fort)
-      - signaux : RSI drop, MACD cross down, bearish engulfing 5m, close<EMA20(5m)
-      - 'strong' si RSI drop > 8 pts OU (MACD cross + engulfing)
-    Retourne (trigger: bool, info: dict)
+    Fast-exit V2 (plus sélectif)
+    - Trigger seulement si gain >= +0.9%
+    - ET Close<EMA20(5m)
+    - ET (MACD cross down OU bearish engulfing 5m OU RSI drop > 7 pts)
+    - 'strong' si: (engulfing + MACD cross) OU RSI drop > 10 pts
+    - Blocage hard en forte tendance 1h (ADX>=28 & ST ON) si gain < +2.5%
     """
     try:
         if entry <= 0 or current_price is None:
             return False, {}
+
         gain_pct = ((current_price - entry) / entry) * 100.0
-        if gain_pct < 0.8:
+        if gain_pct < 0.9:
             return False, {"gain_pct": gain_pct}
 
-        k5 = get_cached(symbol, '5m', limit=80)
-        if not k5 or len(k5) < 25:
+        k5 = get_cached(symbol, '5m', limit=90)
+        if not k5 or len(k5) < 30:
             return False, {"gain_pct": gain_pct}
 
         closes5_full = [float(k[4]) for k in k5]
         closes5 = closes5_full[:-1] if len(closes5_full) >= 2 else closes5_full
+        ema20_5m_series = ema_tv_series(closes5, 20)
+        close_below_ema20 = (len(ema20_5m_series) > 0 and closes5[-1] < ema20_5m_series[-1])
 
         # RSI drop
         rsi5_series = rsi_tv_series(closes5, period=14)
+        def _last_two_finite(values):
+            arr = np.asarray(values, dtype=float)
+            finite = arr[~np.isnan(arr)]
+            if finite.size >= 2:
+                return float(finite[-2]), float(finite[-1])
+            return float('nan'), float('nan')
         rsi_prev, rsi_now = _last_two_finite(rsi5_series)
-        rsi_drop = (rsi_prev - rsi_now) if (not np.isnan(rsi_prev) and not np.isnan(rsi_now)) else 0.0
+        rsi_drop = (rsi_prev - rsi_now) if (np.isfinite(rsi_prev) and np.isfinite(rsi_now)) else 0.0
 
-        # MACD(5m) cross
+        # MACD(5m)
         macd_now,  signal_now  = compute_macd(closes5)
         macd_prev, signal_prev = compute_macd(closes5[:-1])
         macd_cross_down = (macd_prev >= signal_prev) and (macd_now < signal_now)
 
-        # Bearish engulfing 5m
+        # Engulfing 5m
         bearish_5m = is_bearish_engulfing_5m(k5)
 
-        # Close sous EMA20(5m)
-        ema20_5m_series = ema_tv_series(closes5, 20)
-        close_below_ema20 = closes5[-1] < ema20_5m_series[-1] if len(ema20_5m_series) else False
+        # Porte d'entrée stricte: Close<EMA20(5m) + au moins 1 autre signal
+        if not close_below_ema20:
+            return False, {"gain_pct": gain_pct, "close_below_ema20_5m": False}
 
-        # Logique de décision : 2 "faibles" ou 1 "fort"
-        weak_signals = sum([
-            rsi_drop > 4.5,
+        extra_signals = sum([
             macd_cross_down,
             bearish_5m,
-            close_below_ema20
+            rsi_drop > 7.0,
         ])
-        strong = (rsi_drop > 8.0) or (macd_cross_down and bearish_5m)
 
-        trigger = gain_pct >= 0.8 and (weak_signals >= 2 or strong)
+        strong = (rsi_drop > 10.0) or (macd_cross_down and bearish_5m)
+        trigger = (extra_signals >= 1)
 
-        return trigger, {
+        return (trigger and True), {
             "gain_pct": gain_pct,
             "rsi5_prev": rsi_prev, "rsi5_now": rsi_now,
             "rsi_drop": rsi_drop,
@@ -1232,8 +1244,6 @@ def fast_exit_5m_trigger(symbol: str, entry: float, current_price: float):
         }
     except Exception:
         return False, {}
-
-
 
 def detect_breakout_retest(closes, highs, lookback=10, tol=0.0015):
     """
@@ -1491,64 +1501,117 @@ def _finalize_exit(symbol, exit_price, pnl_pct, reason, event_name, ctx):
         traceback.print_exc()
 
 # ====== /CSV détaillé ======
+# [#patch-trailing-v2]
 def trailing_stop_advanced(symbol, current_price, atr_value=None, atr_period=14):
     """
-    Trailing stop 'pro' avec garde-fous :
-      - trailing plus LARGE quand la tendance est forte (ADX élevé)
-      - écart minimum au prix (>= 0.5% du prix OU 0.25×ATR)
-      - buffer mini dépendant de la tendance (0.8×ATR fort / 0.6×ATR faible)
-      - cap de remontée par itération (<= 0.5×ATR)
-      - pas de break-even+ avant TP1 (selon TRAIL_BEFORE_TP1_MAX)
-      - stop jamais abaissé et toujours < prix courant
+    Trailing Stop V2 (stair-step + chandelier + profit-lock)
+
+    new_stop = max(
+        chandelier_long = highest(1h, 7) - 2.6*ATR,
+        ema20_guard     = EMA20(1h) - k_adx*ATR,
+        swing_guard     = last_swing_low_1h + 0.15*ATR,
+        be_gate         = entry + be_offset
+    )
+    puis bornes:
+      - buffer mini: (0.8×ATR si tendance forte, sinon 0.6×ATR) sous le prix
+      - cap de remontée par itération: ≤ 0.45×ATR
+      - jamais > prix*0.999, jamais < stop précédent
     """
     if symbol not in trades:
         return
 
-    entry = float(trades[symbol].get("entry", current_price))
-    prev_stop = float(trades[symbol].get("stop", trades[symbol].get("sl_initial", entry)))
-    tp1_done = bool(trades[symbol].get("tp1", False))
+    trade = trades[symbol]
+    entry     = float(trade.get("entry", current_price))
+    prev_stop = float(trade.get("stop", trade.get("sl_initial", entry)))
+    tp1_done  = bool(trade.get("tp1", False))
 
     k1h = get_cached(symbol, "1h")
-    if not k1h:
+    if not k1h or len(k1h) < 30:
         return
 
-    # Données & indicateurs 1h
     closes = [float(k[4]) for k in k1h]
-    atr_val = float(atr_value) if (atr_value is not None) else float(atr_tv(k1h, period=atr_period))
-    adx_now = float(adx_tv(k1h, period=14))
-    st_on   = bool(supertrend_like_on_close(k1h))
+    highs1 = [float(k[2]) for k in k1h]
+    lows1  = [float(k[3]) for k in k1h]
 
-    # 1) trailing 'large quand fort'
-    if adx_now >= 30:
-        base_mult = 0.60
-    elif adx_now >= 22:
-        base_mult = 0.45
+    # ATR 1h (TV-like)
+    atr = float(atr_value) if (atr_value is not None) else float(atr_tv(k1h, period=atr_period))
+    if atr <= 0:
+        return
+
+    # Indicateurs 1h
+    adx_now   = float(adx_tv(k1h, period=14))
+    st_on     = bool(supertrend_like_on_close(k1h))
+    ema20_1h  = ema_tv(closes, 20)
+
+    # --- Time tightening (fallback si constantes absentes) ---
+    try:
+        _T_AFTER = TIME_TIGHTEN_AFTER_H
+        _T_DELTA = TIME_TIGHTEN_K_DELTA
+    except NameError:
+        _T_AFTER = 6.0      # heures
+        _T_DELTA = 0.10     # réduction de k toutes les 2h, cap 0.20
+
+    # Durée du trade (heures)
+    try:
+        et = _parse_dt_flex(trade.get("time","")) or datetime.now(timezone.utc)
+        elapsed_h = (datetime.now(timezone.utc) - et).total_seconds()/3600.0
+    except Exception:
+        elapsed_h = 0.0
+
+    # === Composants du stop ===
+    # 1) Chandelier exit (long) sur 7 dernières bougies
+    lookback   = 7 if len(highs1) >= 7 else max(3, len(highs1)-1)
+    chand_long = max(highs1[-lookback:]) - 2.6 * atr
+
+    # 2) Garde EMA20 – k selon ADX (plus fort => plus large) + tightening temporel
+    if adx_now >= 32 and st_on:
+        k_adx = 1.05
+    elif adx_now >= 24 and st_on:
+        k_adx = 0.85
     else:
-        base_mult = 0.35
+        k_adx = 0.65
+    if elapsed_h >= _T_AFTER:
+        steps = int((elapsed_h - _T_AFTER) // 2)  # toutes les 2h
+        k_adx = max(0.45, k_adx - min(0.20, steps * _T_DELTA))
+    ema_guard = ema20_1h - k_adx * atr
 
-    # 2) plancher d'écart vs prix (évite un stop trop collé)
-    min_gap = max(0.005 * current_price, 0.25 * atr_val)
-    proposed = current_price - max(base_mult * atr_val, min_gap)
+    # 3) Swing low 1h récent (simple et robuste)
+    try:
+        sw = min(lows1[-3], lows1[-2])
+    except Exception:
+        sw = lows1[-2] if len(lows1) >= 2 else lows1[-1]
+    swing_guard = sw + 0.15 * atr
 
-    # 3) buffer mini selon tendance (forte = encore plus de marge)
+    # 4) Profit-lock / BE gate
+    be_offset = 0.0 if tp1_done else 0.0  # pas de BE+ avant TP1
+    be_gate   = entry * (1.0 + be_offset)
+
+    # Proposition initiale
+    proposed = max(chand_long, ema_guard, swing_guard, be_gate)
+
+    # Buffer mini selon tendance (forte = plus de marge)
     min_buffer_atr = (TRAIL_MIN_BUFFER_ATR_STRONG if (adx_now >= 28 and st_on)
                       else TRAIL_MIN_BUFFER_ATR_WEAK)
-    proposed = min(proposed, current_price - min_buffer_atr * atr_val)
+    proposed = min(proposed, current_price - min_buffer_atr * atr)
 
-    # 4) pas de BE+ avant TP1
-    if not tp1_done:
-        proposed = min(proposed, entry + TRAIL_BEFORE_TP1_MAX * atr_val)
+    # Cap de remontée par itération (un peu plus doux que 0.5×ATR)
+    proposed = min(proposed, prev_stop + 0.45 * atr)
 
-    # 5) cap de remontée par itération
-    proposed = min(proposed, prev_stop + TRAIL_STEP_CAP_ATR * atr_val)
-
-    # 6) garde-fous finaux
+    # Garde-fous finaux
     proposed = min(proposed, current_price * 0.999)  # toujours < prix
     new_stop = max(prev_stop, proposed)              # jamais abaisser
+
+    # Micro verrouillage si le gain est déjà important
+    gain_pct = ((current_price - entry) / max(entry, 1e-9)) * 100.0
+    if gain_pct >= 3.0:
+        new_stop = max(new_stop, ema_guard + 0.60 * atr)   # ≥ +0.6×ATR au-dessus du guard
+    if gain_pct >= 5.0:
+        new_stop = max(new_stop, entry * 1.006)            # BE + 0.6%
 
     if new_stop > prev_stop:
         trades[symbol]["stop"] = float(new_stop)
         save_trades()
+
 
         
 def compute_confidence_score(indicators):
@@ -1909,7 +1972,7 @@ async def process_symbol(symbol):
             )
 
             # si tendance 1h forte et gain < 2.2%, on bloque la sortie rapide
-            if strong_trend_1h and float(fx.get("gain_pct", 0.0)) < 2.2:
+            if strong_trend_1h and float(fx.get("gain_pct", 0.0)) < 2.5:
                 allow_fast = False
 
             if allow_fast:
@@ -1938,6 +2001,27 @@ async def process_symbol(symbol):
                 # on resserre le trailing si un fast-exit a été déclenché mais bloqué
                 trailing_stop_advanced(symbol, price, atr_value=atr)
 
+                # [#patch-spike-capture]
+                # Capture d’un spike court terme si le trade a déjà bien avancé
+                try:
+                    gain = ((price - entry) / max(entry, 1e-9)) * 100.0
+                except Exception:
+                    gain = 0.0
+
+                if gain >= 2.8:
+                    k1m = get_cached(symbol, '1m', limit=8) or []
+                    if len(k1m) >= 6:
+                        # On regarde la DERNIERE bougie close (k1m[-2])
+                        o = float(k1m[-2][1]); h = float(k1m[-2][2]); l = float(k1m[-2][3]); c = float(k1m[-2][4])
+                        rng = max(h - l, 1e-9)
+                        wick_up  = (h - c) / rng > 0.55          # mèche haute dominante
+                        body_pct = abs(c - o) / max(o, 1e-9) * 100.0
+                        spike_pct = (h - max(c, o)) / max(o, 1e-9) * 100.0
+                        if wick_up and spike_pct >= 0.60 and body_pct < 0.35:
+                            # Prendre ce que le marché donne: on resserre agressivement le stop
+                            trades[symbol]["stop"] = max(trades[symbol].get("stop", entry), current_price * 0.995)
+                            save_trades()
+  
             # [F2] ====== 4) Momentum cassé (gated & multi-confirmations) ======
             # On n'autorise la vente "momentum cassé" que :
             # - AVANT TP1,
@@ -2014,25 +2098,58 @@ async def process_symbol(symbol):
                 _finalize_exit(symbol, price, gain, "Momentum cassé (gated, multi-confirmations)", "SELL", ctx)
                 return
 
-            # ====== 5) Perte de momentum après TP1 ======
-            if trades[symbol].get("tp1", False) and gain < 1:
-                vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
-                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
-                ctx = {
-                    "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
-                    "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,
-                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,
-                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,
-                    "vol5": vol5_loc, "vol20": vol20_loc,
-                    "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
-                    "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
-                    "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
-                    "elapsed_h": elapsed_time
-                }
-                pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
-                _finalize_exit(symbol, price, pnl_pct, "Perte de momentum après TP1", "SELL", ctx)
-                return
-        
+            # ====== 5) Profit-lock après TP1 (EMA20 1h + double-check court terme) ======
+            if trades[symbol].get("tp1", False):
+                # On protège si le gain retombe sous ~+1.2% (ajustable)
+                if gain < 1.2:
+                    ema20_1h = ema_tv(closes, 20)
+
+                    # 1h : perte de dynamique ?
+                    loss_dyn_1h = (closes[-1] < ema20_1h) or (macd < signal)
+
+                    # Confirme en 15m/5m pour éviter les faux signaux
+                    k15_loc = get_cached(symbol, '15m', limit=30) or []
+                    k5_loc  = get_cached(symbol, '5m',  limit=80) or []
+
+                    # 15m: close < EMA20(15m) ?
+                    close_below_ema20_15 = False
+                    if len(k15_loc) >= 22:
+                        c15 = [float(x[4]) for x in k15_loc[:-1]]  # ignore la bougie en formation
+                        if len(c15) >= 20:
+                            ema20_15 = ema_tv(c15, 20)
+                            close_below_ema20_15 = (c15[-1] < ema20_15)
+
+                    # 5m: pattern de renversement ?
+                    bearish_5m = is_bearish_engulfing_5m(k5_loc)
+
+                    # Déclenche si (1h faiblit) ET (15m faiblit OU pattern 5m)
+                    if loss_dyn_1h and (close_below_ema20_15 or bearish_5m):
+                        vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
+                        vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                        ctx = {
+                            "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
+                            "atr": atr, "st_on": supertrend_like_on_close(klines),
+                            "ema25": ema25, "ema200": ema200,
+                            "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,
+                            "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,
+                            "vol5": vol5_loc, "vol20": vol20_loc,
+                            "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
+                            "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
+                            "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
+                            "elapsed_h": elapsed_time
+                        }
+
+                        raisons = []
+                        if closes[-1] < ema20_1h:           raisons.append("Close(1h) < EMA20")
+                        if macd < signal:                   raisons.append("MACD(1h) < Signal")
+                        if close_below_ema20_15:            raisons.append("Close(15m) < EMA20(15m)")
+                        if bearish_5m:                      raisons.append("Bearish engulfing 5m")
+                        raison_txt = "Profit-lock après TP1: " + " + ".join(raisons) if raisons else "Profit-lock après TP1"
+
+                        pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
+                        _finalize_exit(symbol, price, pnl_pct, raison_txt, "SELL", ctx)
+                        return
+                        
             # ====== 6) Stop touché / perte max ======#
             stop_hit = price <= trades[symbol]["stop"]
 
