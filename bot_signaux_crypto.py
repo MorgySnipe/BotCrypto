@@ -452,21 +452,31 @@ def make_trade_id(symbol: str) -> str:
 def st_onoff(st_bool: bool) -> str:
     return "ON" if st_bool else "OFF"
 
-def format_entry_msg(symbol, trade_id, strategy, bot_version, entry, position_pct,
-                     sl_initial, sl_dist_pct, atr,
-                     rsi_1h, macd, signal, adx,
-                     st_on,  # <— NOUVEAU paramètre: bool supertrend
-                     ema25, ema50_4h, ema200_1h, ema200_4h,
-                     vol5, vol20, vol_ratio,
-                     btc_up, eth_up,
-                     score, score_label,
-                     reasons: list[str]):
+def format_entry_msg(
+    symbol, trade_id, strategy, bot_version, entry, position_pct,
+    sl_initial, sl_dist_pct, atr,
+    rsi_1h, macd, signal, adx,
+    st_on,  # Supertrend bool
+    ema25, ema50_4h, ema200_1h, ema200_4h,
+    vol5, vol20, vol_ratio,
+    btc_up, eth_up,
+    score, score_label,
+    reasons: list[str],
+    tp_prices: list[float] | None = None   # <— AJOUT
+):
+    if tp_prices:
+        tp_str = " / ".join(
+            f"{p:.4f} ({((p - entry)/entry)*100:.2f}%)" for p in tp_prices
+        )
+    else:
+        tp_str = "+1.5% / +3% / +5% (indicatifs)"
+
     return (
         f"🟢 ACHAT | {symbol} | trade_id={trade_id}\n"
         f"⏱ UTC: {utc_now_str()} | Stratégie: {strategy} | Version: {bot_version}\n"
         f"🎯 Prix entrée: {entry:.4f} | Taille: {position_pct:.1f}%\n"
         f"🛡 Stop initial: {sl_initial:.4f} (dist: {sl_dist_pct:.2f}%) | ATR-TV(1h): {atr:.4f}\n"
-        f"🎯 TP1/TP2/TP3: +1.5% / +3% / +5% (dynamiques)\n\n"
+        f"🎯 TP1/TP2/TP3: {tp_str}\n\n"
         f"📊 Indicateurs 1H: RSI {rsi_1h:.2f} | MACD {macd:.4f}/{signal:.4f} | ADX {adx:.2f} | Supertrend {st_onoff(st_on)}\n"
         f"📈 Tendances: EMA25 {ema25:.4f} | EMA50(4h) {ema50_4h:.4f} | EMA200(1h) {ema200_1h:.4f} | EMA200(4h) {ema200_4h:.4f}\n"
         f"📦 Volume: MA5 {vol5:.0f} | MA20 {vol20:.0f} | Ratio {vol_ratio:.2f}x\n"
@@ -474,6 +484,7 @@ def format_entry_msg(symbol, trade_id, strategy, bot_version, entry, position_pc
         f"🧠 Score fiabilité: {score}/10 — {score_label}\n\n"
         f"📌 Raison d’entrée:\n- " + ("\n- ".join(reasons) if reasons else "Setup multi-confluence")
     )
+
 
 def format_tp_msg(n, symbol, trade_id, price, gain_pct, new_stop, stop_from_entry_pct, elapsed_h, action_after_tp):
     return (
@@ -770,8 +781,7 @@ def anti_spike_check_std(klines, price, atr_period=14):
 def check_spike_and_wick(symbol: str, klines_1h, price: float, mode_label="std") -> bool:
     """
     Combine anti-spike 1h et mèche haute dominante dans un seul log.
-    Retourne True si OK, False si refus.
-    Ne modifie plus indicators_soft_penalty (soft-only).
+    Retourne True si OK, False si refus (rare). Soft par défaut.
     """
     try:
         ok_spike, spike_up_pct, limit_pct = anti_spike_check_std(klines_1h, price)
@@ -780,7 +790,7 @@ def check_spike_and_wick(symbol: str, klines_1h, price: float, mode_label="std")
         if ok_spike and not wick:
             return True
 
-        # Spike légèrement au-dessus du seuil → on laisse passer (log seulement)
+        # Spike légèrement au-dessus du seuil → on laisse passer (log soft)
         if not ok_spike:
             if spike_up_pct <= (limit_pct + 0.8) or symbol in MAJORS:
                 log_refusal(
@@ -790,24 +800,17 @@ def check_spike_and_wick(symbol: str, klines_1h, price: float, mode_label="std")
                 )
                 return True
             else:
-                reasons = [f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}%"]
-        else:
-            reasons = []
+                log_refusal(symbol, "Anti-excès 1h (soft, non bloquant)",
+                            trigger=f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}%")
+                return True
 
         if wick:
-            reasons.append("mèche_haute_dominante")
+            log_refusal(symbol, "Anti-excès 1h (soft, non bloquant)", trigger="mèche_haute_dominante")
+            return True
 
-        # Log uniquement, pas de pénalité de score
-        log_refusal(symbol, "Anti-excès 1h (soft, non bloquant)", trigger=" | ".join(reasons))
-        return True  # soft: on continue quand même
-
+        return True
     except Exception:
         # fail-open
-        return True
-
-        
-    except Exception as _:
-        # En cas d’erreur, on ne bloque pas (fail–open)
         return True
 
 def confirm_15m_after_signal(symbol, breakout_level=None, ema25_1h=None):
@@ -1767,8 +1770,36 @@ async def process_symbol(symbol):
         if in_trade_std and (not klines or len(klines) < 20):
             price = get_last_price(symbol)
             if price is None:
-                await tg_send(f"⚠️ {symbol} en position (standard) mais données 1h indisponibles. Pas d’update.")
+                await tg_send(f"⚠️ {symbol} en position (standard) mais données 1h/prix indisponibles.")
                 return
+
+            entry = float(trades[symbol].get("entry", price))
+            stop  = float(trades[symbol].get("stop", trades[symbol].get("sl_initial", entry)))
+            gain  = ((price - entry) / max(entry, 1e-9)) * 100.0
+
+            # calcule la durée de position de façon tolérante
+            et = _parse_dt_flex(trades[symbol].get("time","")) or datetime.now(timezone.utc)
+            elapsed_h = (datetime.now(timezone.utc) - et).total_seconds()/3600.0
+
+            if price <= stop or gain <= -1.5:
+                event  = "STOP" if price <= stop else "SELL"
+                reason = "Stop touché" if event == "STOP" else "Perte max (-1.5%)"
+                # contexte minimal (safe) vu qu'on n'a pas les indicateurs 1h
+                ctx = {
+                    "rsi": 0, "macd": 0, "signal": 0, "adx": 0, "atr": 0, "st_on": False,
+                    "ema25": 0, "ema200": 0, "ema50_4h": 0, "ema200_4h": 0,
+                    "vol5": 0, "vol20": 0, "vol_ratio": 0,
+                    "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
+                    "elapsed_h": elapsed_h,
+                }
+                pnl_pct = compute_pnl_pct(entry, price)
+                _finalize_exit(symbol, price, pnl_pct, reason, event, ctx)
+                return
+
+            # Pas de data fiable → on ne touche rien cette itération
+            return
+
 
             # Lectures sûres
             entry = float(trades[symbol].get("entry", price))
@@ -2047,7 +2078,7 @@ async def process_symbol(symbol):
                         spike_pct = (h - max(c, o)) / max(o, 1e-9) * 100.0
                         if wick_up and spike_pct >= 0.60 and body_pct < 0.35:
                             # Prendre ce que le marché donne: on resserre agressivement le stop
-                            trades[symbol]["stop"] = max(trades[symbol].get("stop", entry), current_price * 0.995)
+                            trades[symbol]["stop"] = max(trades[symbol].get("stop", entry), price * 0.995)
                             save_trades()
   
             # [F2] ====== 4) Momentum cassé (gated & multi-confirmations) ======
@@ -2263,7 +2294,6 @@ async def process_symbol(symbol):
 
 
         supertrend_signal = supertrend_like_on_close(klines)
-        indicators_soft_penalty = 0
         reasons = []
         # Filtres de tendance avec log    
         # --- Tendance en 'soft' (on n'interdit plus)
@@ -2592,14 +2622,15 @@ async def process_symbol(symbol):
                 log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
                 reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
                 # pas de return -> on continue
-            
+
+            # ➕ ajoute les avertissements tendance s’il y en a
             if tendance_soft_notes:
                 reasons += [f"Avertissements tendance: {', '.join(tendance_soft_notes)}"]
 
-
             buy = True
-            label = "⚡ Breakout + Retest validé (1h) + Confluence"
-            reasons = [label, f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
+            label = "✅ Breakout + Retest validé (1h) + Confluence"
+            # ❗ ne PAS écraser reasons -> on le complète
+            reasons = [label] + reasons + [f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
 
         elif trend_ok and momentum_ok_eff and volume_ok:
             # Bande "retest" serrée autour de l'EMA25 (±0.2%)
@@ -2636,13 +2667,19 @@ async def process_symbol(symbol):
                     return
 
                 if price > ema25 * 1.08:
-                    log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
-                    reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
-                    # pas de return -> on continue
+                log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
+                reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
+                # pas de return -> on continue
 
-                buy = True
-                label = "✅ Pullback EMA25 propre + Confluence"
-                reasons = [label, f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
+            # ➕ mêmes avertissements
+            if tendance_soft_notes:
+                reasons += [f"Avertissements tendance: {', '.join(tendance_soft_notes)}"]
+
+            buy = True
+            label = "✅ Pullback EMA25 propre + Confluence"
+            # ❗ on conserve ce qui a été accumulé
+            reasons = [label] + reasons + [f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
+
 
         # [#patch-prebreakout]
         if not buy:
@@ -2694,35 +2731,44 @@ async def process_symbol(symbol):
         if buy and symbol not in trades:
             trade_id = make_trade_id(symbol)
 
-            # 🔁 réutilise le stop calculé plus haut pour le sizing
-            sl_initial = sl_initial   # <= au lieu de recalculer avec pick_sl_pct(...)
+            # ATR au moment de l'entrée (sécurisé)
+            atr_entry = float(atr) if atr else float(atr_tv(klines))
+            tp_mults  = TP_ATR_MULTS_STD
+            tp_prices = [float(price + m * atr_entry) for m in tp_mults]
+
+            # 🔁 on réutilise le stop calculé plus haut pour le sizing
+            sl_initial = sl_initial
 
             trades[symbol] = {
                 "entry": price,
                 "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
                 "confidence": confidence,
                 "stop": sl_initial,
-                "position_pct": position_pct,    # <- issu du sizing au risque
+                "position_pct": position_pct,    # <- sizing au risque
                 "trade_id": trade_id,
                 "tp_times": {},
                 "sl_initial": sl_initial,
                 "reason_entry": "; ".join(reasons) if reasons else "",
                 "strategy": "standard",
-                "atr_at_entry": atr_tv(klines),
-                "tp_multipliers": TP_ATR_MULTS_STD,
+                "atr_at_entry": atr_entry,
+                "tp_multipliers": tp_mults,
+                "tp_prices": tp_prices,          # <-- stocke les niveaux réels
             }
             last_trade_time[symbol] = datetime.now(timezone.utc)
             save_trades()
 
             msg = format_entry_msg(
                 symbol, trade_id, "standard", BOT_VERSION, price, position_pct,
-                sl_initial, ((price - sl_initial) / price) * 100, atr,
+                sl_initial, ((price - sl_initial) / price) * 100.0, atr_entry,
                 rsi, macd, signal, adx_value, supertrend_signal,
                 ema25, ema50_4h, ema200, ema200_4h,
-                np.mean(volumes[-5:]), np.mean(volumes[-20:]),
-                np.mean(volumes[-5:]) / max(np.mean(volumes[-20:]), 1e-9),
+                float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0,
+                float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0,
+                (float(np.mean(volumes[-5:])) / max(float(np.mean(volumes[-20:])), 1e-9))
+                    if len(volumes) >= 20 else 0.0,
                 btc_up, eth_up,
-                confidence, label_conf, reasons
+                confidence, label_conf, reasons,
+                tp_prices=tp_prices            # <-- affiche les TP réels dans le message
             )
             await tg_send(msg)
             log_trade(symbol, "BUY", price)
