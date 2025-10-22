@@ -1824,13 +1824,15 @@ async def process_symbol(symbol):
             need = max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d)
 
             if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < need:
-                # 👉 ADX "early" (on l'utilise seulement pour ajuster le seuil override)
+                # ADX "early" (on l'utilise seulement pour ajuster le seuil override)
                 try:
                     adx_early = adx_tv(klines, 14)
                 except Exception:
                     adx_early = 0.0
-                # OVERRIDE dynamique : 0.55× pour majors ou ADX>=24, sinon 0.60×
-                override_thr = 0.55 if (symbol in MAJORS or adx_value >= 24) else 0.60
+
+                # OVERRIDE dynamique : 0.55x pour majors OU si ADX>=24, sinon 0.60x
+                override_thr = 0.55 if (symbol in MAJORS or adx_early >= 24) else 0.60
+
                 if vol_ratio_15m >= override_thr:
                     log_info(
                         symbol,
