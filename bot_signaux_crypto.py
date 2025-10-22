@@ -2667,9 +2667,9 @@ async def process_symbol(symbol):
                     return
 
                 if price > ema25 * 1.08:
-                log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
-                reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
-                # pas de return -> on continue
+                    log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
+                    reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
+                    # pas de return -> on continue
 
             # ➕ mêmes avertissements
             if tendance_soft_notes:
