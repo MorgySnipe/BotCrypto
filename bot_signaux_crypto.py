@@ -236,6 +236,34 @@ EARLY_SCRATCH_MAX_MIN_STD = 25   # minutes post-entrée
 from typing import Final
 MAJORS: Final = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"}
 
+# [#patch-universe]
+def refresh_symbols_top_usdt(n=16, min_quote_vol=20_000_000):
+    """
+    Met SYMBOLS = top paires USDT par volume (hors tokens levier), en gardant les majors.
+    """
+    try:
+        data = binance_get("/api/v3/ticker/24hr")
+        if not data:
+            return
+        picks = []
+        for d in data:
+            s = d.get("symbol", "")
+            if not s.endswith("USDT"):
+                continue
+            if any(x in s for x in ("UPUSDT","DOWNUSDT","BULL","BEAR","5L","5S","3L","3S","USDCUSDT","BUSDUSDT")):
+                continue
+            qv = float(d.get("quoteVolume", 0.0))
+            if qv >= min_quote_vol:
+                picks.append((s, qv))
+        picks.sort(key=lambda x: x[1], reverse=True)
+        top = [s for s, _ in picks[:n]]
+        for m in ("BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT"):
+            if m not in top:
+                top.insert(0, m)
+        SYMBOLS[:] = top
+    except Exception:
+        pass
+
 def allowed_trade_slots(strategy: str | None = None) -> int:
     # Illimité
     return 10**9
@@ -2313,17 +2341,31 @@ async def process_symbol(symbol):
             log_refusal(symbol, "Supertrend 1h non haussier (signal=False)")
             return
 
-        # [PATCH-COOLDOWN std] — le cooldown ne bloque que les nouvelles entrées
+        # [PATCH-COOLDOWN std] — override si pré-breakout + flux court-terme
         if (symbol in last_trade_time) and (not in_trade):
             cooldown_left_h = COOLDOWN_HOURS - (datetime.now(timezone.utc) - last_trade_time[symbol]).total_seconds() / 3600
             if cooldown_left_h > 0:
-                log_refusal(
-                    symbol,
-                    "Cooldown actif",
-                    cooldown_left_min=int(cooldown_left_h * 60)
-                )
-                return
-            
+                # Pré-breakout : close très proche du plus-haut des 10 dernières bougies 1h
+                try:
+                    hh10 = max(highs[-11:-1])  # exclut la bougie en cours
+                except Exception:
+                    hh10 = None
+                pre_breakout = (hh10 is not None) and (closes[-1] >= hh10 * 0.997)  # ≤0,3% sous le level
+
+                # Flux/tendance requis pour lever le cooldown
+                strong_flow = (adx_value >= 26 and supertrend_signal and vol_ratio_15m >= 0.70)
+
+                if pre_breakout and strong_flow:
+                    log_info(symbol, f"Cooldown override: pré-breakout + flux (reste {cooldown_left_h:.2f}h)")
+                    # pas de return -> l’entrée reste possible
+                else:
+                    log_refusal(
+                        symbol,
+                        "Cooldown actif",
+                        cooldown_left_min=int(cooldown_left_h * 60)
+                    )
+                    return
+
         # aucune limite de positions simultanées (standard)
         pass
 
@@ -2374,10 +2416,8 @@ async def process_symbol(symbol):
         dist_ema25 = (price / max(ema25, 1e-9) - 1.0)
         EXCESS_HARD = (rsi >= RSI_HARD_STD) and (dist_ema25 >= DIST_EMA25_HARD_STD)
         if EXCESS_HARD:
-            # tendance forte multi-TF → on requalifie en soft sur high-liq/majors
             st_on_now = supertrend_like_on_close(klines)
-            # c4/ema50_4h/ema200_4h doivent avoir été calculés plus haut (4h)
-            STRONG_TREND = (adx_value >= 28 and st_on_now and c4[-1] > ema50_4h and ema50_4h > ema200_4h)
+            STRONG_TREND = (adx_value >= 28 and st_on_now and closes_4h[-1] > ema50_4h and ema50_4h > ema200_4h)
             HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
             if (symbol in MAJORS or symbol in HIGH_LIQ) and STRONG_TREND:
                 log_info(symbol, "Anti-excès 1h (hard) relâché (trend fort high-liq) → pénalité soft")
@@ -2419,7 +2459,8 @@ async def process_symbol(symbol):
         vol_ma10 = float(np.mean(vols15[-11:-1]))
         vol_ratio_15m = vol_now / max(vol_ma10, 1e-9)
 
-        min_ratio15 = 0.45 if symbol in MAJORS else VOL15M_MIN_RATIO
+        # [#patch-vol15m-dyn]
+        min_ratio15 = 0.40 if (symbol in MAJORS or adx_value >= 24 or btc_is_bullish_strong()) else VOL15M_MIN_RATIO
         if vol_ratio_15m < min_ratio15:
             log_refusal(symbol, f"Vol 15m faible (soft): {vol_ratio_15m:.2f}")
             reasons += [f"⚠️ Vol15m {vol_ratio_15m:.2f} (soft)"]
@@ -2433,6 +2474,16 @@ async def process_symbol(symbol):
         ) and supertrend_signal
 
         momentum_ok = (macd > signal) and (rsi >= 55) and (hist_now >= hist_prev)
+
+        # [#patch-momentum-loose]
+        rs_vs_btc = rel_strength_vs_btc(symbol, klines_1h_alt=klines)  # ALT-BTC sur 3h
+        momentum_ok_loose = (
+            ((macd > signal) and (rsi >= 53)) or
+            ((hist_now > hist_prev) and (rsi >= 54)) or
+            ((macd > signal) and (adx_value >= 22) and (rs_vs_btc >= 0.003))  # +0.3% vs BTC sur ~3h
+        )
+        # on n’accepte le "loose" que s’il y a déjà du flux court-terme
+        momentum_ok_eff = momentum_ok or (momentum_ok_loose and vol_ratio_15m >= 0.50)
 
         indicators = {
             "rsi": rsi,
@@ -2513,7 +2564,7 @@ async def process_symbol(symbol):
 
         buy = False
 
-        if brk_ok and trend_ok and momentum_ok and volume_ok:
+        if brk_ok and trend_ok and momentum_ok_eff and volume_ok:
             # Filtre 15m avec niveau de breakout
             tol_struct = 0.0022 if (symbol in MAJORS or adx_value >= 22) else 0.0017
             n_struct   = 2 if (symbol in MAJORS or adx_value >= 22) else 3
@@ -2550,10 +2601,12 @@ async def process_symbol(symbol):
             label = "⚡ Breakout + Retest validé (1h) + Confluence"
             reasons = [label, f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
 
-        elif trend_ok and momentum_ok and volume_ok:
+        elif trend_ok and momentum_ok_eff and volume_ok:
             # Bande "retest" serrée autour de l'EMA25 (±0.2%)
-            RETEST_BAND_STD = 0.006 if symbol in MAJORS else 0.005
-            near_ema25 = (abs(price - ema25) / max(ema25, 1e-9)) <= RETEST_BAND_STD
+            # [#patch-retest-adapt]
+            RETEST_BAND_BASE = 0.006 if symbol in MAJORS else 0.005
+            RETEST_BAND = RETEST_BAND_BASE + (0.002 if (adx_value >= 26 or vol_ratio_15m >= 0.70) else 0.0)
+            near_ema25 = (abs(price - ema25) / max(ema25, 1e-9)) <= RETEST_BAND
             candle_ok = (abs(highs[-1] - lows[-1]) / max(lows[-1], 1e-9)) <= 0.038
 
             if near_ema25 and candle_ok:
@@ -2590,6 +2643,27 @@ async def process_symbol(symbol):
                 buy = True
                 label = "✅ Pullback EMA25 propre + Confluence"
                 reasons = [label, f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
+
+        # [#patch-prebreakout]
+        if not buy:
+            # niveau potentiel = plus-haut lookback (même base que breakout)
+            level_pb = max(highs[-(10+2):-2]) if len(highs) >= 12 else None
+            if level_pb:
+                close_gap = (level_pb - closes[-1]) / max(level_pb, 1e-9)
+                strong_ctx = (trend_ok and momentum_ok_eff and vol_ratio_15m >= 0.70 and adx_value >= 22)
+                if 0.0 <= close_gap <= 0.0032 and strong_ctx:  # ≤0.32% sous le niveau
+                    # filtre 15m avec le level pour éviter la chasse
+                    tol_struct = 0.0022 if (symbol in MAJORS or adx_value >= 22) else 0.0017
+                    n_struct   = 2 if (symbol in MAJORS or adx_value >= 22) else 3
+                    ok15, det15 = check_15m_filter(k15, breakout_level=level_pb, n_struct=n_struct, tol_struct=tol_struct)
+                    if ok15 and confirm_15m_after_signal(symbol, breakout_level=level_pb, ema25_1h=ema25):
+                        buy = True
+                        reasons = ["🎯 Pré-breakout (≤0.3% du level) + flux 15m", f"ADX {adx_value:.1f}", "Confluence multi-TF"]
+                        # prudence : taille un poil réduite
+                        try:
+                            position_pct = max(POS_MIN_PCT, min(position_pct * 0.85, POS_MAX_PCT))
+                        except Exception:
+                            pass
 
         # ===== Patch 4 — score minimum (standard) assoupli & non bloquant =====
         SCORE_MIN_STD = 3
@@ -2752,6 +2826,7 @@ async def main_loop():
     last_heartbeat = None
     last_summary_day = None
     last_audit_day = None
+    last_symbol_refresh_day = None
 
     while True:
         try:
@@ -2767,6 +2842,11 @@ async def main_loop():
             if now.hour == 23 and (last_summary_day is None or last_summary_day != now.date()):
                 await send_daily_summary()
                 last_summary_day = now.date()
+
+            # Refresh watchlist 1x/jour (00:05 UTC)
+            if (last_symbol_refresh_day is None or last_symbol_refresh_day != now.date()) and now.hour == 0 and now.minute >= 5:
+                refresh_symbols_top_usdt(n=16, min_quote_vol=20_000_000)
+                last_symbol_refresh_day = now.date()
 
             # --- préchargement multi-TF ---
             symbol_cache.clear()
