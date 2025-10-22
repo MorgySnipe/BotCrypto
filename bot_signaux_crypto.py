@@ -160,7 +160,7 @@ SYMBOLS = [
 ]
 INTERVAL = '1h'
 LIMIT = 100
-TF_LIST = [("1h", 750), ("4h", 300), ("15m", 200), ("5m", 120)]
+TF_LIST = [("1h", 750), ("4h", 300), ("15m", 200), ("5m", 120), ("1m", 200)]
 SLEEP_SECONDS = 300
 MAX_TRADES = 7
 MIN_VOLUME = 600000
@@ -1800,47 +1800,6 @@ async def process_symbol(symbol):
             # Pas de data fiable → on ne touche rien cette itération
             return
 
-
-            # Lectures sûres
-            entry = float(trades[symbol].get("entry", price))
-            # stop fallback : stop > sl_initial > petit filet basé sur INIT_SL_PCT_STD_MIN
-            stop = float(trades[symbol].get(
-                "stop",
-                trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN))
-            ))
-
-            gain = ((price - entry) / max(entry, 1e-9)) * 100.0
-
-            # Parsing d’heure d’entrée tolérant (UTC-aware)
-            et = trades[symbol].get("time", "")
-            entry_time = _parse_dt_flex(et) or datetime.now(timezone.utc)
-
-            # Sortie de sécurité si stop/perte max touchés
-            if price <= trades[symbol]["stop"] or gain <= -1.5:
-                event  = "STOP" if price <= trades[symbol]["stop"] else "SELL"
-                reason = "Stop touché" if event == "STOP" else "Perte max (-1.5%)"
-
-                # Contexte compact pour le message / CSV
-                vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
-                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
-                entry_time = _parse_dt_flex(trades[symbol].get("time","")) or datetime.now(timezone.utc)
-
-                ctx = {
-                    "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
-                    "atr": atr, "st_on": supertrend_signal,
-                    "ema25": ema25, "ema200": ema200,
-                    "ema50_4h": ema50_4h, "ema200_4h": ema200_4h,
-                    "vol5": vol5_loc, "vol20": vol20_loc,
-                    "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
-                    "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
-                    "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
-                    "elapsed_h": (datetime.now(timezone.utc) - entry_time).total_seconds() / 3600.0,
-                }
-
-                pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
-                _finalize_exit(symbol, price, pnl_pct, reason, event, ctx)
-                return
-
         # --- Volume 1h vs médiane 30j (robuste & borné) ---
         vol_now_1h = float(klines[-1][7])
 
@@ -1865,11 +1824,12 @@ async def process_symbol(symbol):
             need = max(MIN_VOLUME_ABS, VOL_MED_MULT_EFF * med_30d)
 
             if symbol != "BTCUSDT" and med_30d > 0 and vol_now_1h < need:
-                # OVERRIDE : si le 15m est ≥ 0.60×, on passe en soft (pas de return)
-                if vol_ratio_15m >= 0.60:
+                # OVERRIDE dynamique : 0.55× pour majors ou ADX>=24, sinon 0.60×
+                override_thr = 0.55 if (symbol in MAJORS or adx_value >= 24) else 0.60
+                if vol_ratio_15m >= override_thr:
                     log_info(
                         symbol,
-                        f"Volume 1h faible vs med30j mais 15m OK ({vol_ratio_15m:.2f}) => soft"
+                        f"Volume 1h < med30j mais 15m OK ({vol_ratio_15m:.2f}≥{override_thr:.2f}) → soft"
                     )
                     indicators_soft_penalty += 1
                 else:
@@ -1878,6 +1838,7 @@ async def process_symbol(symbol):
                         f"Volume 1h trop faible vs med30j ({vol_now_1h:.0f} < {VOL_MED_MULT_EFF:.2f}×{med_30d:.0f})"
                     )
                     return
+
         else:
             # Fallback si on n'a pas assez d'historique pour la médiane 30j
             if vol_now_1h < MIN_VOLUME_ABS and vol_ratio_15m < 0.60:
@@ -1911,7 +1872,7 @@ async def process_symbol(symbol):
         rsi_series = rsi_tv_series(closes, period=14)
         macd, signal = compute_macd(closes)      # MACD EMA/EMA
         ema200 = ema_tv(closes, 200)
-        atr = atr_tv(klines, period=14)
+        atr = atr_tv_cached(symbol, klines, period=14)
         adx_value = adx_tv(klines, period=14)
         ema25 = ema_tv(closes, 25)
         supertrend_signal = supertrend_like_on_close(klines)
@@ -1938,7 +1899,7 @@ async def process_symbol(symbol):
             # [F1] === TP dynamiques (STANDARD) — même logique que 'aggressive' ===
             if "tp_times" not in trades[symbol]:
                 trades[symbol]["tp_times"] = {}
-            atr_val_current = atr_tv(klines)  # ATR 1h actuel
+            atr_val_current = atr_tv_cached(symbol, klines)  # ATR 1h actuel (cache)
             for tp_idx, atr_mult in enumerate(TP_ATR_MULTS_STD, start=1):
                 threshold_pct = (atr_mult * atr_val_current / max(entry, 1e-9)) * 100.0
                 if gain >= threshold_pct and not trades[symbol].get(f"tp{tp_idx}", False):
@@ -2366,10 +2327,16 @@ async def process_symbol(symbol):
             except NameError:
                 pass
 
-        # Supertrend reste obligatoire
+        # Supertrend reste obligatoire, SAUF si contexte fort (ADX + flux 15m)
         if not supertrend_signal:
-            log_refusal(symbol, "Supertrend 1h non haussier (signal=False)")
-            return
+            if (adx_value >= 26 and vol_ratio_15m >= 0.60):
+                # on laisse passer mais on pénalise le score (soft)
+                indicators_soft_penalty += 1
+                log_info(symbol, "ST OFF mais ADX fort + flux 15m → soft gate")
+            else:
+                log_refusal(symbol, "Supertrend 1h non haussier (signal=False)")
+                if not in_trade:  # autorise la gestion d'une position ouverte
+                    return
 
         # [PATCH-COOLDOWN std] — override si pré-breakout + flux court-terme
         if (symbol in last_trade_time) and (not in_trade):
@@ -2614,12 +2581,12 @@ async def process_symbol(symbol):
                         return
 
             if not confirm_15m_after_signal(symbol, breakout_level=br_level, ema25_1h=ema25):
-                log_refusal(symbol, "Anti-chasse: ...")
+                log_refusal(symbol, "Anti-chasse: pas de double close 15m au-dessus du level/EMA25 1h")
                 if not in_trade:
                     return
                     
             if price > ema25 * 1.08:
-                log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
+                log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.08 ({ema25*1.08:.4f})")
                 reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
                 # pas de return -> on continue
 
@@ -2667,7 +2634,7 @@ async def process_symbol(symbol):
                     return
 
                 if price > ema25 * 1.08:
-                    log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.05 ({ema25*1.05:.4f})")
+                    log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.08 ({ema25*1.08:.4f})")
                     reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
                     # pas de return -> on continue
 
@@ -2732,7 +2699,7 @@ async def process_symbol(symbol):
             trade_id = make_trade_id(symbol)
 
             # ATR au moment de l'entrée (sécurisé)
-            atr_entry = float(atr) if atr else float(atr_tv(klines))
+            atr_entry = float(atr) if atr else float(atr_tv_cached(symbol, klines))
             tp_mults  = TP_ATR_MULTS_STD
             tp_prices = [float(price + m * atr_entry) for m in tp_mults]
 
