@@ -1830,6 +1830,17 @@ async def process_symbol(symbol):
                 except Exception:
                     adx_early = 0.0
 
+                # --- HARD GATE ADX ---
+                IS_MAJOR = symbol in MAJORS
+                if adx_value < 22 and not IS_MAJOR:
+                    log_refusal(symbol, f"ADX trop faible (hard): {adx_value:.1f} < 22")
+                    return
+                # Majors: tolérance si petit flux court-terme
+                if IS_MAJOR and adx_value < 20:
+                    log_refusal(symbol, f"ADX trop faible major (soft): {adx_value:.1f}")
+                    # on continue mais avec pénalité
+                    indicators_soft_penalty += 1
+
                 # OVERRIDE dynamique : 0.55x pour majors OU si ADX>=24, sinon 0.60x
                 override_thr = 0.55 if (symbol in MAJORS or adx_early >= 24) else 0.60
 
@@ -2185,6 +2196,23 @@ async def process_symbol(symbol):
                 stop_hit = confirm_stop_breach_1m(symbol, trades[symbol]["stop"],
                                       n=VSTOP_CONFIRM_1M_N, tol_pct=VSTOP_TOLERANCE_PCT)
 
+            # --- Confirmation stop 1m (majors, anti-mèche) ---
+            if stop_hit and (symbol in MAJORS):
+                stop_hit = confirm_stop_breach_1m(
+                    symbol,
+                    trades[symbol]["stop"],
+                    n=VSTOP_CONFIRM_1M_N,
+                    tol_pct=VSTOP_TOLERANCE_PCT
+                )
+
+            # Si le stop n'est PAS confirmé en 1m pour une major, on annule la sortie "STOP".
+            # (On NE touche pas à la sortie "perte max".)
+            if (not stop_hit) and (gain > -1.5):
+                log_info(symbol, "Stop 1m non confirmé (major) — sortie annulée")
+                return
+            # --- fin confirmation stop 1m (majors) ---
+
+
             if stop_hit or gain <= -1.5:
                 event  = "STOP" if stop_hit else "SELL"
                 reason = "Stop touché" if stop_hit else "Perte max (-1.5%)"
@@ -2262,6 +2290,23 @@ async def process_symbol(symbol):
 
 
         supertrend_signal = supertrend_like_on_close(klines)
+
+        # [FILTER] Anti-entrée tardive (RSI chaud + vol15m faible)
+        # Appliqué uniquement pour une nouvelle entrée (pas en gestion de position) et hors majors
+        if (not in_trade) and (symbol not in MAJORS):
+            try:
+                # 'vol_ratio_15m' a déjà été calculé plus haut ; on s'en sert tel quel
+                if (rsi >= 66.0) and (vol_ratio_15m < 0.50):
+                    log_refusal(
+                        symbol,
+                        "Anti-entrée tardive: RSI≥66 & vol15m<0.50 (non-major)",
+                        trigger=f"rsi={rsi:.1f}, vol15m={vol_ratio_15m:.2f}x"
+                    )
+                    return
+            except Exception:
+                # fail-open défensif
+                pass
+
         reasons = []
         # Filtres de tendance avec log    
         # --- Tendance en 'soft' (on n'interdit plus)
@@ -2277,6 +2322,18 @@ async def process_symbol(symbol):
         if price < ema200:          indicators_soft_penalty += 1
         if closes_4h[-1] < ema50_4h: indicators_soft_penalty += 1
         if closes_4h[-1] < ema200_4h: indicators_soft_penalty += 1
+
+        # [GATE-200/4H] — hard gate si 1h<EMA200 ET 4h pas en tendance (sauf override flux fort)
+        weak_1h = price < ema200 * 0.997
+        weak_4h = not (closes_4h[-1] > ema50_4h and ema50_4h > ema200_4h)
+
+        # override si major + flux court-terme solide
+        override_flow = (symbol in MAJORS and adx_value >= 28 and vol_ratio_15m >= 0.55)
+
+        if weak_1h and weak_4h and not override_flow:
+            log_refusal(symbol, "Gate 200/4h: structure faible (hard)")
+            if not in_trade:
+                return
 
         if is_market_range(closes_4h):
             log_info(symbol, "Marché en range (soft) → pénalité")
@@ -2345,30 +2402,46 @@ async def process_symbol(symbol):
                 if not in_trade:  # autorise la gestion d'une position ouverte
                     return
 
-        # [PATCH-COOLDOWN std] — override si pré-breakout + flux court-terme
+        # [PATCH-COOLDOWN v2] — override SEULEMENT si pré-breakout + flux très solide
         if (symbol in last_trade_time) and (not in_trade):
-            cooldown_left_h = COOLDOWN_HOURS - (datetime.now(timezone.utc) - last_trade_time[symbol]).total_seconds() / 3600
+            now_utc = datetime.now(timezone.utc)
+            elapsed_min = (now_utc - last_trade_time[symbol]).total_seconds() / 60.0
+            cooldown_left_h = COOLDOWN_HOURS - (elapsed_min / 60.0)
             if cooldown_left_h > 0:
-                # Pré-breakout : close très proche du plus-haut des 10 dernières bougies 1h
+                # 1) Pré-breakout: close ≤0,15% sous le plus haut des 10 dernières bougies (hors bougie courante)
                 try:
-                    hh10 = max(highs[-11:-1])  # exclut la bougie en cours
+                    hh10 = max(highs[-11:-1]) if len(highs) >= 11 else None
                 except Exception:
                     hh10 = None
-                pre_breakout = (hh10 is not None) and (closes[-1] >= hh10 * 0.997)  # ≤0,3% sous le level
+                pre_breakout = bool(hh10) and (closes[-1] >= hh10 * 0.9985)
 
-                # Flux/tendance requis pour lever le cooldown
-                strong_flow = (adx_value >= 26 and supertrend_signal and vol_ratio_15m >= 0.70)
+                # 2) Flux / contexte (15m + 1h + 4h + marché)
+                vol5 = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                vol20 = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                vol_ratio_1h = (vol5 / max(vol20, 1e-9)) if vol20 else 0.0
 
-                if pre_breakout and strong_flow:
-                    log_info(symbol, f"Cooldown override: pré-breakout + flux (reste {cooldown_left_h:.2f}h)")
-                    # pas de return -> l’entrée reste possible
+                strong_adx   = adx_value >= (26 if symbol in MAJORS else 28)
+                trend_ok_1h  = (price >= ema25 >= ema200) and supertrend_signal
+                trend_ok_4h  = (closes_4h[-1] >= ema50_4h * 0.998)  # tolérance si 4h pas encore > EMA200
+                market_ok    = MARKET_STATE.get("btc", {}).get("up", False) or MARKET_STATE.get("eth", {}).get("up", False)
+
+                strong_flow = (
+                    strong_adx and
+                    vol_ratio_15m >= 0.75 and
+                    vol_ratio_1h  >= 1.10 and
+                    trend_ok_1h and trend_ok_4h and market_ok
+                )
+
+                # 3) Hard floor: jamais d’override dans les 10 premières minutes post-sortie
+                hard_floor = (elapsed_min < 10.0)
+
+                if pre_breakout and strong_flow and not hard_floor:
+                    log_info(symbol, f"Cooldown override v2: pré-breakout + flux fort (reste {cooldown_left_h:.2f}h)")
+                     # pas de return -> on autorise l'entrée
                 else:
-                    log_refusal(
-                        symbol,
-                        "Cooldown actif",
-                        cooldown_left_min=int(cooldown_left_h * 60)
-                    )
+                    log_refusal(symbol, "Cooldown actif", cooldown_left_min=int(cooldown_left_h * 60))
                     return
+
 
         # aucune limite de positions simultanées (standard)
         pass
@@ -2462,6 +2535,14 @@ async def process_symbol(symbol):
         vol_now = float(k15[-2][7])
         vol_ma10 = float(np.mean(vols15[-11:-1]))
         vol_ratio_15m = vol_now / max(vol_ma10, 1e-9)
+
+        # --- VOLUME 15m MIN DUR (dynamique simplifiée) ---
+        IS_HIGH_LIQ = symbol in {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","LINKUSDT","DOGEUSDT"}
+        min_ratio15 = 0.45 if (IS_HIGH_LIQ or IS_MAJOR) else 0.55
+
+        if vol_ratio_15m < min_ratio15:
+            log_refusal(symbol, f"Vol 15m insuffisant (hard): {vol_ratio_15m:.2f} < {min_ratio15:.2f}")
+            return
 
         # [#patch-vol15m-dyn]
         min_ratio15 = 0.40 if (symbol in MAJORS or adx_value >= 24 or btc_is_bullish_strong()) else VOL15M_MIN_RATIO
