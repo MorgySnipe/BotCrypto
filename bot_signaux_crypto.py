@@ -58,7 +58,46 @@ CSV_AUDIT_FILE   = os.path.join(DATA_DIR, "trade_audit.csv")
 HISTORY_FILE     = os.path.join(DATA_DIR, "history.json")
 file_lock = threading.Lock()
 REFUSAL_LOG_FILE = os.path.join(DATA_DIR, "refusal_log.csv")
+# === Anti-spam Telegram (refusals) ===
+REFUSAL_MAX_PER_ITER = int(os.getenv("REFUSAL_MAX_PER_ITER", "2"))   # quota / symbole / itération
+REFUSAL_COOLDOWN_S   = int(os.getenv("REFUSAL_COOLDOWN_S", "900"))   # 15 min par (symbole, raison)
+REFUSAL_NOTIFY       = os.getenv("REFUSAL_NOTIFY", "0")              # "1" pour activer l’envoi Telegram des refus
+REFUSAL_COOLDOWN_CACHE = {}  # {(symbol, reason): datetime UTC}
+ITER_REFUSAL_COUNT     = {}  # {symbol: int} — remis à zéro à chaque itération
 LOG_FILE         = os.path.join(DATA_DIR, "trade_log.csv")
+# === Feature Flags (ENV) ===
+def _env_bool(key: str, default: str = "1") -> bool:
+    return os.getenv(key, default) == "1"
+
+def _env_float(key: str, default: float):
+    try:
+        v = os.getenv(key, None)
+        return float(v) if v is not None else float(default)
+    except Exception:
+        return float(default)
+
+# Activer/désactiver des garde-fous sans redeploy
+ENABLE_FAST_EXIT_5M      = _env_bool("ENABLE_FAST_EXIT_5M", "1")
+ENABLE_BTC_REGIME_BLOCK  = _env_bool("ENABLE_BTC_REGIME_BLOCK", "1")
+ENABLE_GATE_200_4H       = _env_bool("ENABLE_GATE_200_4H", "1")
+ENABLE_ANTI_EXCESS       = _env_bool("ENABLE_ANTI_EXCESS", "1")
+
+# Overrides numériques (gros seuils)
+try:
+    VOL15M_MIN_RATIO = _env_float("VOL15M_MIN_RATIO", VOL15M_MIN_RATIO)
+except NameError:
+    VOL15M_MIN_RATIO = _env_float("VOL15M_MIN_RATIO", 0.50)
+
+try:
+    RSI_HARD_STD = _env_float("RSI_HARD_STD", RSI_HARD_STD)
+except NameError:
+    RSI_HARD_STD = _env_float("RSI_HARD_STD", 74.0)
+
+try:
+    DIST_EMA25_HARD_STD = _env_float("DIST_EMA25_HARD_STD", DIST_EMA25_HARD_STD)
+except NameError:
+    DIST_EMA25_HARD_STD = _env_float("DIST_EMA25_HARD_STD", 0.05)
+
 
 
 nest_asyncio.apply()
@@ -612,6 +651,35 @@ async def tg_send(text: str, chat_id: int = CHAT_ID):
 
     print("[tg_send] échec après retries")
     return False
+
+def _can_send_refusal_now(symbol: str, reason: str, now=None):
+    now = now or datetime.now(timezone.utc)
+    # Quota par itération et par symbole
+    cnt = ITER_REFUSAL_COUNT.get(symbol, 0)
+    if cnt >= REFUSAL_MAX_PER_ITER:
+        return False, "quota"
+    # Cooldown par (symbole, raison)
+    last = REFUSAL_COOLDOWN_CACHE.get((symbol, reason))
+    if last and (now - last).total_seconds() < REFUSAL_COOLDOWN_S:
+        return False, "cooldown"
+    return True, ""
+
+async def send_refusal_guarded(symbol: str, reason: str, trigger: str = "") -> bool:
+    """
+    Envoie un message de refus sur Telegram si le quota/cooldown le permet.
+    Toujours en log CSV via log_refusal; ceci gère uniquement l'envoi TG optionnel.
+    """
+    ok, _why = _can_send_refusal_now(symbol, reason)
+    if not ok:
+        return False
+    ITER_REFUSAL_COUNT[symbol] = ITER_REFUSAL_COUNT.get(symbol, 0) + 1
+    REFUSAL_COOLDOWN_CACHE[(symbol, reason)] = datetime.now(timezone.utc)
+    parts = [f"🚧 Refus {symbol}: {reason}"]
+    if trigger:
+        parts.append(f"— {trigger}")
+    await tg_send(" ".join(parts))
+    return True
+
 
 async def tg_send_doc(path: str, caption: str = "", chat_id: int = CHAT_ID):
     """Envoi simple de fichier Telegram (sans anti-flood)."""
@@ -1391,6 +1459,11 @@ def log_refusal(symbol: str, reason: str, trigger: str = "", cooldown_left_min: 
     - trigger : valeur déclenchante (ex. 'adx=17.8', 'vol15_ratio=1.12', 'dist_ema25=2.4%')
     - cooldown_left_min : minutes restantes de cooldown si pertinent
     Écriture protégée par file_lock pour éviter les interférences.
+
+    ⚠️ Si REFUSAL_NOTIFY == "1", tente un envoi Telegram anti-spam
+       via send_refusal_guarded(symbol, reason, trigger) :
+       - quota par itération/symbole (REFUSAL_MAX_PER_ITER)
+       - cooldown par (symbole, raison) (REFUSAL_COOLDOWN_S)
     """
     try:
         row = {
@@ -1411,8 +1484,19 @@ def log_refusal(symbol: str, reason: str, trigger: str = "", cooldown_left_min: 
                     w.writeheader()
                 w.writerow(row)
                 f.flush()  # pousse sur disque tout de suite
+
+        # --- Envoi Telegram optionnel (protégé par quota/cooldown) ---
+        if REFUSAL_NOTIFY == "1":
+            try:
+                # Non-bloquant pour la loop principale
+                asyncio.create_task(send_refusal_guarded(symbol, reason, trigger))
+            except Exception:
+                # on ne casse jamais la logique de log en cas d'erreur d'envoi
+                pass
+
     except Exception as e:
         print("[log_refusal] err:", e)
+
 
 def log_info(symbol: str, reason: str, trigger: str = ""):
     # log "neutre" (juste en console) pour info/diagnostic
@@ -1800,6 +1884,26 @@ async def process_symbol(symbol):
             # Pas de data fiable → on ne touche rien cette itération
             return
 
+        # --- Indicateurs (versions TradingView) — calculés AVANT tout usage (⚠️ adx_value) ---
+        closes  = [float(k[4]) for k in klines]
+        highs   = [float(k[2]) for k in klines]
+        lows    = [float(k[3]) for k in klines]
+        volumes = volumes_series(klines, quote=True)
+        price   = get_last_price(symbol)
+        if price is None:
+            log_refusal(symbol, "API prix indisponible")
+            if not in_trade:
+                return
+
+        rsi         = rsi_tv(closes, period=14)
+        rsi_series  = rsi_tv_series(closes, period=14)
+        macd, signal= compute_macd(closes)
+        ema200      = ema_tv(closes, 200)
+        atr         = atr_tv_cached(symbol, klines, period=14)
+        adx_value   = adx_tv(klines, period=14)
+        ema25       = ema_tv(closes, 25)
+        supertrend_signal = supertrend_like_on_close(klines)
+
         # --- Volume 1h vs médiane 30j (robuste & borné) ---
         vol_now_1h = float(klines[-1][7])
 
@@ -1872,29 +1976,6 @@ async def process_symbol(symbol):
                 )
                 return
 
-
-        closes = [float(k[4]) for k in klines]
-        highs = [float(k[2]) for k in klines]
-        lows = [float(k[3]) for k in klines]
-        volumes = volumes_series(klines, quote=True)
-        # moyennes de volume 1h (USDT) – safe si série courte
-        vol5  = float(np.mean(volumes[-5:]))  if len(volumes)  >= 5  else 0.0
-        vol20 = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
-        price = get_last_price(symbol)
-        if price is None:
-            log_refusal(symbol, "API prix indisponible")
-            if not in_trade:
-                return
-        # --- Indicateurs (versions TradingView) ---
-        rsi = rsi_tv(closes, period=14)
-        rsi_series = rsi_tv_series(closes, period=14)
-        macd, signal = compute_macd(closes)      # MACD EMA/EMA
-        ema200 = ema_tv(closes, 200)
-        atr = atr_tv_cached(symbol, klines, period=14)
-        adx_value = adx_tv(klines, period=14)
-        ema25 = ema_tv(closes, 25)
-        supertrend_signal = supertrend_like_on_close(klines)
-
         # -- Accélération du momentum (histogramme MACD non décroissant)
         if len(closes) >= 2:
             macd_prev, signal_prev = compute_macd(closes[:-1])
@@ -1958,8 +2039,8 @@ async def process_symbol(symbol):
                 atr_value=atr,      # ATR 1h (standard)
             )
 
-            # ====== 1) Filtre régime BTC (sortie anticipée légère) ======
-            blocked, _why_btc = btc_regime_blocked()
+            # ====== 1) Filtre régime BTC (sortie anticipée légère) — flaggable ======
+            blocked, _why_btc = btc_regime_blocked() if ENABLE_BTC_REGIME_BLOCK else (False, "")
             if blocked and gain < 0.8:
                 vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
                 vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
@@ -2000,8 +2081,12 @@ async def process_symbol(symbol):
                 return
 
             # ====== 3) Sortie dynamique 5m (gated) ======
-            triggered, fx = fast_exit_5m_trigger(symbol, entry, price)
-
+            # Fast-exit 5m sous feature flag
+            if ENABLE_FAST_EXIT_5M:
+                triggered, fx = fast_exit_5m_trigger(symbol, entry, price)
+            else:
+                triggered, fx = (False, {})
+                
             supertrend_ok_local = supertrend_like_on_close(klines)
             strong_trend_1h = (adx_value >= 28) and supertrend_ok_local
 
@@ -2330,7 +2415,7 @@ async def process_symbol(symbol):
         # override si major + flux court-terme solide
         override_flow = (symbol in MAJORS and adx_value >= 28 and vol_ratio_15m >= 0.55)
 
-        if weak_1h and weak_4h and not override_flow:
+        if ENABLE_GATE_200_4H and weak_1h and weak_4h and not override_flow:
             log_refusal(symbol, "Gate 200/4h: structure faible (hard)")
             if not in_trade:
                 return
@@ -2460,8 +2545,8 @@ async def process_symbol(symbol):
         # pas de return : on continue
 
         # --- BTC regime / drift guards ---
-        # ALT : blocage dur uniquement si régime BTC = panic
-        if symbol != "BTCUSDT":
+        # ALT : blocage dur uniquement si régime BTC = panic — flaggable
+        if symbol != "BTCUSDT" and ENABLE_BTC_REGIME_BLOCK:
             blocked, why = btc_regime_blocked()
             if blocked:
                 log_refusal(symbol, f"Filtre régime BTC: {why}")
@@ -2491,7 +2576,7 @@ async def process_symbol(symbol):
 
         # --- Anti-excès 1h (HARD) : trop étiré ---
         dist_ema25 = (price / max(ema25, 1e-9) - 1.0)
-        EXCESS_HARD = (rsi >= RSI_HARD_STD) and (dist_ema25 >= DIST_EMA25_HARD_STD)
+        EXCESS_HARD = ENABLE_ANTI_EXCESS and (rsi >= RSI_HARD_STD) and (dist_ema25 >= DIST_EMA25_HARD_STD)
         if EXCESS_HARD:
             st_on_now = supertrend_like_on_close(klines)
             STRONG_TREND = (adx_value >= 28 and st_on_now and closes_4h[-1] > ema50_4h and ema50_4h > ema200_4h)
@@ -2544,12 +2629,13 @@ async def process_symbol(symbol):
             log_refusal(symbol, f"Vol 15m insuffisant (hard): {vol_ratio_15m:.2f} < {min_ratio15:.2f}")
             return
 
-        # [#patch-vol15m-dyn]
-        min_ratio15 = 0.40 if (symbol in MAJORS or adx_value >= 24 or btc_is_bullish_strong()) else VOL15M_MIN_RATIO
+        # Soft floor basé sur ENV, plus tolérant si major/ADX fort/BTC fort
+        min_ratio15 = VOL15M_MIN_RATIO
+        if (symbol in MAJORS) or (adx_value >= 24) or btc_is_bullish_strong():
+            min_ratio15 = min(min_ratio15, 0.40)
         if vol_ratio_15m < min_ratio15:
             log_refusal(symbol, f"Vol 15m faible (soft): {vol_ratio_15m:.2f}")
             reasons += [f"⚠️ Vol15m {vol_ratio_15m:.2f} (soft)"]
-            # pas de return -> on continue
 
         # === Confluence & scoring (final) ===
         volume_ok   = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
@@ -2930,7 +3016,8 @@ async def main_loop():
     last_symbol_refresh_day = None
 
     while True:
-        try:
+        try:             
+            ITER_REFUSAL_COUNT.clear()
             now = datetime.now(timezone.utc)
 
             # ✅ heartbeat horaire
