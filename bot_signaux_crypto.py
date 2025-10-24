@@ -65,6 +65,25 @@ REFUSAL_NOTIFY       = os.getenv("REFUSAL_NOTIFY", "0")              # "1" pour 
 REFUSAL_COOLDOWN_CACHE = {}  # {(symbol, reason): datetime UTC}
 ITER_REFUSAL_COUNT     = {}  # {symbol: int} — remis à zéro à chaque itération
 LOG_FILE         = os.path.join(DATA_DIR, "trade_log.csv")
+# === Circuit-breaker "orage d'alertes" (ENV) ===
+from collections import deque
+
+def _env_int(key: str, default: int):
+    try:
+        v = os.getenv(key, None)
+        return int(v) if v is not None else int(default)
+    except Exception:
+        return int(default)
+
+STORM_MAX_ENTRIES     = _env_int("STORM_MAX_ENTRIES", 4)     # si > N entrées ...
+STORM_WINDOW_MIN      = _env_int("STORM_WINDOW_MIN", 30)     # ... en < M minutes
+STORM_COOLDOWN_MIN    = _env_int("STORM_COOLDOWN_MIN", 20)   # durée de durcissement
+STORM_STRONG_ONLY     = os.getenv("STORM_STRONG_ONLY", "1")  # "1": bloque sauf strong context
+STORM_NOTIFY          = os.getenv("STORM_NOTIFY", "1")       # "1": notifie au déclenchement
+
+STORM_ENTRIES = deque(maxlen=1000)           # timestamps d’entrées récentes (UTC)
+STORM_ACTIVE_UNTIL: datetime | None = None   # fin du durcissement si déclenché
+STORM_LAST_STATE: bool = False               # pour éviter spam de notifs
 # === Feature Flags (ENV) ===
 def _env_bool(key: str, default: str = "1") -> bool:
     return os.getenv(key, default) == "1"
@@ -696,6 +715,44 @@ async def tg_send(text: str, chat_id: int = CHAT_ID):
 
     print("[tg_send] échec après retries")
     return False
+
+def _purge_old_entries(now_utc: datetime):
+    cutoff = now_utc - timedelta(minutes=STORM_WINDOW_MIN)
+    while STORM_ENTRIES and STORM_ENTRIES[0] < cutoff:
+        STORM_ENTRIES.popleft()
+
+def record_entry_event():
+    """À appeler APRES chaque BUY réussi."""
+    STORM_ENTRIES.append(datetime.now(timezone.utc))
+
+def is_alert_storm(now_utc: datetime | None = None) -> bool:
+    """True si storm actif (fenêtre ou cooldown). Déclenche un cooldown si seuil dépassé."""
+    global STORM_ACTIVE_UNTIL, STORM_LAST_STATE
+    now_utc = now_utc or datetime.now(timezone.utc)
+    _purge_old_entries(now_utc)
+
+    # storm nouveau ?
+    recent = len(STORM_ENTRIES)
+    crossed = recent >= STORM_MAX_ENTRIES
+    active = STORM_ACTIVE_UNTIL is not None and now_utc < STORM_ACTIVE_UNTIL
+
+    if crossed:
+        STORM_ACTIVE_UNTIL = now_utc + timedelta(minutes=STORM_COOLDOWN_MIN)
+        active = True
+
+    # notification unique au changement d'état
+    new_state = bool(active)
+    if new_state != STORM_LAST_STATE:
+        STORM_LAST_STATE = new_state
+        if STORM_NOTIFY == "1":
+            try:
+                msg = "⚡️ Circuit-breaker soft ACTIVÉ" if new_state else "✅ Circuit-breaker soft DÉSACTIVÉ"
+                extra = f" — window {STORM_WINDOW_MIN}m, N>{STORM_MAX_ENTRIES}, cooldown {STORM_COOLDOWN_MIN}m"
+                asyncio.create_task(tg_send(msg + extra))
+            except Exception:
+                pass
+
+    return active
 
 def _can_send_refusal_now(symbol: str, reason: str, now=None):
     now = now or datetime.now(timezone.utc)
@@ -2713,6 +2770,36 @@ async def process_symbol(symbol):
             log_refusal(symbol, f"Vol 15m faible (soft): {vol_ratio_15m:.2f}")
             reasons += [f"⚠️ Vol15m {vol_ratio_15m:.2f} (soft)"]
 
+        # ===== Circuit-breaker "orage d'alertes" (soft) =====
+        storm = is_alert_storm()
+        if storm:
+            # Si STRONG_ONLY: on bloque sauf contexte fort multi-TF
+            strong_ctx = (
+                (adx_value >= 26 and supertrend_signal and vol_ratio_15m >= 0.60)
+                or (symbol in MAJORS and adx_value >= 24 and supertrend_signal and vol_ratio_15m >= 0.55)
+            )
+            if STORM_STRONG_ONLY == "1" and not strong_ctx:
+                log_refusal(
+                    symbol,
+                    "Circuit-breaker soft (alert storm): contexte insuffisant",
+                    trigger=f"adx={adx_value:.1f}, vol15m={vol_ratio_15m:.2f}"
+                )
+                # On ne bloque pas la gestion d'une position existante
+                if symbol not in trades:
+                    return
+            else:
+                # Mode non-bloquant: on pénalise le score et on relève un peu les exigences de flux
+                try:
+                    indicators_soft_penalty += 1
+                except NameError:
+                    indicators_soft_penalty = 1
+                # durcissement léger sur vol15m requis (jusqu'à +10%, borné)
+                min_ratio15_storm = max(0.40, min(0.70, VOL15M_MIN_RATIO * 1.10))
+                if vol_ratio_15m < min_ratio15_storm:
+                    log_refusal(symbol, f"Circuit-breaker: vol15m < {min_ratio15_storm:.2f} (soft)", trigger=f"vol15m={vol_ratio_15m:.2f}")
+                    if symbol not in trades:
+                        return
+
         # === Confluence & scoring (final) ===
         volume_ok   = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
         trend_ok = (
@@ -2973,7 +3060,9 @@ async def process_symbol(symbol):
             }
             last_trade_time[symbol] = datetime.now(timezone.utc)
             save_trades()
-
+            
+            record_entry_event()
+            
             msg = format_entry_msg(
                 symbol, trade_id, "standard", BOT_VERSION, price, position_pct,
                 sl_initial, ((price - sl_initial) / price) * 100.0, atr_entry,
