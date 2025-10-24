@@ -65,6 +65,39 @@ REFUSAL_NOTIFY       = os.getenv("REFUSAL_NOTIFY", "0")              # "1" pour 
 REFUSAL_COOLDOWN_CACHE = {}  # {(symbol, reason): datetime UTC}
 ITER_REFUSAL_COUNT     = {}  # {symbol: int} — remis à zéro à chaque itération
 LOG_FILE         = os.path.join(DATA_DIR, "trade_log.csv")
+# === Cap quotidien de nouvelles entrées (ENV) ===
+def _env_int(key: str, default: int):
+    try:
+        v = os.getenv(key, None)
+        return int(v) if v is not None else int(default)
+    except Exception:
+        return int(default)
+
+MAX_NEW_ENTRIES_PER_DAY = _env_int("MAX_NEW_ENTRIES_PER_DAY", 2)
+
+def _new_entries_today_utc() -> int:
+    """Compte les BUY du jour (UTC) dans trade_log.csv."""
+    try:
+        today = datetime.now(timezone.utc).date()
+        if not os.path.exists(LOG_FILE):
+            return 0
+        n = 0
+        with open(LOG_FILE, "r", newline="") as f:
+            r = csv.reader(f)
+            for row in r:
+                # ts, symbol, side, price, gain
+                if len(row) < 3:
+                    continue
+                ts_str, _sym, side = row[0], row[1], row[2]
+                dt = _parse_dt_flex(ts_str)
+                if not dt:
+                    continue
+                if dt.astimezone(timezone.utc).date() == today and side == "BUY":
+                    n += 1
+        return n
+    except Exception:
+        return 0
+
 # === Circuit-breaker "orage d'alertes" (ENV) ===
 from collections import deque
 
@@ -3033,6 +3066,11 @@ async def process_symbol(symbol):
 
         # --- Entrée (BUY) ---
         if buy and symbol not in trades:
+            # Cap quotidien dur (garantie 1–2 trades/jour)
+            if _new_entries_today_utc() >= MAX_NEW_ENTRIES_PER_DAY:
+                log_refusal(symbol, f"Daily cap reached ({MAX_NEW_ENTRIES_PER_DAY} entries)")
+                buy = False
+
             trade_id = make_trade_id(symbol)
 
             # ATR au moment de l'entrée (sécurisé)
