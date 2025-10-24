@@ -238,6 +238,14 @@ INIT_SL_PCT_STD_MAX = 0.012  # 1.2%
 TRAIL_MIN_BUFFER_ATR_STRONG = 0.8
 TRAIL_MIN_BUFFER_ATR_WEAK   = 0.6
 TRAIL_STEP_CAP_ATR          = 0.5
+# --- Plancher absolu de distance prix→stop (en ATR) pendant les tendances fortes ---
+# Par défaut: jamais < 0.45×ATR si ADX >= 28 (peut être ajusté via ENV)
+try:
+    ABS_MIN_PRICE_DIST_ATR_STRONG = _env_float("ABS_MIN_PRICE_DIST_ATR_STRONG", 0.45)
+except NameError:
+    # si _env_float n'existe pas chez toi, fallback simple:
+    ABS_MIN_PRICE_DIST_ATR_STRONG = float(os.getenv("ABS_MIN_PRICE_DIST_ATR_STRONG", "0.45"))
+
 TRAIL_BEFORE_TP1_MAX        = 0.0
 VSTOP_CONFIRM_1M            = True
 VSTOP_CONFIRM_1M_N          = 2
@@ -759,6 +767,30 @@ def compute_macd(prices, short=12, long=26, signal=9):
     macd_line = ema_short - ema_long
     signal_line = compute_ema_series(macd_line, signal)
     return macd_line[-1], signal_line[-1]
+
+# ==== Helpers bougies closes (standardisation 5m/15m/1m) ====
+def _closed_klines(kl):
+    """Retourne la liste SANS la bougie en formation (on enlève systématiquement la dernière)."""
+    return kl[:-1] if kl and len(kl) >= 2 else (kl or [])
+
+def _last_closed(kl):
+    """Retourne la DERNIÈRE bougie close, sinon None."""
+    if kl and len(kl) >= 2:
+        return kl[-2]
+    return None
+
+def get_klines_5m_closed(symbol, limit=100):
+    k = get_cached(symbol, '5m', limit=limit) or []
+    return _closed_klines(k)
+
+def get_klines_15m_closed(symbol, limit=100):
+    k = get_cached(symbol, '15m', limit=limit) or []
+    return _closed_klines(k)
+
+def get_klines_1m_closed(symbol, limit=200):
+    k = get_cached(symbol, '1m', limit=limit) or []
+    return _closed_klines(k)
+
 
 # ==== Helpers EMA/Structure 15m ====
 
@@ -1509,11 +1541,11 @@ def compute_pnl_pct(entry, exit_price) -> float:
     return ((exit_price - entry) / max(entry, 1e-9)) * 100.0
 
 def confirm_stop_breach_1m(symbol, stop_lvl, n=2, tol_pct=0.0005):
-    """True si on a n clôtures 1m <= stop_lvl*(1 - tol_pct)."""
-    k = get_cached(symbol, '1m', limit=max(5, n+1)) or []
+    """True si on a n clôtures 1m <= stop_lvl*(1 - tol_pct) — uniquement des bougies CLOSES."""
+    k = get_klines_1m_closed(symbol, limit=max(5, n + 2))  # on ignore la bougie en formation
     if len(k) < n:
-        return True  # pas assez de data -> on confirme (sécurité)
-    closes = [float(x[4]) for x in k[-n:]]
+        return True  # pas assez de data -> on confirme (fail-safe)
+    closes = [float(x[4]) for x in k[-n:]]  # n dernières clôtures
     thr = stop_lvl * (1 - tol_pct)
     return all(c <= thr for c in closes)
 
@@ -1536,13 +1568,14 @@ def strong_trend_soft_stop(symbol, stop, adx_value, st_on):
         if last_low <= stop < last_close:  # mèche seulement -> ignore 1 fois
             return False
 
-    # garde-fou 5m : close 5m sous stop ET sous EMA20(5m) -> confirme
-    k5m = get_cached(symbol, '5m', limit=22) or []
+    # garde-fou 5m (bougies closes uniquement) : close 5m sous stop ET sous EMA20(5m) -> confirme
+    k5m = get_klines_5m_closed(symbol, limit=22)
     if len(k5m) >= 20:
-        closes5 = [float(x[4]) for x in k5m]
+        closes5 = [float(x[4]) for x in k5m]          # uniquement des clôtures
         ema20_5 = ema_tv(closes5, 20)
-        close5  = closes5[-1]
-        low5    = float(k5m[-1][3])
+        last5   = k5m[-1]                              # dernière bougie CLOSE 5m
+        close5  = float(last5[4])
+        low5    = float(last5[3])
         if (close5 <= stop and close5 < ema20_5):
             return True
         if (low5 <= stop < close5):    # mèche 5m mais close au-dessus
@@ -1708,6 +1741,11 @@ def trailing_stop_advanced(symbol, current_price, atr_value=None, atr_period=14)
     min_buffer_atr = (TRAIL_MIN_BUFFER_ATR_STRONG if (adx_now >= 28 and st_on)
                       else TRAIL_MIN_BUFFER_ATR_WEAK)
     proposed = min(proposed, current_price - min_buffer_atr * atr)
+
+    # Plancher absolu en tendance forte : ne JAMAIS coller le stop à moins de X×ATR du prix
+    # (protége contre un resserrement excessif dû au time-tightening)
+    if adx_now >= 28:
+        proposed = min(proposed, current_price - ABS_MIN_PRICE_DIST_ATR_STRONG * atr)
 
     # Cap de remontée par itération (un peu plus doux que 0.5×ATR)
     proposed = min(proposed, prev_stop + 0.45 * atr)
@@ -1916,7 +1954,7 @@ async def process_symbol(symbol):
         MIN_VOLUME_ABS   = (60_000 if symbol in MAJORS else 100_000)
 
         # calcule vol_ratio_15m si pas déjà fait:
-        k15 = get_cached(symbol, '15m', limit=25) or []
+        k15 = get_klines_15m_closed(symbol, limit=25)
         vols15 = volumes_series(k15, quote=True) if k15 else []
         vol_now_15 = float(k15[-2][7]) if len(k15) >= 2 else 0.0
         vol_ma10_15 = float(np.mean(vols15[-11:-1])) if len(vols15) >= 12 else 0.0
@@ -2163,7 +2201,7 @@ async def process_symbol(symbol):
             ema20_15 = ema_tv(cl15, 20) if len(cl15) >= 20 else None
             close_below_ema20_15 = (len(cl15) >= 20 and cl15[-1] < ema20_15)
 
-            k5_loc = get_cached(symbol, '5m', limit=80) or []
+            k5_loc = get_klines_5m_closed(symbol, limit=80)
             bearish_5m = is_bearish_engulfing_5m(k5_loc)
             # RSI 5m drop (si dispo)
             if k5_loc and len(k5_loc) >= 30:
