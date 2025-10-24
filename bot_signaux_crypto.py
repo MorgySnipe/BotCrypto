@@ -1830,6 +1830,7 @@ def _nb_trades(strategy=None):
 
 async def process_symbol(symbol):
     try:
+        IS_MAJOR = symbol in MAJORS  # dispo partout dans la fonction
         # [PATCH-COOLDOWN std]
         in_trade = symbol in trades  # pour ne pas bloquer la gestion d'une position déjà ouverte
         # --- INIT SOFT GUARDS ---
