@@ -509,8 +509,9 @@ def format_entry_msg(
     btc_up, eth_up,
     score, score_label,
     reasons: list[str],
-    tp_prices: list[float] | None = None   # <— AJOUT
+    tp_prices: list[float] | None = None
 ):
+    # — Format TP —
     if tp_prices:
         tp_str = " / ".join(
             f"{p:.4f} ({((p - entry)/entry)*100:.2f}%)" for p in tp_prices
@@ -518,12 +519,49 @@ def format_entry_msg(
     else:
         tp_str = "+1.5% / +3% / +5% (indicatifs)"
 
+    # — Paramètres clés (pour post-mortem) —
+    # Lis les constantes si elles existent; sinon "N/A"
+    try:
+        _atr_init_mult = ATR_INIT_MULT_STD
+    except Exception:
+        _atr_init_mult = None
+    try:
+        _tp_mults = TP_ATR_MULTS_STD
+    except Exception:
+        _tp_mults = None
+    try:
+        _trail_tiers = TRAIL_TIERS
+    except Exception:
+        _trail_tiers = None
+
+    def _fmt_seq(val):
+        from numbers import Number
+        if isinstance(val, (list, tuple)):
+            if val and isinstance(val[0], (list, tuple)) and len(val[0]) == 2 and all(isinstance(x, Number) for x in val[0]):
+                # liste de paires (ex: [(1.8,0.9), ...])
+                return "[" + ", ".join(f"({a:.3g},{b:.3g})" for a, b in val) + "]"
+            else:
+                return "[" + ", ".join((f"{x:.3g}" if isinstance(x, Number) else str(x)) for x in val) + "]"
+        return "N/A"
+
+    params_bits = []
+    if _atr_init_mult is not None:
+        params_bits.append(f"ATR_INIT_MULT={_atr_init_mult:.3g}")
+    if _tp_mults is not None:
+        params_bits.append(f"TP_ATR={_fmt_seq(_tp_mults)}")
+    if _trail_tiers is not None:
+        params_bits.append(f"TRAIL_TIERS={_fmt_seq(_trail_tiers)}")
+
+    params_line = ("🔧 Paramètres clés: " + " | ".join(params_bits)) if params_bits else ""
+
+    # — Message final —
     return (
         f"🟢 ACHAT | {symbol} | trade_id={trade_id}\n"
         f"⏱ UTC: {utc_now_str()} | Stratégie: {strategy} | Version: {bot_version}\n"
         f"🎯 Prix entrée: {entry:.4f} | Taille: {position_pct:.1f}%\n"
         f"🛡 Stop initial: {sl_initial:.4f} (dist: {sl_dist_pct:.2f}%) | ATR-TV(1h): {atr:.4f}\n"
-        f"🎯 TP1/TP2/TP3: {tp_str}\n\n"
+        f"🎯 TP1/TP2/TP3: {tp_str}\n"
+        f"{params_line}\n\n"
         f"📊 Indicateurs 1H: RSI {rsi_1h:.2f} | MACD {macd:.4f}/{signal:.4f} | ADX {adx:.2f} | Supertrend {st_onoff(st_on)}\n"
         f"📈 Tendances: EMA25 {ema25:.4f} | EMA50(4h) {ema50_4h:.4f} | EMA200(1h) {ema200_1h:.4f} | EMA200(4h) {ema200_4h:.4f}\n"
         f"📦 Volume: MA5 {vol5:.0f} | MA20 {vol20:.0f} | Ratio {vol_ratio:.2f}x\n"
@@ -531,7 +569,6 @@ def format_entry_msg(
         f"🧠 Score fiabilité: {score}/10 — {score_label}\n\n"
         f"📌 Raison d’entrée:\n- " + ("\n- ".join(reasons) if reasons else "Setup multi-confluence")
     )
-
 
 def format_tp_msg(n, symbol, trade_id, price, gain_pct, new_stop, stop_from_entry_pct, elapsed_h, action_after_tp):
     return (
