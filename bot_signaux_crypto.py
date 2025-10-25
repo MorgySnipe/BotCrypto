@@ -2182,6 +2182,11 @@ async def process_symbol(symbol):
                         # BE après TP1 ; après TP2/TP3 on pousse le stop progressivement
                         if tp_idx == 1:
                             new_stop_level = entry  # break-even
+
+                            # === BE + epsilon pour contrer le slippage à TP1 ===
+                            # (nécessite: import os en haut du fichier)
+                            BE_EPS_AFTER_TP1 = float(os.getenv("BE_EPS_AFTER_TP1", "0.0005"))  # +0.05% au-dessus de l'entrée
+                            new_stop_level = max(new_stop_level, entry * (1.0 + BE_EPS_AFTER_TP1))
                         else:
                             # petit BE+ conditionné au seuil atteint
                             new_stop_level = max(entry, entry * (1.0 + max(0.0, threshold_pct - 0.6) / 100.0))
@@ -2934,7 +2939,14 @@ async def process_symbol(symbol):
         if brk_ok and trend_ok and momentum_ok_eff and volume_ok:
             # 🔒 NEW: filtre de flux pour pré-breakout
             vol_ratio_1h = (float(np.mean(volumes[-5:])) / max(float(np.mean(volumes[-20:])), 1e-9)) if len(volumes) >= 20 else 0.0
-            strong_prebrk = (vol_ratio_1h >= 0.90) or (vol_ratio_15m >= 0.60)
+            # Flux minimum renforcé si ALT et 4h<200
+            PREBRK_MIN_FLOW_ALT_1H  = float(os.getenv("PREBRK_MIN_FLOW_ALT_1H",  "1.05"))
+            PREBRK_MIN_FLOW_ALT_15M = float(os.getenv("PREBRK_MIN_FLOW_ALT_15M", "0.75"))
+
+            if (bool(ema200_4h) and closes_4h[-1] < ema200_4h) and (symbol not in MAJORS):
+                strong_prebrk = (vol_ratio_1h >= PREBRK_MIN_FLOW_ALT_1H) or (vol_ratio_15m >= PREBRK_MIN_FLOW_ALT_15M)
+            else:
+                strong_prebrk = (vol_ratio_1h >= 0.90) or (vol_ratio_15m >= 0.60)
 
             if not strong_prebrk:
                 # soit on refuse, soit on réduit la taille
@@ -2984,6 +2996,18 @@ async def process_symbol(symbol):
             reasons = [label] + reasons + [f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
 
         elif trend_ok and momentum_ok_eff and volume_ok:
+            # --- Guard contexte pullback: ADX minimum si 4h < EMA200 ---
+            ADX_FLOOR_PULLBACK_MAJ = int(os.getenv("ADX_FLOOR_PULLBACK_MAJ", "22"))
+            ADX_FLOOR_PULLBACK_ALT = int(os.getenv("ADX_FLOOR_PULLBACK_ALT", "26"))
+
+            under_200_4h = bool(ema200_4h) and (closes_4h[-1] < ema200_4h)
+            adx_floor = ADX_FLOOR_PULLBACK_ALT if (under_200_4h and symbol not in MAJORS) else ADX_FLOOR_PULLBACK_MAJ
+
+            if adx_value < adx_floor:
+                log_refusal(symbol, f"ADX {adx_value:.1f} < floor {adx_floor} (pullback, 4h<200)")
+                reasons += [f"⚠️ ADX<{adx_floor} (pullback, 4h<200)"]
+                return
+
             # Bande "retest" autour de l'EMA25 (adaptative)
             RETEST_BAND_BASE = 0.006 if symbol in MAJORS else 0.005
             RETEST_BAND = RETEST_BAND_BASE + (0.002 if (adx_value >= 26 or vol_ratio_15m >= 0.70) else 0.0)
