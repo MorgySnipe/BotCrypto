@@ -2932,6 +2932,20 @@ async def process_symbol(symbol):
         buy = False
 
         if brk_ok and trend_ok and momentum_ok_eff and volume_ok:
+            # 🔒 NEW: filtre de flux pour pré-breakout
+            vol_ratio_1h = (float(np.mean(volumes[-5:])) / max(float(np.mean(volumes[-20:])), 1e-9)) if len(volumes) >= 20 else 0.0
+            strong_prebrk = (vol_ratio_1h >= 0.90) or (vol_ratio_15m >= 0.60)
+
+            if not strong_prebrk:
+                # soit on refuse, soit on réduit la taille
+                log_refusal(symbol, f"Pré-breakout: flux 1h/15m insuffisant (1h {vol_ratio_1h:.2f}, 15m {vol_ratio_15m:.2f})", trigger="flux_prebrk")
+                # petite taille sonde au lieu d'annuler complètement
+                try:
+                    position_pct = max(POS_MIN_PCT, min(position_pct * 0.60, POS_MAX_PCT))
+                    reasons += ["Taille réduite (flux prébreakout faible)"]
+                except Exception:
+                    pass
+
             # Filtre 15m avec niveau de breakout
             tol_struct = 0.0022 if (symbol in MAJORS or adx_value >= 22) else 0.0017
             n_struct   = 2 if (symbol in MAJORS or adx_value >= 22) else 3
@@ -2970,49 +2984,49 @@ async def process_symbol(symbol):
             reasons = [label] + reasons + [f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
 
         elif trend_ok and momentum_ok_eff and volume_ok:
-        # Bande "retest" autour de l'EMA25 (adaptative)
-        RETEST_BAND_BASE = 0.006 if symbol in MAJORS else 0.005
-        RETEST_BAND = RETEST_BAND_BASE + (0.002 if (adx_value >= 26 or vol_ratio_15m >= 0.70) else 0.0)
-        near_ema25 = (abs(price - ema25) / max(ema25, 1e-9)) <= RETEST_BAND
-        candle_ok = (abs(highs[-1] - lows[-1]) / max(lows[-1], 1e-9)) <= 0.038
+            # Bande "retest" autour de l'EMA25 (adaptative)
+            RETEST_BAND_BASE = 0.006 if symbol in MAJORS else 0.005
+            RETEST_BAND = RETEST_BAND_BASE + (0.002 if (adx_value >= 26 or vol_ratio_15m >= 0.70) else 0.0)
+            near_ema25 = (abs(price - ema25) / max(ema25, 1e-9)) <= RETEST_BAND
+            candle_ok = (abs(highs[-1] - lows[-1]) / max(lows[-1], 1e-9)) <= 0.038
 
-        # 🔒 Gate ADX soft dédié au pullback (empêche ADX 14–17)
-        adx_soft_min = 18 if symbol not in MAJORS else 16
-        if adx_value < adx_soft_min:
-            log_refusal(symbol, f"Pullback refusé: ADX trop faible ({adx_value:.1f}<{adx_soft_min})")
-            # on ne sort pas de process_symbol, on laisse buy=False pour ce setup
-            pass
-        else:
-            if near_ema25 and candle_ok:
-                # Filtre 15m sans niveau de breakout (tolérance dynamique)
-                tol_struct = 0.0022 if (symbol in MAJORS or adx_value >= 22) else 0.0017
-                n_struct   = 2 if (symbol in MAJORS or adx_value >= 22) else 3
-                ok15, det15 = check_15m_filter(
-                    k15,
-                    breakout_level=None,
-                    n_struct=n_struct,
-                    tol_struct=tol_struct
-                )
+            # 🔒 Gate ADX soft dédié au pullback (empêche ADX 14–17)
+            adx_soft_min = 18 if symbol not in MAJORS else 16
+            if adx_value < adx_soft_min:
+                log_refusal(symbol, f"Pullback refusé: ADX trop faible ({adx_value:.1f}<{adx_soft_min})")
+                # on ne sort pas de process_symbol, on laisse buy=False pour ce setup
+                pass
+            else:
+                if near_ema25 and candle_ok:
+                    # Filtre 15m sans niveau de breakout (tolérance dynamique)
+                    tol_struct = 0.0022 if (symbol in MAJORS or adx_value >= 22) else 0.0017
+                    n_struct   = 2 if (symbol in MAJORS or adx_value >= 22) else 3
+                    ok15, det15 = check_15m_filter(
+                        k15,
+                        breakout_level=None,
+                        n_struct=n_struct,
+                        tol_struct=tol_struct
+                    )
 
-                if not ok15 and not (adx_value >= 25 and vol_ratio_15m >= 0.45):
-                    log_refusal(symbol, f"Filtre 15m non validé (PB): {det15} (soft)")
-                    # pas de retour dur : on annule juste ce setup PB
-                    pass
-                elif not confirm_15m_after_signal(symbol, breakout_level=None, ema25_1h=ema25):
-                    log_refusal(symbol, "Anti-chasse PB: pas de close 15m > EMA25(1h)")
-                    pass
-                else:
-                    # entrée trop loin d'EMA25 → on laisse une alerte soft, sans bloquer
-                    if price > ema25 * 1.08:
-                        log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.08 ({ema25*1.08:.4f})")
-                        reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
+                    if not ok15 and not (adx_value >= 25 and vol_ratio_15m >= 0.45):
+                        log_refusal(symbol, f"Filtre 15m non validé (PB): {det15} (soft)")
+                        # pas de retour dur : on annule juste ce setup PB
+                        pass
+                    elif not confirm_15m_after_signal(symbol, breakout_level=None, ema25_1h=ema25):
+                        log_refusal(symbol, "Anti-chasse PB: pas de close 15m > EMA25(1h)")
+                        pass
+                    else:
+                        # entrée trop loin d'EMA25 → on laisse une alerte soft, sans bloquer
+                        if price > ema25 * 1.08:
+                            log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.08 ({ema25*1.08:.4f})")
+                            reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
 
-                    # avertissements tendance éventuels
-                    if tendance_soft_notes:
-                        reasons += [f"Avertissements tendance: {', '.join(tendance_soft_notes)}"]
+                        # avertissements tendance éventuels
+                        if tendance_soft_notes:
+                            reasons += [f"Avertissements tendance: {', '.join(tendance_soft_notes)}"]
 
-                    buy = True
-                    reasons = ["✅ Pullback EMA25 propre + Confluence"] + reasons + [f"ADX {adx_value:.1f}", f"MACD {macd:.3f} > Signal {signal:.3f}"]
+                        buy = True
+                        reasons = ["✅ Pullback EMA25 propre + Confluence"] + reasons + [f"ADX {adx_value:.1f}", f"MACD {macd:.3f} > Signal {signal:.3f}"]
 
         # [#patch-prebreakout]
         if not buy:
