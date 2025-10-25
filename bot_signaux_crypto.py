@@ -3079,13 +3079,20 @@ async def process_symbol(symbol):
             # Cap quotidien dur (garantie 1–2 trades/jour)
             if _new_entries_today_utc() >= MAX_NEW_ENTRIES_PER_DAY:
                 log_refusal(symbol, f"Daily cap reached ({MAX_NEW_ENTRIES_PER_DAY} entries)")
-                buy = False
+                return  # ⚠️ important: on sort pour ne PAS créer le trade
 
             trade_id = make_trade_id(symbol)
 
-            # ATR au moment de l'entrée (sécurisé)
+            # ATR au moment de l'entrée
             atr_entry = float(atr) if atr else float(atr_tv_cached(symbol, klines))
-            tp_mults  = TP_ATR_MULTS_STD
+
+            # 🔧 NEW: si RSI très chaud, on prend TP1 plus vite
+            rsi_hot = (rsi >= 70)
+            if rsi_hot:
+                tp_mults = [0.75, 1.75, 2.75]   # TP1 plus proche
+            else:
+                tp_mults = TP_ATR_MULTS_STD
+
             tp_prices = [float(price + m * atr_entry) for m in tp_mults]
 
             # 🔁 on réutilise le stop calculé plus haut pour le sizing
@@ -3108,9 +3115,10 @@ async def process_symbol(symbol):
             }
             last_trade_time[symbol] = datetime.now(timezone.utc)
             save_trades()
-            
+
+            # Enregistre l'entrée pour la détection "orage d’alertes"
             record_entry_event()
-            
+
             msg = format_entry_msg(
                 symbol, trade_id, "standard", BOT_VERSION, price, position_pct,
                 sl_initial, ((price - sl_initial) / price) * 100.0, atr_entry,
@@ -3122,10 +3130,11 @@ async def process_symbol(symbol):
                     if len(volumes) >= 20 else 0.0,
                 btc_up, eth_up,
                 confidence, label_conf, reasons,
-                tp_prices=tp_prices            # <-- affiche les TP réels dans le message
+                tp_prices=tp_prices
             )
             await tg_send(msg)
             log_trade(symbol, "BUY", price)
+
 
     except Exception as e:
         print(f"❌ Erreur {symbol}: {e}", flush=True)
