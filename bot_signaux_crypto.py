@@ -2940,6 +2940,9 @@ async def process_symbol(symbol):
             # 🔒 NEW: filtre de flux pour pré-breakout
             vol_ratio_1h = (float(np.mean(volumes[-5:])) / max(float(np.mean(volumes[-20:])), 1e-9)) if len(volumes) >= 20 else 0.0
             # Flux minimum renforcé si ALT et 4h<200
+            # — Seuils pré-breakout (MAJORS vs ALTS)
+            PREBRK_MIN_FLOW_MAJ_1H  = float(os.getenv("PREBRK_MIN_FLOW_MAJ_1H",  "1.00"))  # 1h ≥ 1.00x
+            PREBRK_MIN_FLOW_MAJ_15M = float(os.getenv("PREBRK_MIN_FLOW_MAJ_15M", "0.60"))  # 15m ≥ 0.60x
             PREBRK_MIN_FLOW_ALT_1H  = float(os.getenv("PREBRK_MIN_FLOW_ALT_1H",  "1.05"))
             PREBRK_MIN_FLOW_ALT_15M = float(os.getenv("PREBRK_MIN_FLOW_ALT_15M", "0.75"))
 
@@ -2947,6 +2950,18 @@ async def process_symbol(symbol):
                 strong_prebrk = (vol_ratio_1h >= PREBRK_MIN_FLOW_ALT_1H) or (vol_ratio_15m >= PREBRK_MIN_FLOW_ALT_15M)
             else:
                 strong_prebrk = (vol_ratio_1h >= 0.90) or (vol_ratio_15m >= 0.60)
+
+            # --- HARD GATE dédié BTC sur pré-breakout ---
+            if symbol == "BTCUSDT":
+                BTC_ADX_FLOOR_PREBRK = int(os.getenv("BTC_ADX_FLOOR_PREBRK", "24"))
+                btc_flow_ok = (vol_ratio_1h >= PREBRK_MIN_FLOW_MAJ_1H) or (vol_ratio_15m >= PREBRK_MIN_FLOW_MAJ_15M)
+                if (adx_value < BTC_ADX_FLOOR_PREBRK) or (not btc_flow_ok):
+                    log_refusal(
+                        symbol,
+                        "BTC pré-breakout refusé (HARD): flux/ADX insuffisant",
+                        trigger=f"adx={adx_value:.1f}, v1h={vol_ratio_1h:.2f}, v15m={vol_ratio_15m:.2f}"
+                    )
+                    return  # on sort pour empêcher l'entrée BTC
 
             if not strong_prebrk:
                 # soit on refuse, soit on réduit la taille
