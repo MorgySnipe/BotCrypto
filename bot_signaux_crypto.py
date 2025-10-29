@@ -2887,6 +2887,13 @@ async def process_symbol(symbol):
         position_pct = position_pct_from_risk(price, sl_initial)
 
         # --- Décision d'achat (standard) avec filtre 15m ---
+        # [#gate-ema200-4h-clearance]
+        # — Hard gate: pas d'achat si trop proche de l'EMA200(4h)
+        CLEARANCE_EMA200_4H_PCT = float(os.getenv("CLEARANCE_EMA200_4H_PCT", "0.004"))  # 0.4%
+        if ema200_4h and abs(price / max(ema200_4h, 1e-9) - 1.0) <= CLEARANCE_EMA200_4H_PCT:
+            log_refusal(symbol, f"Proximité EMA200(4h) (hard): |dist| ≤ {CLEARANCE_EMA200_4H_PCT*100:.2f}%")
+            return
+
         brk_ok, br_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
 
         last3_change = (closes[-1] - closes[-4]) / max(closes[-4], 1e-9)
@@ -3005,10 +3012,27 @@ async def process_symbol(symbol):
             if tendance_soft_notes:
                 reasons += [f"Avertissements tendance: {', '.join(tendance_soft_notes)}"]
 
+            # [#adx-floor-breakout]
+            # — Floor ADX spécifique aux breakouts (évite les faux départs en range)
+            ADX_FLOOR_BREAKOUT_ALT = int(os.getenv("ADX_FLOOR_BREAKOUT_ALT", "20"))
+            ADX_FLOOR_BREAKOUT_MAJ = int(os.getenv("ADX_FLOOR_BREAKOUT_MAJ", "18"))
+            adx_floor_bo = ADX_FLOOR_BREAKOUT_MAJ if symbol in MAJORS else ADX_FLOOR_BREAKOUT_ALT
+
+            if adx_value < adx_floor_bo:
+                log_refusal(symbol, f"Breakout refusé: ADX {adx_value:.1f} < floor {adx_floor_bo}")
+                return
+
+            # [#micro-boost-15m-under-low-adx]
+            # — Micro boost d'exigence de flux 15m quand l'ADX est bas (marché mou)
+            # S'applique uniquement à la branche breakout + retest, juste avant l'autorisation d'achat.
+            if adx_value < 20 and vol_ratio_15m < 0.60:
+                log_refusal(symbol, f"Flux 15m insuffisant sous ADX<20: {vol_ratio_15m:.2f} < 0.60")
+                return
+
             buy = True
             label = "✅ Breakout + Retest validé (1h) + Confluence"
             # ❗ ne PAS écraser reasons -> on le complète
-            reasons = [label] + reasons + [f"ADX {adx_value:.1f} >= 22", f"MACD {macd:.3f} > Signal {signal:.3f}"]
+            reasons = [label] + reasons + [f"ADX {adx_value:.1f}", f"MACD {macd:.3f} > Signal {signal:.3f}"]
 
         elif trend_ok and momentum_ok_eff and volume_ok:
             # --- Guard contexte pullback: ADX minimum si 4h < EMA200 ---
