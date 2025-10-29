@@ -212,6 +212,29 @@ def binance_get(path, params=None, max_tries=6):
             time.sleep(min(0.5 * (2 ** attempt), 5.0) + random.uniform(0.05, 0.25))
     return None
 
+# [#liq-24h-helper]
+# ---- Helper cache pour volume 24h USDT par symbole ----
+SYMBOL_24H_META = {}  # {symbol: {"ts": datetime, "quoteVolume": float}}
+
+def get_symbol_24h_quote_volume_usdt(symbol: str, ttl_sec: int = 600) -> float:
+    """
+    Retourne le quoteVolume (USDT) 24h du symbole, avec cache TTL pour éviter le spam API.
+    """
+    now = datetime.now(timezone.utc)
+    meta = SYMBOL_24H_META.get(symbol)
+    if meta and (now - meta["ts"]).total_seconds() <= ttl_sec:
+        return float(meta.get("quoteVolume", 0.0))
+
+    data = binance_get("/api/v3/ticker/24hr", {"symbol": symbol})
+    try:
+        qv = float(data.get("quoteVolume", 0.0)) if data else 0.0
+    except Exception:
+        qv = 0.0
+
+    SYMBOL_24H_META[symbol] = {"ts": now, "quoteVolume": qv}
+    return qv
+
+
 # --- versions async (non bloquantes) ---
 SESSION_LOCK = threading.Lock()
 def _binance_get_sync(path, params=None):
@@ -2887,11 +2910,40 @@ async def process_symbol(symbol):
         position_pct = position_pct_from_risk(price, sl_initial)
 
         # --- Décision d'achat (standard) avec filtre 15m ---
+        # [#wicky-15m-filter]
+        # ---- Filtre wicky 15m ----
+        def candle_wickiness(ohlc):
+            o, h, l, c = ohlc
+            rng = max(h - l, 1e-9)
+            body = abs(c - o)
+            return max((rng - body) / rng, 0.0)
+
+        # on récupère des bougies 15m *closes uniquement*
+        _lookback_wicky = int(os.getenv("WICKY_15M_LOOKBACK", "20"))
+        k15_all = get_cached(symbol, "15m", limit=max(_lookback_wicky + 5, 30)) or []
+        k15_closed = k15_all[:-1] if len(k15_all) >= 2 else k15_all  # ignore la bougie en formation
+
+        opens_15m  = [float(x[1]) for x in k15_closed]
+        highs_15m  = [float(x[2]) for x in k15_closed]
+        lows_15m   = [float(x[3]) for x in k15_closed]
+        closes_15m = [float(x[4]) for x in k15_closed]
+
+        last_15m = list(zip(opens_15m, highs_15m, lows_15m, closes_15m))[-_lookback_wicky:]
+        if len(last_15m) >= 5:
+            wicky = float(np.mean([candle_wickiness(x) for x in last_15m]))
+            if wicky >= float(os.getenv("WICKY_15M_MAX", "0.60")):
+                log_refusal(symbol, f"wicky15m (>= max)", trigger=f"wicky15m={wicky:.2f}")
+                return
+
         # [#gate-ema200-4h-clearance]
         # — Hard gate: pas d'achat si trop proche de l'EMA200(4h)
         CLEARANCE_EMA200_4H_PCT = float(os.getenv("CLEARANCE_EMA200_4H_PCT", "0.004"))  # 0.4%
         if ema200_4h and abs(price / max(ema200_4h, 1e-9) - 1.0) <= CLEARANCE_EMA200_4H_PCT:
-            log_refusal(symbol, f"Proximité EMA200(4h) (hard): |dist| ≤ {CLEARANCE_EMA200_4H_PCT*100:.2f}%")
+            log_refusal(
+                symbol,
+                "Proximité EMA200(4h) (hard)",
+                trigger=f"dist={abs(price/max(ema200_4h,1e-9)-1)*100:.2f}%"
+            )
             return
 
         brk_ok, br_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
@@ -3019,14 +3071,31 @@ async def process_symbol(symbol):
             adx_floor_bo = ADX_FLOOR_BREAKOUT_MAJ if symbol in MAJORS else ADX_FLOOR_BREAKOUT_ALT
 
             if adx_value < adx_floor_bo:
-                log_refusal(symbol, f"Breakout refusé: ADX {adx_value:.1f} < floor {adx_floor_bo}")
+                log_refusal(symbol, "Breakout refusé: ADX < floor", trigger=f"adx={adx_value:.1f} < {adx_floor_bo}")
                 return
 
             # [#micro-boost-15m-under-low-adx]
             # — Micro boost d'exigence de flux 15m quand l'ADX est bas (marché mou)
             # S'applique uniquement à la branche breakout + retest, juste avant l'autorisation d'achat.
             if adx_value < 20 and vol_ratio_15m < 0.60:
-                log_refusal(symbol, f"Flux 15m insuffisant sous ADX<20: {vol_ratio_15m:.2f} < 0.60")
+                log_refusal(symbol, "Flux 15m insuffisant sous ADX<20", trigger=f"adx={adx_value:.1f}, v15m={vol_ratio_15m:.2f}")
+                return
+
+            # [#liq-24h-guard]
+            # ---- Liquidité min 24h ----
+            try:
+                symbol_24h_quote_volume_usdt = get_symbol_24h_quote_volume_usdt(symbol)
+            except Exception:
+                symbol_24h_quote_volume_usdt = 0.0
+
+            min_vol_usdt = float(os.getenv("MIN_VOL24H_USDT", "50000000"))
+            if symbol_24h_quote_volume_usdt < min_vol_usdt:
+                log_refusal(
+                    symbol,
+                    "liquidité 24h insuffisante",
+                    trigger=f"vol24h={symbol_24h_quote_volume_usdt/1e6:.0f}M < {min_vol_usdt/1e6:.0f}M"
+                )
+
                 return
 
             buy = True
@@ -3104,6 +3173,59 @@ async def process_symbol(symbol):
                     n_struct   = 2 if (symbol in MAJORS or adx_value >= 22) else 3
                     ok15, det15 = check_15m_filter(k15, breakout_level=level_pb, n_struct=n_struct, tol_struct=tol_struct)
                     if ok15 and confirm_15m_after_signal(symbol, breakout_level=level_pb, ema25_1h=ema25):
+                        # [#prebrk-4h-resistance-guard]
+                        # ---- Guard : proximité résistance 4H pour pré-breakout ----
+                        # Contexte requis (4H highs, ATR 1h, close 1h, vol_ratio_1h)
+                        highs_4h = [float(k[2]) for k in klines_4h] if klines_4h else []
+                        atr_1h = float(atr) if atr else float(atr_tv_cached(symbol, klines))
+                        close_1h = float(closes[-1]) if closes else price
+
+                        # vol ratio 1h MA5/MA20 recalculé localement si besoin
+                        try:
+                            vol5_1h = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                            vol20_1h = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                            vol_ratio_1h = (vol5_1h / max(vol20_1h, 1e-9)) if vol20_1h else 0.0
+                        except Exception:
+                            vol_ratio_1h = 0.0
+
+                        if highs_4h:
+                            donch_high_4h = max(highs_4h[-100:]) if len(highs_4h) >= 100 else max(highs_4h)
+                            dist_to_res = donch_high_4h - price
+                            atr_gate = float(os.getenv("PREBRK_4H_RESIST_ATR_MIN", "0.80")) * max(atr_1h, 1e-9)
+
+                            # Flag explicite : on est bien dans la branche pré-breakout
+                            is_prebreakout = True
+                            if is_prebreakout and dist_to_res <= atr_gate:
+                                force_close = os.getenv("PREBRK_FORCE_CLOSE_OVER_4H", "1") == "1"
+                                min_vclose = float(os.getenv("PREBRK_MIN_VOLRATIO_CLOSE", "1.30"))
+                                if not (force_close and close_1h > donch_high_4h and vol_ratio_1h >= min_vclose):
+                                    log_refusal(
+                                        symbol,
+                                        "pré-breakout trop proche de R4H",
+                                        trigger=f"distR4H={dist_to_res/max(atr_1h,1e-9):.2f}ATR, v1h={vol_ratio_1h:.2f}"
+                                    )
+
+                                    return
+
+                        # [#extension-guard]
+                        # ---- Extension guard ----
+                        # Utilise les indicateurs 1h déjà calculés plus haut :
+                        #  - ema25  -> EMA25(1h)
+                        #  - atr    -> ATR(1h)
+                        #  - rsi    -> RSI(1h)
+                        try:
+                            atr_1h = float(atr) if atr else float(atr_tv_cached(symbol, klines))
+                        except Exception:
+                            atr_1h = 0.0
+
+                        ema25_1h = float(ema25)
+                        rsi_1h   = float(rsi)
+
+                        ext = abs(price - ema25_1h) / max(atr_1h, 1e-9)
+                        if (ext > float(os.getenv("EXT_GUARD_ATR", "2.0"))) or (rsi_1h > float(os.getenv("EXT_GUARD_RSI1H", "70"))):
+                            log_refusal(symbol, "extension guard", trigger=f"ext={ext:.2f}ATR, rsi={rsi_1h:.1f}")
+                            return
+
                         buy = True
                         reasons = ["🎯 Pré-breakout (≤0.3% du level) + flux 15m", f"ADX {adx_value:.1f}", "Confluence multi-TF"]
                         # prudence : taille un poil réduite
@@ -3160,6 +3282,28 @@ async def process_symbol(symbol):
 
             # 🔁 on réutilise le stop calculé plus haut pour le sizing
             sl_initial = sl_initial
+
+            # [#risk-cut-dynamic]
+            # ---- Taille dynamique selon nervosité (optionnel) ----
+            # Réduit position_pct si le flux 1h est très élevé OU si l'ADX est très haut.
+            # position_pct est en %, on le borne entre POS_MIN_PCT et POS_MAX_PCT.
+
+            # (Re)calcule un vol_ratio_1h local si besoin
+            try:
+                vol5_1h = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
+                vol20_1h = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                vol_ratio_1h = (vol5_1h / max(vol20_1h, 1e-9)) if vol20_1h else 0.0
+            except Exception:
+                vol_ratio_1h = 0.0
+
+            RISK_CUT_HIGH_VOLRATIO = float(os.getenv("RISK_CUT_HIGH_VOLRATIO", "2.0"))
+            RISK_CUT_HIGH_ADX      = float(os.getenv("RISK_CUT_HIGH_ADX", "35"))
+            RISK_CUT_FACTOR        = float(os.getenv("RISK_CUT_FACTOR", "0.50"))
+
+            if (vol_ratio_1h > RISK_CUT_HIGH_VOLRATIO) or (adx_value > RISK_CUT_HIGH_ADX):
+                # Ex: 6.0% -> 3.0% si facteur 0.50
+                position_pct = max(POS_MIN_PCT, min(position_pct * RISK_CUT_FACTOR, POS_MAX_PCT))
+                log_info(symbol, f"taille réduite pour nervosité: size={position_pct:.3f}% (v1h={vol_ratio_1h:.2f}x, adx={adx_value:.1f})")
 
             trades[symbol] = {
                 "entry": price,
