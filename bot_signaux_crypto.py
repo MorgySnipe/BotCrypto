@@ -2973,13 +2973,22 @@ async def process_symbol(symbol):
         WICKY_MAX_5M = float(os.getenv("PREBRK_WICKY5M_MAX","0.70"))
         COOLDOWN_MIN = int(os.getenv("PREBRK_COOLDOWN_5M","30"))
 
-        if is_prebreakout and atr5 > 0.0:
+        # -- Résolution robuste du flag "pré-breakout" --
+        try:
+            prebrk_flag = bool(is_prebreakout)  # si déjà défini ailleurs
+        except NameError:
+            # fallback: certains blocs utilisent level_pb comme indicateur de pré-breakout
+            prebrk_flag = bool(locals().get("level_pb", False))
+
+        if prebrk_flag and atr5 > 0.0:
             if (rng5/atr5 >= FLUSH_K) or (wickiness(o5,h5,l5,c5) >= WICKY_MAX_5M):
                 if minutes_since(last_5m_ts) < COOLDOWN_MIN:
-                    log_refusal(symbol, "cooldown 5m après flush/mèche",
-                                trigger=f"rng5/atr5={rng5/atr5:.2f}, w5m={wickiness(o5,h5,l5,c5):.2f}")
+                    log_refusal(
+                        symbol,
+                        "cooldown 5m après flush/mèche",
+                        trigger=f"rng5/atr5={rng5/atr5:.2f}, w5m={wickiness(o5,h5,l5,c5):.2f}"
+                    )
                     return
-
 
         # [#gate-ema200-4h-clearance]
         # — Hard gate: pas d'achat si trop proche de l'EMA200(4h)
