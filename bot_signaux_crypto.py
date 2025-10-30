@@ -2977,6 +2977,33 @@ async def process_symbol(symbol):
             )
             return
 
+        # [#liq-1h-simple-guard]
+        # ---- Filtre liquidité simple (sans API) ----
+        # Utilise les volumes 1h déjà chargés
+        try:
+            vol5_1h  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
+            vol20_1h = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+            vol_ratio_1h_local = (vol5_1h / max(vol20_1h, 1e-9)) if vol20_1h else 0.0
+        except Exception:
+            vol5_1h, vol20_1h, vol_ratio_1h_local = 0.0, 0.0, 0.0
+
+        # Seuils simples : plus stricts pour les ALTS, plus tolérants sur majors
+        MAJORS_HI_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","LINKUSDT","DOGEUSDT"}
+        LIQ_FLOOR_ALT  = float(os.getenv("LIQ_FLOOR_ALT_USDT",  "3_000_000"))   # MA20(1h) quote vol mini sur ALT
+        LIQ_FLOOR_MAJ  = float(os.getenv("LIQ_FLOOR_MAJ_USDT", "10_000_000"))   # MA20(1h) quote vol mini sur MAJORS
+
+        liq_floor = LIQ_FLOOR_MAJ if symbol in MAJORS_HI_LIQ else LIQ_FLOOR_ALT
+
+        # Si marché mou à court terme (vol_ratio_1h_local < 0.90) ET MA20(1h) en-dessous du plancher → on refuse
+        if (vol_ratio_1h_local < 0.90) and (vol20_1h < liq_floor):
+            log_refusal(
+                symbol,
+                "liquidité 1h insuffisante (simple)",
+                trigger=f"v1h_ratio={vol_ratio_1h_local:.2f}, MA20_1h={vol20_1h:,.0f} < floor={liq_floor:,.0f}"
+            )
+            return
+
+
         brk_ok, br_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
 
         last3_change = (closes[-1] - closes[-4]) / max(closes[-4], 1e-9)
