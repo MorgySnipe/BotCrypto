@@ -2905,15 +2905,6 @@ async def process_symbol(symbol):
         ATR_INIT_MULT_STD = 1.2
         sl_initial = price - ATR_INIT_MULT_STD * atr
 
-        # ---- Stop buffer en flux 1h faible ----
-        LOWFLOW_FLOW_1H = float(os.getenv("LOWFLOW_FLOW_1H", "0.90"))
-        LOWFLOW_STOP_ATR_MULT = float(os.getenv("LOWFLOW_STOP_ATR_MULT", "1.30"))
-        # si pré-breakout ET flux 1h faible, on élargit le stop
-        if is_prebreakout and vol_ratio_1h < LOWFLOW_FLOW_1H:
-            atr_mult = max(ATR_INIT_MULT_STD, LOWFLOW_STOP_ATR_MULT)   # garde au moins le STD
-            sl_initial = price - atr_mult * atr
-            note(symbol, f"stop élargi pour flux 1h faible: x{atr_mult:.2f}")
-
         # sécurité: ne jamais dépasser le prix (et >= 0)
         sl_initial = max(0.0, min(sl_initial, price * 0.999))
 
@@ -3067,6 +3058,19 @@ async def process_symbol(symbol):
                 strong_prebrk = (vol_ratio_1h >= PREBRK_MIN_FLOW_ALT_1H) or (vol_ratio_15m >= PREBRK_MIN_FLOW_ALT_15M)
             else:
                 strong_prebrk = (vol_ratio_1h >= 0.90) or (vol_ratio_15m >= 0.60)
+
+            # ---- Stop buffer en flux 1h faible (PRÉ-BREAKOUT UNIQUEMENT) ----
+            # ici vol_ratio_1h vient d'être calculé, et on est dans la branche pré-breakout
+            LOWFLOW_FLOW_1H = float(os.getenv("LOWFLOW_FLOW_1H","0.90"))
+            LOWFLOW_STOP_ATR_MULT = float(os.getenv("LOWFLOW_STOP_ATR_MULT","1.30"))
+
+            if is_prebreakout and vol_ratio_1h < LOWFLOW_FLOW_1H:
+                # garde au moins l'ATR init standard
+                atr_mult = max(ATR_INIT_MULT_STD, LOWFLOW_STOP_ATR_MULT)
+                sl_initial = price - atr_mult * atr          # utilise le même 'atr' que ton stop init
+                sl_initial = max(0.0, min(sl_initial, price * 0.999))  # sécurité
+                note(symbol, f"stop élargi pour flux 1h faible: x{atr_mult:.2f}")
+
 
             # --- HARD GATE dédié BTC sur pré-breakout ---
             if symbol == "BTCUSDT":
