@@ -2904,6 +2904,16 @@ async def process_symbol(symbol):
         # --- Stop initial ATR (plus large, moins de faux stops) ---
         ATR_INIT_MULT_STD = 1.2
         sl_initial = price - ATR_INIT_MULT_STD * atr
+
+        # ---- Stop buffer en flux 1h faible ----
+        LOWFLOW_FLOW_1H = float(os.getenv("LOWFLOW_FLOW_1H", "0.90"))
+        LOWFLOW_STOP_ATR_MULT = float(os.getenv("LOWFLOW_STOP_ATR_MULT", "1.30"))
+        # si pré-breakout ET flux 1h faible, on élargit le stop
+        if is_prebreakout and vol_ratio_1h < LOWFLOW_FLOW_1H:
+            atr_mult = max(ATR_INIT_MULT_STD, LOWFLOW_STOP_ATR_MULT)   # garde au moins le STD
+            sl_initial = price - atr_mult * atr
+            note(symbol, f"stop élargi pour flux 1h faible: x{atr_mult:.2f}")
+
         # sécurité: ne jamais dépasser le prix (et >= 0)
         sl_initial = max(0.0, min(sl_initial, price * 0.999))
 
@@ -2934,6 +2944,27 @@ async def process_symbol(symbol):
             if wicky >= float(os.getenv("WICKY_15M_MAX", "0.60")):
                 log_refusal(symbol, f"wicky15m (>= max)", trigger=f"wicky15m={wicky:.2f}")
                 return
+
+        # ---- Cooldown 5m après flush/mèche ----
+        def wickiness(o,h,l,c):
+            rng = max(h-l, 1e-9); body = abs(c-o)
+            return max((rng-body)/rng, 0.0)
+
+        atr5 = float(atr_5m if atr_5m else 0.0)
+        o5,h5,l5,c5 = opens_5m[-1], highs_5m[-1], lows_5m[-1], closes_5m[-1]
+        rng5 = abs(h5 - l5)
+
+        FLUSH_K = float(os.getenv("PREBRK_FLUSH_ATR5M","1.20"))
+        WICKY_MAX_5M = float(os.getenv("PREBRK_WICKY5M_MAX","0.70"))
+        COOLDOWN_MIN = int(os.getenv("PREBRK_COOLDOWN_5M","30"))
+
+        if is_prebreakout and atr5 > 0.0:
+            if (rng5/atr5 >= FLUSH_K) or (wickiness(o5,h5,l5,c5) >= WICKY_MAX_5M):
+                if minutes_since(last_5m_ts) < COOLDOWN_MIN:
+                    log_refusal(symbol, "cooldown 5m après flush/mèche",
+                                trigger=f"rng5/atr5={rng5/atr5:.2f}, w5m={wickiness(o5,h5,l5,c5):.2f}")
+                    return
+
 
         # [#gate-ema200-4h-clearance]
         # — Hard gate: pas d'achat si trop proche de l'EMA200(4h)
@@ -3225,6 +3256,39 @@ async def process_symbol(symbol):
                         if (ext > float(os.getenv("EXT_GUARD_ATR", "2.0"))) or (rsi_1h > float(os.getenv("EXT_GUARD_RSI1H", "70"))):
                             log_refusal(symbol, "extension guard", trigger=f"ext={ext:.2f}ATR, rsi={rsi_1h:.1f}")
                             return
+
+                        # ---- Guard : flux 1h minimal pour pré-breakout (évite les creux de carnet) ----
+                        PREBRK_MIN_FLOW_1H_MAJ = float(os.getenv("PREBRK_MIN_FLOW_1H_MAJ","0.80"))
+                        PREBRK_MIN_FLOW_1H_ALT = float(os.getenv("PREBRK_MIN_FLOW_1H_ALT","1.00"))
+                        min_flow_1h = PREBRK_MIN_FLOW_1H_MAJ if symbol in MAJORS else PREBRK_MIN_FLOW_1H_ALT
+
+                        if is_prebreakout and (vol_ratio_1h < min_flow_1h):
+                            log_refusal(symbol, "pré-breakout refusé: vol_ratio_1h trop faible",
+                                        trigger=f"v1h={vol_ratio_1h:.2f} < {min_flow_1h:.2f}, v15m={vol_ratio_15m:.2f}")
+                            return
+                        # ---- Guard : régime marché leader pour pré-breakout ----
+                        PASS_ADX = int(os.getenv("PREBRK_MARKET_PASS_ADX","30"))
+                        PASS_V1H = float(os.getenv("PREBRK_MARKET_PASS_V1H","1.00"))
+
+                        leaders_ok = (btc_uptrend or eth_uptrend)
+                        own_strong = (adx_value >= PASS_ADX and vol_ratio_1h >= PASS_V1H)
+
+                        if is_prebreakout and not (leaders_ok or own_strong):
+                            log_refusal(symbol, "pré-breakout refusé: marché leader mou (BTC/ETH) et coin pas assez fort",
+                                        trigger=f"btc_up={btc_uptrend}, eth_up={eth_uptrend}, adx={adx_value:.1f}, v1h={vol_ratio_1h:.2f}")
+                            return
+
+                        # ---- ADX floor spécifique pré-breakout (ALT un peu plus strict) ----
+                        PREBRK_ADX_FLOOR_MAJ = int(os.getenv("PREBRK_ADX_FLOOR_MAJ","24"))
+                        PREBRK_ADX_FLOOR_ALT = int(os.getenv("PREBRK_ADX_FLOOR_ALT","26"))
+                        adx_floor_pre = PREBRK_ADX_FLOOR_MAJ if symbol in MAJORS else PREBRK_ADX_FLOOR_ALT
+
+                        if is_prebreakout and adx_value < adx_floor_pre:
+                            log_refusal(symbol, "pré-breakout refusé: ADX trop bas",
+                                        trigger=f"adx={adx_value:.1f} < {adx_floor_pre}")
+                            return
+
+
 
                         buy = True
                         reasons = ["🎯 Pré-breakout (≤0.3% du level) + flux 15m", f"ADX {adx_value:.1f}", "Confluence multi-TF"]
