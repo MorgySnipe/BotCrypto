@@ -2941,9 +2941,33 @@ async def process_symbol(symbol):
             rng = max(h-l, 1e-9); body = abs(c-o)
             return max((rng-body)/rng, 0.0)
 
-        atr5 = float(atr_5m if atr_5m else 0.0)
-        o5,h5,l5,c5 = opens_5m[-1], highs_5m[-1], lows_5m[-1], closes_5m[-1]
+        # -- Récup 5m fermées et ATR14 5m local --
+        k5_all = get_cached(symbol, "5m", limit=60) or []
+        k5_closed = k5_all[:-1] if len(k5_all) >= 2 else k5_all  # ignore la bougie en formation
+
+        if len(k5_closed) >= 20:
+            o5 = float(k5_closed[-1][1]); h5 = float(k5_closed[-1][2])
+            l5 = float(k5_closed[-1][3]); c5 = float(k5_closed[-1][4])
+            last_5m_ts = int(k5_closed[-1][0])
+
+            highs_5m  = [float(x[2]) for x in k5_closed]
+            lows_5m   = [float(x[3]) for x in k5_closed]
+            closes_5m = [float(x[4]) for x in k5_closed]
+
+            # ATR14 sur 5m (True Range)
+            trs = []
+            for i in range(1, len(k5_closed)):
+                hh, ll, pc = highs_5m[i], lows_5m[i], closes_5m[i-1]
+                trs.append(max(hh - ll, abs(hh - pc), abs(ll - pc)))
+            atr5 = float(np.mean(trs[-14:])) if len(trs) >= 14 else (float(np.mean(trs)) if trs else 0.0)
+        else:
+            # fallback conservateur
+            o5 = h5 = l5 = c5 = float(price)
+            last_5m_ts = 0
+            atr5 = 0.0
+
         rng5 = abs(h5 - l5)
+
 
         FLUSH_K = float(os.getenv("PREBRK_FLUSH_ATR5M","1.20"))
         WICKY_MAX_5M = float(os.getenv("PREBRK_WICKY5M_MAX","0.70"))
