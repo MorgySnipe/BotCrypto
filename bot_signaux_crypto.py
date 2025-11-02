@@ -3335,7 +3335,6 @@ async def process_symbol(symbol):
 
                             # Flag explicite : on est bien dans la branche pré-breakout
                             # Flag explicite : on est bien dans la branche pré-breakout
-                            global is_prebreakout
                             is_prebreakout = True
                             if is_prebreakout and dist_to_res <= atr_gate:
                                 force_close = os.getenv("PREBRK_FORCE_CLOSE_OVER_4H", "1") == "1"
