@@ -2060,6 +2060,8 @@ def _nb_trades(strategy=None):
     return sum(1 for t in trades.values() if strategy is None or t.get("strategy") == strategy)
 
 async def process_symbol(symbol):
+    global is_prebreakout            # ← déclaré AVANT toute utilisation dans la fonction
+    is_prebreakout = False           # reset à chaque itération/symbole
     try:
         IS_MAJOR = symbol in MAJORS  # dispo partout dans la fonction
         # [PATCH-COOLDOWN std]
@@ -3018,7 +3020,7 @@ async def process_symbol(symbol):
 
         # -- Résolution robuste du flag "pré-breakout" --
         # 'is_prebreakout' peut ne pas exister ici → lecture sûre
-        prebrk_flag = bool(globals().get("is_prebreakout", False) or locals().get("level_pb", False))
+        prebrk_flag = bool(is_prebreakout or locals().get("level_pb", False))
 
         if prebrk_flag and atr5 > 0.0:
             if (rng5/atr5 >= FLUSH_K) or (wickiness(o5,h5,l5,c5) >= WICKY_MAX_5M):
