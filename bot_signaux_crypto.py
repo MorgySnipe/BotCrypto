@@ -2182,7 +2182,12 @@ async def process_symbol(symbol):
                     adx_early = 0.0
 
                 # --- [PATCH 11] Floors ADX contextuels ---
-                MAJ = symbol in MAJORS_HI_LIQ
+                MAJORS_HI_LIQ_SET = locals().get(
+                    "MAJORS_HI_LIQ",
+                    {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","LINKUSDT","DOGEUSDT"}
+                )
+                MAJ = symbol in MAJORS_HI_LIQ_SET
+
                 price_now = float(locals().get("price", locals().get("close", 0.0)))
                 ema200_4h = float(locals().get("ema200_4h", 9e9))
                 under200 = price_now < ema200_4h
