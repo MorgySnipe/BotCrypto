@@ -1082,15 +1082,28 @@ def check_spike_and_wick(symbol: str, klines_1h, price: float, mode_label="std")
                 )
                 return True
             else:
-                log_refusal(symbol, "Anti-excès 1h (soft, non bloquant)",
-                            trigger=f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}%")
+                # --- [PATCH 14] Moins de spam anti-excès (spike) ---
+                excess_ratio = float(locals().get("excess_ratio_1h", 0.0))
+                if excess_ratio >= 0.08:  # ne log que si excès >= 8%
+                    log_refusal(
+                        symbol,
+                        "Anti-excès 1h (soft, non bloquant)",
+                        trigger=f"spike={spike_up_pct:.2f}%>seuil={limit_pct:.2f}%"
+                    )
                 return True
 
-        if wick:
-            log_refusal(symbol, "Anti-excès 1h (soft, non bloquant)", trigger="mèche_haute_dominante")
-            return True
 
-        return True
+        # --- [PATCH 14] Moins de spam anti-excès ---
+        excess_ratio = float(locals().get("excess_ratio_1h", 0.0))
+
+
+        if wick:
+            # --- [PATCH 14] Moins de spam anti-excès (mèche) ---
+            excess_ratio = float(locals().get("excess_ratio_1h", 0.0))
+            if excess_ratio >= 0.08:  # ne log que si excès >= 8%
+                log_refusal(symbol, "Anti-excès 1h (soft, non bloquant)", trigger="mèche_haute_dominante")
+            return True
+            
     except Exception:
         # fail-open
         return True
@@ -2168,6 +2181,16 @@ async def process_symbol(symbol):
                 except Exception:
                     adx_early = 0.0
 
+                # --- [PATCH 11] Floors ADX contextuels ---
+                MAJ = symbol in MAJORS_HI_LIQ
+                price_now = float(locals().get("price", locals().get("close", 0.0)))
+                ema200_4h = float(locals().get("ema200_4h", 9e9))
+                under200 = price_now < ema200_4h
+
+                ADX_FLOOR_PULLBACK = 18.0 if MAJ else 20.0   # avant 22–26
+                ADX_FLOOR_TREND    = 14.0 if MAJ else 16.0
+                adx_floor = ADX_FLOOR_PULLBACK if under200 else ADX_FLOOR_TREND
+
                 # --- HARD GATE ADX ---
                 IS_MAJOR = symbol in MAJORS
                 if adx_value < 22 and not IS_MAJOR:
@@ -2566,28 +2589,28 @@ async def process_symbol(symbol):
                 btc_rsi = rsi_tv(closes_btc, 14)
                 btc_macd, btc_signal = compute_macd(closes_btc)
 
-                # ET + seuil RSI 43
-                WEAK_BTC = (btc_rsi < 43) and (btc_macd <= btc_signal)
+                # --- [PATCH 15] Contexte BTC ---
+                btc_macd_ok = (btc_macd > btc_signal)
+                btc_drift = bool(locals().get("btc_drift", False))
 
-                # Exemptions: MAJORS + high-liq
-                HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
+                liq_floor_local = float(locals().get("liq_floor", 3_000_000))
+                is_low_liq = (liq_floor_local <= 3_000_000)
+                btc_really_bad = (btc_rsi < 40 and not btc_macd_ok)
 
-                if WEAK_BTC and (symbol not in MAJORS) and (symbol not in HIGH_LIQ):
-                    # pénalité soft (pas de blocage dur ici)
-                    try:
-                        indicators_soft_penalty += 1
-                    except NameError:
-                        indicators_soft_penalty = 1
+                # HARD uniquement si drift + low-liq + BTC vraiment moche
+                if btc_drift and is_low_liq and btc_really_bad:
+                    log_refusal(symbol, "BTC drift (hard on low-liq)")
+                    return
+
+                # SOFT : même esprit qu'avant (uniquement pour non-majors)
+                if (btc_rsi < 43) and (not btc_macd_ok) and (symbol not in MAJORS):
                     log_refusal(symbol, "BTC faible (soft): RSI<43 ET MACD<=Signal")
-                    # ⚠️ on continue: seul btc_regime_blocked() peut bloquer (panic)
-
                     
         # --- 4h ---
         klines_4h = get_cached(symbol, '4h')
         if not klines_4h or len(klines_4h) < 50:
             log_refusal(symbol, "Données 4h insuffisantes")
             if not in_trade:
-                return
 
         closes_4h = [float(k[4]) for k in klines_4h]
         ema200_4h = ema_tv(closes_4h, 200)
@@ -2615,21 +2638,23 @@ async def process_symbol(symbol):
 
         supertrend_signal = supertrend_like_on_close(klines)
 
-        # [FILTER] Anti-entrée tardive (RSI chaud + vol15m faible)
-        # Appliqué uniquement pour une nouvelle entrée (pas en gestion de position) et hors majors
+        # --- [PATCH 16] Late entry plus contextuelle ---
+        # Appliqué uniquement pour une nouvelle entrée et hors majors (même condition qu'avant)
         if (not in_trade) and (symbol not in MAJORS):
-            try:
-                # 'vol_ratio_15m' a déjà été calculé plus haut ; on s'en sert tel quel
-                if (rsi >= 66.0) and (vol_ratio_15m < 0.50):
-                    log_refusal(
-                        symbol,
-                        "Anti-entrée tardive: RSI≥66 & vol15m<0.50 (non-major)",
-                        trigger=f"rsi={rsi:.1f}, vol15m={vol_ratio_15m:.2f}x"
-                    )
-                    return
-            except Exception:
-                # fail-open défensif
-                pass
+            # rsi 15m + vol15m déjà calculés au-dessus
+            rsi = float(locals().get("rsi", 50.0))
+            vol15 = float(locals().get("vol_ratio_15m", 0.0))
+
+            # Non-majors : on ne bloque plus, on log seulement quand c'est vraiment tardif
+            RSI_CEIL = 70.0
+            VOL_MIN  = 0.50
+
+            if (rsi >= RSI_CEIL) and (vol15 < VOL_MIN):
+                log_refusal(
+                    symbol,
+                    "Anti-entrée tardive: RSI≥70 & vol15m<0.50 (non-major)",
+                    trigger=f"rsi={rsi:.1f}, vol15m={vol15:.2f}x",
+                )
 
         reasons = []
         # Filtres de tendance avec log    
@@ -2864,18 +2889,18 @@ async def process_symbol(symbol):
                 if not in_trade:
                     return
 
-        # — Pré-filtre: prix trop loin de l’EMA25 (pénalité soft, seuil relevé)
-        EMA25_PREFILTER_STD = (1.06 if symbol in MAJORS else 1.10)
-        if price > ema25 * EMA25_PREFILTER_STD:
-            dist = (price / max(ema25, 1e-9) - 1) * 100
-            seuil_pct = (EMA25_PREFILTER_STD - 1) * 100
+        # --- [PATCH 13] EMA25 distance progressive (pré-filtre) ---
+        dist = abs(price - ema25) / max(ema25, 1e-9)  # ratio 0..1
+        ATR_R = float(locals().get("atr_ratio", locals().get("volatility", 0.0)))
+        MAX_DIST = 0.12 if ATR_R < 0.00025 else 0.10  # 12% si marché mou, sinon 10%
+
+        if dist > MAX_DIST:
             log_refusal(
                 symbol,
-                f"Prix éloigné EMA25 (soft > +{seuil_pct:.0f}%)",
-                trigger=f"dist_ema25={dist:.2f}%"
+                f"Prix éloigné EMA25 (soft > {int(MAX_DIST*100)}%)",
+                trigger=f"dist_ema25={dist:.2%}"
             )
             indicators_soft_penalty += 1
-        # pas de return : on continue
 
         # Anti-spike + wick (soft)
         if not check_spike_and_wick(symbol, klines, price, mode_label="std"):
@@ -2896,13 +2921,28 @@ async def process_symbol(symbol):
         vol_ma10 = float(np.mean(vols15[-11:-1]))
         vol_ratio_15m = vol_now / max(vol_ma10, 1e-9)
 
-        # --- VOLUME 15m MIN DUR (dynamique simplifiée) ---
+        # ---- VOLUME 15m MIN DUR (dynamique simplifiée) ---
         IS_HIGH_LIQ = symbol in {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","LINKUSDT","DOGEUSDT"}
-        min_ratio15 = 0.45 if (IS_HIGH_LIQ or IS_MAJOR) else 0.55
+
+        # --- [PATCH 9] Vol15m floors dynamiques + marge si marché actif ---
+        ATR_MARKET_ACTIVE = float(os.getenv("ATR_MARKET_ACTIVE", "0.00030"))
+        VOL15_FLOOR_ALT   = float(os.getenv("VOL15_FLOOR_ALT", "0.50"))
+        VOL15_FLOOR_MAJ   = float(os.getenv("VOL15_FLOOR_MAJ", "0.45"))
+
+        # base par classe (majors/hi-liq vs alts)
+        base_floor = VOL15_FLOOR_MAJ if (IS_HIGH_LIQ or IS_MAJOR) else VOL15_FLOOR_ALT
+
+        # bonus si le marché pulse (on assouplit un peu)
+        atr_ratio = float(locals().get("atr_ratio", 0.0))
+        active_bonus = 0.03 if atr_ratio >= ATR_MARKET_ACTIVE else 0.00
+
+        # seuil final hard
+        min_ratio15 = max(0.35, base_floor - active_bonus)
 
         if vol_ratio_15m < min_ratio15:
             log_refusal(symbol, f"Vol 15m insuffisant (hard): {vol_ratio_15m:.2f} < {min_ratio15:.2f}")
             return
+
 
         # Soft floor basé sur ENV, plus tolérant si major/ADX fort/BTC fort
         min_ratio15 = VOL15M_MIN_RATIO
@@ -3011,11 +3051,17 @@ async def process_symbol(symbol):
         closes_15m = [float(x[4]) for x in k15_closed]
 
         last_15m = list(zip(opens_15m, highs_15m, lows_15m, closes_15m))[-_lookback_wicky:]
-        if len(last_15m) >= 5:
-            wicky = float(np.mean([candle_wickiness(x) for x in last_15m]))
-            if wicky >= float(os.getenv("WICKY_15M_MAX", "0.60")):
-                log_refusal(symbol, f"wicky15m (>= max)", trigger=f"wicky15m={wicky:.2f}")
-                return
+        # --- [PATCH 19] Wicks tolérance dynamique ---
+        wicky = float(locals().get("wicky15m", 0.0))  # 0..1
+        atr_ratio = float(locals().get("atr_ratio", 0.0))
+        MAJ = symbol in MAJORS_HI_LIQ
+
+        WICK_MAX = 0.62 if MAJ else 0.58
+        if atr_ratio >= 0.00030:
+            WICK_MAX += 0.04  # si marché pulse, on tolère plus
+
+        if wicky >= WICK_MAX:
+            log_refusal(symbol, f"wicky15m (>= max): {wicky:.2f} >= {WICK_MAX:.2f}")
 
         # ---- Cooldown 5m après flush/mèche ----
         def wickiness(o,h,l,c):
@@ -3071,12 +3117,16 @@ async def process_symbol(symbol):
         # [#gate-ema200-4h-clearance]
         # — Hard gate: pas d'achat si trop proche de l'EMA200(4h)
         CLEARANCE_EMA200_4H_PCT = float(os.getenv("CLEARANCE_EMA200_4H_PCT", "0.004"))  # 0.4%
-        if ema200_4h and abs(price / max(ema200_4h, 1e-9) - 1.0) <= CLEARANCE_EMA200_4H_PCT:
-            log_refusal(
-                symbol,
-                "Proximité EMA200(4h) (hard)",
-                trigger=f"dist={abs(price/max(ema200_4h,1e-9)-1)*100:.2f}%"
-            )
+        # --- [PATCH 12] Proximité 200 4h ---
+        p = float(locals().get("price", locals().get("close", 0.0)))
+        ema200 = float(locals().get("ema200_4h", 0.0))
+        atr4 = float(locals().get("atr4h", 0.0))
+        dist = abs(p - ema200) / max(p, 1e-9)
+        atr_ratio_4h = (atr4 / p) if (p and atr4) else 0.0
+
+        DIST_HARD = 0.003  # 0.3%
+        if (dist < DIST_HARD) and (atr_ratio_4h < 0.00025):
+            log_refusal(symbol, "Proximité EMA200(4h) (hard)")
             return
 
         # [#liq-1h-simple-guard]
@@ -3101,8 +3151,14 @@ async def process_symbol(symbol):
 
         liq_floor = LIQ_FLOOR_MAJ if symbol in MAJORS_HI_LIQ else LIQ_FLOOR_ALT
 
+        # --- [PATCH 10] liquidité : relax si actif ---
+        ATR_MARKET_ACTIVE = float(os.getenv("ATR_MARKET_ACTIVE", "0.00030"))
+        RELAX_PCT = float(os.getenv("LIQ_RELAX_ACTIVE_PCT", "0.25"))  # 25%
+        atr_ratio = float(locals().get("atr_ratio", 0.0))
+        liq_floor_effective = liq_floor * (1.0 - RELAX_PCT) if atr_ratio >= ATR_MARKET_ACTIVE else liq_floor
+
         # Si marché mou à court terme (vol_ratio_1h_local < 0.90) ET MA20(1h) en-dessous du plancher → on refuse
-        if (vol_ratio_1h_local < 0.90) and (vol20_1h < liq_floor):
+        if (vol_ratio_1h_local < 0.90) and (vol20_1h < liq_floor_effective):
             log_refusal(
                 symbol,
                 "liquidité 1h insuffisante (simple)",
@@ -3233,10 +3289,14 @@ async def process_symbol(symbol):
                 if not in_trade:
                     return
                     
-            if price > ema25 * 1.08:
-                log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.08 ({ema25*1.08:.4f})")
-                reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
-                # pas de return -> on continue
+            # --- [PATCH 13] EMA25 distance progressive (std) ---
+            dist = abs(price - ema25) / max(ema25, 1e-9)
+            ATR_R = float(locals().get("atr_ratio", locals().get("volatility", 0.0)))
+            MAX_DIST = 0.12 if ATR_R < 0.00025 else 0.10
+
+            if dist > MAX_DIST:
+                log_refusal(symbol, f"Prix éloigné EMA25 (soft > {int(MAX_DIST*100)}%)")
+                reasons += [f"⚠️ Distance EMA25 {dist:.2%} (soft)"]
 
             # ➕ ajoute les avertissements tendance s’il y en a
             if tendance_soft_notes:
@@ -3327,9 +3387,14 @@ async def process_symbol(symbol):
                         pass
                     else:
                         # entrée trop loin d'EMA25 → on laisse une alerte soft, sans bloquer
-                        if price > ema25 * 1.08:
-                            log_refusal(symbol, f"Prix éloigné EMA25 (soft): {price:.4f} > EMA25×1.08 ({ema25*1.08:.4f})")
-                            reasons += [f"⚠️ Distance EMA25 {price/ema25-1:.2%} (soft)"]
+                        # --- [PATCH 13] EMA25 distance progressive (PB) ---
+                        dist = abs(price - ema25) / max(ema25, 1e-9)
+                        ATR_R = float(locals().get("atr_ratio", locals().get("volatility", 0.0)))
+                        MAX_DIST = 0.12 if ATR_R < 0.00025 else 0.10
+
+                        if dist > MAX_DIST:
+                            log_refusal(symbol, f"Prix éloigné EMA25 (soft > {int(MAX_DIST*100)}%)")
+                            reasons += [f"⚠️ Distance EMA25 {dist:.2%} (soft)"]
 
                         # avertissements tendance éventuels
                         if tendance_soft_notes:
@@ -3447,7 +3512,7 @@ async def process_symbol(symbol):
                             pass
 
         # ===== Patch 4 — score minimum (standard) assoupli & non bloquant =====
-        SCORE_MIN_STD = 3
+        SCORE_MIN_STD = float(os.getenv("SCORE_MIN", "2.6"))
 
         if confidence < SCORE_MIN_STD:
             # On LOG pour suivi, mais on ne coupe plus le trade.
