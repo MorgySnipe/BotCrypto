@@ -2186,7 +2186,7 @@ async def process_symbol(symbol):
                     "MAJORS_HI_LIQ",
                     {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","LINKUSDT","DOGEUSDT"}
                 )
-                MAJ = symbol in MAJORS_HI_LIQ_SET
+                MAJ = symbol in MAJORS
 
                 price_now = float(locals().get("price", locals().get("close", 0.0)))
                 ema200_4h = float(locals().get("ema200_4h", 9e9))
@@ -3060,7 +3060,7 @@ async def process_symbol(symbol):
         # --- [PATCH 19] Wicks tolérance dynamique ---
         wicky = float(locals().get("wicky15m", 0.0))  # 0..1
         atr_ratio = float(locals().get("atr_ratio", 0.0))
-        MAJ = symbol in MAJORS_HI_LIQ
+        MAJ = symbol in MAJORS
 
         WICK_MAX = 0.62 if MAJ else 0.58
         if atr_ratio >= 0.00030:
