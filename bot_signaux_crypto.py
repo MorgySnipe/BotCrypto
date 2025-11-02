@@ -2647,15 +2647,31 @@ async def process_symbol(symbol):
         if closes_4h[-1] < ema50_4h: indicators_soft_penalty += 1
         if closes_4h[-1] < ema200_4h: indicators_soft_penalty += 1
 
-        # [GATE-200/4H] — hard gate si 1h<EMA200 ET 4h pas en tendance (sauf override flux fort)
+        # [PATCH 7] Gate 200/4h — "hard" seulement si vraiment défavorable
+        is_major = (symbol in MAJORS)
+
+        # 1) état 1h & 4h (inchangé)
         weak_1h = price < ema200 * 0.997
         weak_4h = not (closes_4h[-1] > ema50_4h and ema50_4h > ema200_4h)
 
-        # override si major + flux court-terme solide
-        override_flow = (symbol in MAJORS and adx_value >= 28 and vol_ratio_15m >= 0.55)
+        # 2) protections si le flux est solide (comme avant)
+        override_flow = is_major and (adx_value >= 28) and (vol_ratio_15m >= 0.55)
 
-        if ENABLE_GATE_200_4H and weak_1h and weak_4h and not override_flow:
-            log_refusal(symbol, "Gate 200/4h: structure faible (hard)")
+        # 3) "hard" uniquement si très proche de la 200 4h OU adx trop faible
+        dist200_4h = abs(closes_4h[-1] - ema200_4h) / max(closes_4h[-1], 1e-9)
+        ADX_FLOOR_HARD = 16.0 if is_major else 18.0
+        DIST_HARD = 0.004 if is_major else 0.006  # 0,4% / 0,6%
+
+        if (ENABLE_GATE_200_4H
+            and weak_1h
+            and weak_4h
+            and ((dist200_4h < DIST_HARD) or (adx_value < ADX_FLOOR_HARD))
+            and (not override_flow)):
+            log_refusal(
+                symbol,
+                "Gate 200/4h: structure faible (hard)",
+                trigger=f"dist200_4h={dist200_4h:.3%}, adx={adx_value:.1f}"
+            )
             if not in_trade:
                 return
 
@@ -2673,17 +2689,37 @@ async def process_symbol(symbol):
             # pas de return -> on continue
 
 
+        # [PATCH 8] Volatilité faible — soft vs hard, majors et override de flux
         volatility = get_volatility(atr, price)
-        VOL_MIN = 0.001  # test assoupli (avant 0.002 ou 0.003)
-        if volatility < VOL_MIN:
-            log_refusal(symbol, f"Volatilité faible (ATR/price={volatility:.4f} < {VOL_MIN})")
+
+        # Majors plus tolérantes
+        is_major = (symbol in MAJORS)
+
+        # Seuils SOFT et HARD (en ATR/price)
+        VOL_MIN_SOFT = 0.0010 if not is_major else 0.0007
+        VOL_MIN_HARD = 0.0006 if not is_major else 0.0004
+
+        # Si le flux court-terme est correct, on évite le hard
+        flow_override = (adx_value >= 20 and vol_ratio_15m >= 0.55)
+
+        if volatility < VOL_MIN_SOFT:
+            log_refusal(
+                symbol,
+                f"Volatilité faible (ATR/price={volatility:.4f} < {VOL_MIN_SOFT})"
+            )
             try:
                 indicators_soft_penalty += 1
             except NameError:
                 pass
-            # si vraiment très faible (<0.0008), on refuse
-            if volatility < 0.0008:
+
+            # HARD seulement si très faible et pas de bon flux
+            if (volatility < VOL_MIN_HARD) and (not flow_override) and (not in_trade):
+                log_refusal(
+                    symbol,
+                    f"Volatilité très faible (hard): {volatility:.4f} < {VOL_MIN_HARD}"
+                )
                 return
+
 
         # --- ADX (standard) dynamique + gate 15m ---
         # petit pouls de volume 15m (indépendant du bloc "Confirmation volume 15m")
