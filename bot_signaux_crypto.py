@@ -2611,6 +2611,7 @@ async def process_symbol(symbol):
         if not klines_4h or len(klines_4h) < 50:
             log_refusal(symbol, "Données 4h insuffisantes")
             if not in_trade:
+                pass   # <— AJOUTE CETTE LIGNE (même indentation)
 
         closes_4h = [float(k[4]) for k in klines_4h]
         ema200_4h = ema_tv(closes_4h, 200)
