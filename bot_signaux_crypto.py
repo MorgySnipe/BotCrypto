@@ -213,6 +213,25 @@ def binance_get(path, params=None, max_tries=6):
     return None
 
 # [#liq-24h-helper]
+# --- Utils manquants (évite NameError) ---
+def minutes_since(ts_ms: int) -> float:
+    """
+    Retourne le nombre de minutes écoulées depuis un timestamp ms (UTC).
+    Fail-safe: grande valeur si conversion impossible.
+    """
+    try:
+        dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+        return max((datetime.now(timezone.utc) - dt).total_seconds() / 60.0, 0.0)
+    except Exception:
+        return 9e9
+
+def note(symbol: str, msg: str):
+    """Note de debug non bloquante (redirigée vers log_info)."""
+    try:
+        log_info(symbol, f"NOTE: {msg}")
+    except Exception:
+        print(f"[NOTE] {symbol}: {msg}")
+
 # ---- Helper cache pour volume 24h USDT par symbole ----
 SYMBOL_24H_META = {}  # {symbol: {"ts": datetime, "quoteVolume": float}}
 
@@ -476,10 +495,15 @@ def save_trades():
             for sym, t in trades.items():
                 d = dict(t)
                 if "tp_times" in d:
-                    d["tp_times"] = {k: str(v) for k,v in d["tp_times"].items()}
+                    d["tp_times"] = {k: str(v) for k, v in d["tp_times"].items()}
                 serializable[sym] = d
-            with open(PERSIST_FILE, "w") as f:
+
+            tmp = PERSIST_FILE + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(serializable, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, PERSIST_FILE)  # atomic
     except Exception as e:
         print(f"⚠️ save_trades: {e}")
 
@@ -495,8 +519,12 @@ def load_history():
 def save_history():
     try:
         with file_lock:
-            with open(HISTORY_FILE, "w") as f:
+            tmp = HISTORY_FILE + ".tmp"
+            with open(tmp, "w") as f:
                 json.dump(history, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, HISTORY_FILE)  # atomic
     except Exception as e:
         print(f"⚠️ save_history: {e}")
 
@@ -559,6 +587,10 @@ def get_cached(symbol, tf="1h", limit=None, force: bool=False):
 
 # ====== META / HELPERS POUR MESSAGES & IDs ======
 BOT_VERSION = "v1.0.0"
+# NEW: drapeaux globaux utilisés par la logique pré-breakout
+is_prebreakout: bool = False
+btc_uptrend: bool = False
+eth_uptrend: bool = False
 # === Contexte marché global (pré-calcul BTC/ETH pour perf) ===
 MARKET_STATE = {
     "btc": {"rsi": None, "macd": None, "signal": None, "adx": None, "up": None},
@@ -1943,13 +1975,16 @@ def get_last_price(symbol):
     except Exception:
         return None
 
-# === Pré-calcul des indicateurs BTC/ETH pour booster les perfs ===
 def update_market_state():
+    """
+    Calcule RSI/MACD/ADX/up pour BTC & ETH et alimente aussi
+    les drapeaux globaux btc_uptrend / eth_uptrend utilisés ailleurs.
+    """
+    global btc_uptrend, eth_uptrend
     try:
         for sym, key in (("BTCUSDT", "btc"), ("ETHUSDT", "eth")):
             k = market_cache.get(sym, [])
             if not k or len(k) < 30:
-                # pas de données -> on met des None
                 MARKET_STATE[key].update({"rsi": None, "macd": None, "signal": None, "adx": None, "up": None})
                 continue
 
@@ -1962,9 +1997,17 @@ def update_market_state():
             MARKET_STATE[key].update({
                 "rsi": rsi, "macd": macd, "signal": signal, "adx": adx, "up": up
             })
+
+        # Alimente les flags globaux (fail-safe sur None)
+        btc = MARKET_STATE.get("btc", {})
+        eth = MARKET_STATE.get("eth", {})
+        btc_uptrend = bool(btc.get("up"))
+        eth_uptrend = bool(eth.get("up"))
+
     except Exception:
-        # en cas de pépin, on ne bloque pas le bot
+        # en cas de pépin, on n'arrête pas le bot
         pass
+
 
 def btc_is_bullish_strong() -> bool:
     """
@@ -2974,11 +3017,8 @@ async def process_symbol(symbol):
         COOLDOWN_MIN = int(os.getenv("PREBRK_COOLDOWN_5M","30"))
 
         # -- Résolution robuste du flag "pré-breakout" --
-        try:
-            prebrk_flag = bool(is_prebreakout)  # si déjà défini ailleurs
-        except NameError:
-            # fallback: certains blocs utilisent level_pb comme indicateur de pré-breakout
-            prebrk_flag = bool(locals().get("level_pb", False))
+        # 'is_prebreakout' peut ne pas exister ici → lecture sûre
+        prebrk_flag = bool(globals().get("is_prebreakout", False) or locals().get("level_pb", False))
 
         if prebrk_flag and atr5 > 0.0:
             if (rng5/atr5 >= FLUSH_K) or (wickiness(o5,h5,l5,c5) >= WICKY_MAX_5M):
@@ -3013,8 +3053,13 @@ async def process_symbol(symbol):
 
         # Seuils simples : plus stricts pour les ALTS, plus tolérants sur majors
         MAJORS_HI_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","LINKUSDT","DOGEUSDT"}
-        LIQ_FLOOR_ALT  = float(os.getenv("LIQ_FLOOR_ALT_USDT",  "3_000_000"))   # MA20(1h) quote vol mini sur ALT
-        LIQ_FLOOR_MAJ  = float(os.getenv("LIQ_FLOOR_MAJ_USDT", "10_000_000"))   # MA20(1h) quote vol mini sur MAJORS
+        # Planchers de liquidité 1h (tolère "3_000_000", "10 000 000", etc.)
+        try:
+            LIQ_FLOOR_ALT = float(os.getenv("LIQ_FLOOR_ALT_USDT", "3000000").replace("_","").replace(" ",""))
+            LIQ_FLOOR_MAJ = float(os.getenv("LIQ_FLOOR_MAJ_USDT", "10000000").replace("_","").replace(" ",""))
+        except Exception:
+            LIQ_FLOOR_ALT = 3_000_000.0
+            LIQ_FLOOR_MAJ = 10_000_000.0
 
         liq_floor = LIQ_FLOOR_MAJ if symbol in MAJORS_HI_LIQ else LIQ_FLOOR_ALT
 
@@ -3289,6 +3334,8 @@ async def process_symbol(symbol):
                             atr_gate = float(os.getenv("PREBRK_4H_RESIST_ATR_MIN", "0.80")) * max(atr_1h, 1e-9)
 
                             # Flag explicite : on est bien dans la branche pré-breakout
+                            # Flag explicite : on est bien dans la branche pré-breakout
+                            global is_prebreakout
                             is_prebreakout = True
                             if is_prebreakout and dist_to_res <= atr_gate:
                                 force_close = os.getenv("PREBRK_FORCE_CLOSE_OVER_4H", "1") == "1"
