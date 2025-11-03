@@ -2116,6 +2116,11 @@ async def process_symbol(symbol):
         indicators_soft_penalty = 0
         tendance_soft_notes = []
         reasons = []
+        # Flags de confluence init par défaut
+        trend_ok = False
+        momentum_ok_eff = False
+        volume_ok = False
+
         # --- Auto-close SOUPLE (ne coupe plus automatiquement à 12h) ---
         if symbol in trades and trades[symbol].get("strategy", "standard") == "standard":
             entry_time = datetime.strptime(trades[symbol]['time'], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
@@ -3001,59 +3006,60 @@ async def process_symbol(symbol):
             log_refusal(symbol, f"Vol 15m faible (soft): {vol_ratio_15m:.2f}")
             reasons += [f"⚠️ Vol15m {vol_ratio_15m:.2f} (soft)"]
 
-        # ===== Circuit-breaker "orage d'alertes" (soft) =====
-        storm = is_alert_storm()
-        if storm:
-            # Si STRONG_ONLY: on bloque sauf contexte fort multi-TF
-            strong_ctx = (
-                (adx_value >= 26 and supertrend_signal and vol_ratio_15m >= 0.60)
-                or (symbol in MAJORS and adx_value >= 24 and supertrend_signal and vol_ratio_15m >= 0.55)
-            )
-            if STORM_STRONG_ONLY == "1" and not strong_ctx:
-                log_refusal(
-                    symbol,
-                    "Circuit-breaker soft (alert storm): contexte insuffisant",
-                    trigger=f"adx={adx_value:.1f}, vol15m={vol_ratio_15m:.2f}"
-                )
-                # On ne bloque pas la gestion d'une position existante
-                if symbol not in trades:
-                    return
-            else:
-                # Mode non-bloquant: on pénalise le score et on relève un peu les exigences de flux
-                try:
-                    indicators_soft_penalty += 1
-                except NameError:
-                    indicators_soft_penalty = 1
-                # durcissement léger sur vol15m requis (jusqu'à +10%, borné)
-                min_ratio15_storm = max(0.40, min(0.70, VOL15M_MIN_RATIO * 1.10))
-                if vol_ratio_15m < min_ratio15_storm:
-                    log_refusal(symbol, f"Circuit-breaker: vol15m < {min_ratio15_storm:.2f} (soft)", trigger=f"vol15m={vol_ratio_15m:.2f}")
-                    if symbol not in trades:
-                        return
-
-                    # === Confluence & scoring (final) ===
-                    # Init de sécurité pour éviter UnboundLocalError si un bloc est sauté
-                    trend_ok = False
-                    momentum_ok_eff = False
-                    volume_ok = False
-
-                    volume_ok   = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
-                    trend_ok = (
-                        (price >= ema200 * 0.99)                             # tolérance -1%
-                        or (closes_4h[-1] > ema50_4h and ema50_4h > ema200_4h)  # 4h propre
-                    ) and supertrend_signal
-
-                    momentum_ok = (macd > signal) and (rsi >= 55) and (hist_now >= hist_prev)
-
-                    # [#patch-momentum-loose]
-                    rs_vs_btc = rel_strength_vs_btc(symbol, klines_1h_alt=klines)  # ALT-BTC sur 3h
-                    momentum_ok_loose = (
-                        ((macd > signal) and (rsi >= 53)) or
-                        ((hist_now > hist_prev) and (rsi >= 54)) or
-                        ((macd > signal) and (adx_value >= 22) and (rs_vs_btc >= 0.003))  # +0.3% vs BTC sur ~3h
+                # ===== Circuit-breaker "orage d'alertes" (soft) =====
+                storm = is_alert_storm()
+                if storm:
+                    # Si STRONG_ONLY: on bloque sauf contexte fort multi-TF
+                    strong_ctx = (
+                        (adx_value >= 26 and supertrend_signal and vol_ratio_15m >= 0.60)
+                        or (symbol in MAJORS and adx_value >= 24 and supertrend_signal and vol_ratio_15m >= 0.55)
                     )
-                    # on n’accepte le "loose" que s’il y a déjà du flux court-terme
-                    momentum_ok_eff = momentum_ok or (momentum_ok_loose and vol_ratio_15m >= 0.50)
+                    if STORM_STRONG_ONLY == "1" and not strong_ctx:
+                        log_refusal(
+                            symbol,
+                            "Circuit-breaker soft (alert storm): contexte insuffisant",
+                            trigger=f"adx={adx_value:.1f}, vol15m={vol_ratio_15m:.2f}"
+                        )
+                        # On ne bloque pas la gestion d'une position existante
+                        if symbol not in trades:
+                            return
+                    else:
+                        # Mode non-bloquant: on pénalise le score et on relève un peu les exigences de flux
+                        try:
+                            indicators_soft_penalty += 1
+                        except NameError:
+                            indicators_soft_penalty = 1
+                        # durcissement léger sur vol15m requis (jusqu'à +10%, borné)
+                        min_ratio15_storm = max(0.40, min(0.70, VOL15M_MIN_RATIO * 1.10))
+                        if vol_ratio_15m < min_ratio15_storm:
+                            log_refusal(
+                                symbol,
+                                f"Circuit-breaker: vol15m < {min_ratio15_storm:.2f} (soft)",
+                                trigger=f"vol15m={vol_ratio_15m:.2f}"
+                            )
+                            if symbol not in trades:
+                                return
+
+                # === Confluence & scoring (final) ===
+                volume_ok = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
+
+                trend_ok = (
+                    (price >= ema200 * 0.99)                             # tolérance -1%
+                    or (closes_4h[-1] > ema50_4h and ema50_4h > ema200_4h)  # 4h propre
+                ) and supertrend_signal
+
+                momentum_ok = (macd > signal) and (rsi >= 55) and (hist_now >= hist_prev)
+
+                # [#patch-momentum-loose]
+                rs_vs_btc = rel_strength_vs_btc(symbol, klines_1h_alt=klines)  # ALT-BTC sur 3h
+                momentum_ok_loose = (
+                    ((macd > signal) and (rsi >= 53)) or
+                    ((hist_now > hist_prev) and (rsi >= 54)) or
+                    ((macd > signal) and (adx_value >= 22) and (rs_vs_btc >= 0.003))  # +0.3% vs BTC sur ~3h
+                )
+                # on n’accepte le "loose" que s’il y a déjà du flux court-terme
+                momentum_ok_eff = momentum_ok or (momentum_ok_loose and vol_ratio_15m >= 0.50)
+
 
             indicators = {
                 "rsi": rsi,
