@@ -2565,7 +2565,7 @@ async def process_symbol(symbol):
             # --- fin confirmation stop 1m (majors) ---
 
 
-            if stop_hit or gain <= -1.5:
+            if stop_hit or gain <= -2.5:
                 event  = "STOP" if stop_hit else "SELL"
                 reason = "Stop touché" if stop_hit else "Perte max (-1.5%)"
 
@@ -3036,6 +3036,26 @@ async def process_symbol(symbol):
         sl_initial = max(0.0, min(sl_initial, price * 0.999))
 
         position_pct = position_pct_from_risk(price, sl_initial)
+
+        # [GATE-BTC-ETH] — Contexte marché pour les setups STANDARD
+        # On évite de longs standards sur les alts quand BTC & ETH ne sont pas en uptrend
+        # et que le RSI 1h de l'alt est encore sous 50 (trend pas vraiment construit).
+        if strategy == "standard" and side == "long":
+            if symbol not in ("BTCUSDT", "ETHUSDT"):
+                try:
+                    rsi_1h_value = float(rsi_1h) if rsi_1h is not None else None
+                except Exception:
+                    rsi_1h_value = None
+
+                if (not btc_uptrend) and (not eth_uptrend):
+                    # Si on a un RSI 1h mesurable et qu'il est < 50 → on SKIP le trade
+                    if (rsi_1h_value is not None) and (rsi_1h_value < 50.0):
+                        note(
+                            symbol,
+                            f"refus: BTC/ETH pas en uptrend et RSI1h trop faible "
+                            f"({rsi_1h_value:.1f} < 50) pour un setup standard"
+                        )
+                        return
 
         # --- Décision d'achat (standard) avec filtre 15m ---
         # [#wicky-15m-filter]
