@@ -3040,45 +3040,45 @@ async def process_symbol(symbol):
                     if symbol not in trades:
                         return
 
-            # === Confluence & scoring (final) ===
-            volume_ok = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
-    
-            trend_ok = (
-                (price >= ema200 * 0.99)                             # tolérance -1%
-                or (closes_4h[-1] > ema50_4h and ema50_4h > ema200_4h)  # 4h propre
-            ) and supertrend_signal
+        # === Confluence & scoring (final) ===
+        volume_ok = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
 
-            momentum_ok = (macd > signal) and (rsi >= 55) and (hist_now >= hist_prev)
+        trend_ok = (
+            (price >= ema200 * 0.99)                             # tolérance -1%
+            or (closes_4h[-1] > ema50_4h and ema50_4h > ema200_4h)  # 4h propre
+        ) and supertrend_signal
 
-            # [#patch-momentum-loose]
-            rs_vs_btc = rel_strength_vs_btc(symbol, klines_1h_alt=klines)  # ALT-BTC sur 3h
-            momentum_ok_loose = (
-                ((macd > signal) and (rsi >= 53)) or
-                ((hist_now > hist_prev) and (rsi >= 54)) or
-                ((macd > signal) and (adx_value >= 22) and (rs_vs_btc >= 0.003))  # +0.3% vs BTC sur ~3h
-            )
-            momentum_ok_eff = momentum_ok or (momentum_ok_loose and vol_ratio_15m >= 0.50)
+        momentum_ok = (macd > signal) and (rsi >= 55) and (hist_now >= hist_prev)
 
+        # [#patch-momentum-loose]
+        rs_vs_btc = rel_strength_vs_btc(symbol, klines_1h_alt=klines)  # ALT-BTC sur 3h
+        momentum_ok_loose = (
+            ((macd > signal) and (rsi >= 53)) or
+            ((hist_now > hist_prev) and (rsi >= 54)) or
+            ((macd > signal) and (adx_value >= 22) and (rs_vs_btc >= 0.003))  # +0.3% vs BTC sur ~3h
+        )
+        momentum_ok_eff = momentum_ok or (momentum_ok_loose and vol_ratio_15m >= 0.50)
 
-            indicators = {
-                "rsi": rsi,
-                "macd": macd,
-                "signal": signal,
-                "supertrend": supertrend_signal,
-                "adx": adx_value,
-                "volume_ok": volume_ok,
-                "above_ema200": price > ema200,
-            }
+        indicators = {
+            "rsi": rsi,
+            "macd": macd,
+            "signal": signal,
+            "supertrend": supertrend_signal,
+            "adx": adx_value,
+            "volume_ok": volume_ok,
+            "above_ema200": price > ema200,
+        }
 
-            cap = 1 if (adx_value >= 28 and supertrend_signal) else 2
-            indicators_soft_penalty = min(indicators_soft_penalty, cap)
+        cap = 1 if (adx_value >= 28 and supertrend_signal) else 2
+        indicators_soft_penalty = min(indicators_soft_penalty, cap)
 
-            # Calcul du score puis bonus marché si BTC est propre
-            confidence = max(0, compute_confidence_score(indicators) - indicators_soft_penalty)
-            if btc_is_bullish_strong():
-                confidence = min(10, confidence + 1)
+        # Calcul du score puis bonus marché si BTC est propre
+        confidence = max(0, compute_confidence_score(indicators) - indicators_soft_penalty)
+        if btc_is_bullish_strong():
+            confidence = min(10, confidence + 1)
 
-            label_conf = label_confidence(confidence)
+        label_conf = label_confidence(confidence)
+
 
             # --- Stop provisoire pour le sizing (même logique que l'entrée) ---
             # --- Stop initial ATR (plus large, moins de faux stops) ---
