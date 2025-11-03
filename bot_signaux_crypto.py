@@ -3031,11 +3031,6 @@ async def process_symbol(symbol):
                     if symbol not in trades:
                         return
 
-                # Défauts de sécurité (au cas où un bloc en amont ne s'exécute pas)
-                trend_ok = False
-                momentum_ok_eff = False
-                volume_ok = False
-
                     # === Confluence & scoring (final) ===
                     # Init de sécurité pour éviter UnboundLocalError si un bloc est sauté
                     trend_ok = False
