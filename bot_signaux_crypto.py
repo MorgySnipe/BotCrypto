@@ -332,6 +332,7 @@ INIT_SL_PCT_STD_MAX = 0.012  # 1.2%
 TRAIL_MIN_BUFFER_ATR_STRONG = 0.8
 TRAIL_MIN_BUFFER_ATR_WEAK   = 0.6
 TRAIL_STEP_CAP_ATR          = 0.5
+TRAIL_BEFORE_TP1_MAX = float(os.getenv("TRAIL_BEFORE_TP1_MAX", "1.8"))  # % de gain mini avant de trailed
 # --- Plancher absolu de distance prix→stop (en ATR) pendant les tendances fortes ---
 # Par défaut: jamais < 0.45×ATR si ADX >= 28 (peut être ajusté via ENV)
 try:
@@ -918,6 +919,35 @@ def get_klines(symbol, interval='1h', limit=100):
         print(f"❌ Erreur réseau get_klines({symbol}) (après rotation)")
         return []
     return data
+
+from datetime import timezone  # à vérifier qu'il est bien importé en haut du fichier
+
+def max_price_since_entry_1m(symbol: str, entry_dt: datetime, klines_cache: dict) -> float | None:
+    """
+    Retourne le plus haut prix (mèches incluses) sur le 1m
+    depuis l'heure d'entrée du trade.
+    
+    On se base sur les klines 1m déjà présentes dans `klines_cache["1m"]`
+    pour ne pas refaire d'appel API.
+    """
+    k1m = klines_cache.get("1m")
+    if not k1m:
+        return None
+
+    # open time des klines est en ms
+    entry_ts_ms = int(entry_dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+    highs = [
+        float(candle[2])  # index 2 = HIGH sur les klines Binance
+        for candle in k1m
+        if int(candle[0]) >= entry_ts_ms  # on ne prend que les bougies après l'entrée
+    ]
+
+    if not highs:
+        return None
+
+    return max(highs)
+
 
 def compute_rsi(prices, period=14):
     deltas = np.diff(prices)
@@ -1951,6 +1981,9 @@ def trailing_stop_advanced(symbol, current_price, atr_value=None, atr_period=14)
 
     # Micro verrouillage si le gain est déjà important
     gain_pct = ((current_price - entry) / max(entry, 1e-9)) * 100.0
+    # Ne pas trailed le stop tant qu'on n'a pas au moins X% de gain ou TP1
+    if (not tp1_done) and (gain_pct < TRAIL_BEFORE_TP1_MAX):
+        return
     if gain_pct >= 3.0:
         new_stop = max(new_stop, ema_guard + 0.60 * atr)   # ≥ +0.6×ATR au-dessus du guard
     if gain_pct >= 5.0:
@@ -2260,10 +2293,15 @@ async def process_symbol(symbol):
             # [F1] === TP dynamiques (STANDARD) — même logique que 'aggressive' ===
             if "tp_times" not in trades[symbol]:
                 trades[symbol]["tp_times"] = {}
+
+            # Prix max atteint depuis l'entrée, sur les mèches 1m
+            max_price_1m = max_price_since_entry_1m(symbol, entry_time, klines) or price
+            max_gain_pct = ((max_price_1m - entry) / max(entry, 1e-9)) * 100.0
+
             atr_val_current = atr_tv_cached(symbol, klines)  # ATR 1h actuel (cache)
             for tp_idx, atr_mult in enumerate(TP_ATR_MULTS_STD, start=1):
                 threshold_pct = (atr_mult * atr_val_current / max(entry, 1e-9)) * 100.0
-                if gain >= threshold_pct and not trades[symbol].get(f"tp{tp_idx}", False):
+                    if max_gain_pct >= threshold_pct and not trades[symbol].get(f"tp{tp_idx}", False):
                     last_tp_time = trades[symbol]["tp_times"].get(f"tp{tp_idx-1}") if tp_idx > 1 else None
                     if isinstance(last_tp_time, str):
                         try:
@@ -2277,12 +2315,10 @@ async def process_symbol(symbol):
 
                         # BE après TP1 ; après TP2/TP3 on pousse le stop progressivement
                         if tp_idx == 1:
-                            new_stop_level = entry  # break-even
-
-                            # === BE + epsilon pour contrer le slippage à TP1 ===
-                            # (nécessite: import os en haut du fichier)
-                            BE_EPS_AFTER_TP1 = float(os.getenv("BE_EPS_AFTER_TP1", "0.0005"))  # +0.05% au-dessus de l'entrée
+                            new_stop_level = entry
+                            BE_EPS_AFTER_TP1 = float(os.getenv("BE_EPS_AFTER_TP1", "0.0005"))  # +0.05%
                             new_stop_level = max(new_stop_level, entry * (1.0 + BE_EPS_AFTER_TP1))
+
                         else:
                             # petit BE+ conditionné au seuil atteint
                             new_stop_level = max(entry, entry * (1.0 + max(0.0, threshold_pct - 0.6) / 100.0))
