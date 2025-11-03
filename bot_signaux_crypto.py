@@ -2120,6 +2120,7 @@ async def process_symbol(symbol):
         trend_ok = False
         momentum_ok_eff = False
         volume_ok = False
+        confidence = 0.0  # ← init pour éviter UnboundLocalError plus bas
 
         # --- Auto-close SOUPLE (ne coupe plus automatiquement à 12h) ---
         if symbol in trades and trades[symbol].get("strategy", "standard") == "standard":
@@ -2128,11 +2129,10 @@ async def process_symbol(symbol):
             # ❌ plus d’auto-BE avant 12h — le BE est géré uniquement par TRAIL_BE_AFTER/TP1
             pass
 
-
         # ---------- Analyse standard ----------
         print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] 🔍 Analyse de {symbol}", flush=True)
 
-        klines = get_cached(symbol, '1h')# 1h
+        klines = get_cached(symbol, '1h')  # 1h
         # --- GUARD: trade ouvert mais pas de données 1h -> gérer en mode minimal ---
         in_trade_std = (symbol in trades) and (trades[symbol].get("strategy", "standard") == "standard")
 
@@ -2143,15 +2143,15 @@ async def process_symbol(symbol):
                 return
 
             entry = float(trades[symbol].get("entry", price))
-            stop  = float(trades[symbol].get("stop", trades[symbol].get("sl_initial", entry)))
-            gain  = ((price - entry) / max(entry, 1e-9)) * 100.0
+            stop = float(trades[symbol].get("stop", trades[symbol].get("sl_initial", entry)))
+            gain = ((price - entry) / max(entry, 1e-9)) * 100.0
 
             # calcule la durée de position de façon tolérante
-            et = _parse_dt_flex(trades[symbol].get("time","")) or datetime.now(timezone.utc)
-            elapsed_h = (datetime.now(timezone.utc) - et).total_seconds()/3600.0
+            et = _parse_dt_flex(trades[symbol].get("time", "")) or datetime.now(timezone.utc)
+            elapsed_h = (datetime.now(timezone.utc) - et).total_seconds() / 3600.0
 
             if price <= stop or gain <= -1.5:
-                event  = "STOP" if price <= stop else "SELL"
+                event = "STOP" if price <= stop else "SELL"
                 reason = "Stop touché" if event == "STOP" else "Perte max (-1.5%)"
                 # contexte minimal (safe) vu qu'on n'a pas les indicateurs 1h
                 ctx = {
@@ -2170,23 +2170,23 @@ async def process_symbol(symbol):
             return
 
         # --- Indicateurs (versions TradingView) — calculés AVANT tout usage (⚠️ adx_value) ---
-        closes  = [float(k[4]) for k in klines]
-        highs   = [float(k[2]) for k in klines]
-        lows    = [float(k[3]) for k in klines]
+        closes = [float(k[4]) for k in klines]
+        highs = [float(k[2]) for k in klines]
+        lows = [float(k[3]) for k in klines]
         volumes = volumes_series(klines, quote=True)
-        price   = get_last_price(symbol)
+        price = get_last_price(symbol)
         if price is None:
             log_refusal(symbol, "API prix indisponible")
             if not in_trade:
                 return
 
-        rsi         = rsi_tv(closes, period=14)
-        rsi_series  = rsi_tv_series(closes, period=14)
-        macd, signal= compute_macd(closes)
-        ema200      = ema_tv(closes, 200)
-        atr         = atr_tv_cached(symbol, klines, period=14)
-        adx_value   = adx_tv(klines, period=14)
-        ema25       = ema_tv(closes, 25)
+        rsi = rsi_tv(closes, period=14)
+        rsi_series = rsi_tv_series(closes, period=14)
+        macd, signal = compute_macd(closes)
+        ema200 = ema_tv(closes, 200)
+        atr = atr_tv_cached(symbol, klines, period=14)
+        adx_value = adx_tv(klines, period=14)
+        ema25 = ema_tv(closes, 25)
         supertrend_signal = supertrend_like_on_close(klines)
 
         # --- Volume 1h vs médiane 30j (robuste & borné) ---
@@ -2197,7 +2197,7 @@ async def process_symbol(symbol):
 
         # seuils un peu plus souples + override si le 15m pulse
         VOL_MED_MULT_EFF = (0.04 if symbol in MAJORS else 0.06)
-        MIN_VOLUME_ABS   = (60_000 if symbol in MAJORS else 100_000)
+        MIN_VOLUME_ABS = (60_000 if symbol in MAJORS else 100_000)
 
         # calcule vol_ratio_15m si pas déjà fait:
         k15 = get_klines_15m_closed(symbol, limit=25)
@@ -2222,7 +2222,7 @@ async def process_symbol(symbol):
                 # --- [PATCH 11] Floors ADX contextuels ---
                 MAJORS_HI_LIQ_SET = locals().get(
                     "MAJORS_HI_LIQ",
-                    {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","LINKUSDT","DOGEUSDT"}
+                    {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "LINKUSDT", "DOGEUSDT"}
                 )
                 MAJ = symbol in MAJORS
 
@@ -2231,7 +2231,7 @@ async def process_symbol(symbol):
                 under200 = price_now < ema200_4h
 
                 ADX_FLOOR_PULLBACK = 18.0 if MAJ else 20.0   # avant 22–26
-                ADX_FLOOR_TREND    = 14.0 if MAJ else 16.0
+                ADX_FLOOR_TREND = 14.0 if MAJ else 16.0
                 adx_floor = ADX_FLOOR_PULLBACK if under200 else ADX_FLOOR_TREND
 
                 # --- HARD GATE ADX ---
@@ -2282,7 +2282,7 @@ async def process_symbol(symbol):
         else:
             macd_prev, signal_prev = macd, signal  # fallback sûr
 
-        hist_now  = macd - signal
+        hist_now = macd - signal
         hist_prev = macd_prev - signal_prev
 
         in_trade = (symbol in trades) and (trades[symbol].get("strategy", "standard") == "standard")
@@ -2310,7 +2310,7 @@ async def process_symbol(symbol):
 
                 # ✅ TP déclenché dès que le max (mèche 1m) atteint le seuil
                 if max_gain_pct >= threshold_pct and not trades[symbol].get(f"tp{tp_idx}", False):
-                    last_tp_time = trades[symbol]["tp_times"].get(f"tp{tp_idx-1}") if tp_idx > 1 else None
+                    last_tp_time = trades[symbol]["tp_times"].get(f"tp{tp_idx - 1}") if tp_idx > 1 else None
 
                     if isinstance(last_tp_time, str):
                         try:
@@ -2337,7 +2337,6 @@ async def process_symbol(symbol):
                         trades[symbol]["stop"] = max(stop, new_stop_level)
                         save_trades()
 
-
                         # message TP
                         msg = format_tp_msg(
                             tp_idx, symbol, trades[symbol]["trade_id"], price, gain,
@@ -2357,13 +2356,13 @@ async def process_symbol(symbol):
             # ====== 1) Filtre régime BTC (sortie anticipée légère) — flaggable ======
             blocked, _why_btc = btc_regime_blocked() if ENABLE_BTC_REGIME_BLOCK else (False, "")
             if blocked and gain < 0.8:
-                vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
+                vol5_loc = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
                 vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
                 ctx = {
                     "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
                     "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,
-                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,
-                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
                     "vol5": vol5_loc, "vol20": vol20_loc,
                     "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
                     "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
@@ -2375,17 +2374,19 @@ async def process_symbol(symbol):
 
             # ====== 2) Timeout intelligent ======
             k1h_now = get_cached(symbol, '1h')
-            trig, why = smart_timeout_check(k1h_now, entry,
-                                            window_h=SMART_TIMEOUT_WINDOW_H,
-                                            range_pct=SMART_TIMEOUT_RANGE_PCT_STD)
+            trig, why = smart_timeout_check(
+                k1h_now, entry,
+                window_h=SMART_TIMEOUT_WINDOW_H,
+                range_pct=SMART_TIMEOUT_RANGE_PCT_STD
+            )
             if trig and gain < SMART_TIMEOUT_MIN_GAIN_STD and not trades[symbol].get("tp1", False) and not btc_is_bullish_strong():
-                vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
+                vol5_loc = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
                 vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
                 ctx = {
                     "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
                     "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,
-                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,
-                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
                     "vol5": vol5_loc, "vol20": vol20_loc,
                     "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
                     "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
@@ -2401,7 +2402,7 @@ async def process_symbol(symbol):
                 triggered, fx = fast_exit_5m_trigger(symbol, entry, price)
             else:
                 triggered, fx = (False, {})
-                
+
             supertrend_ok_local = supertrend_like_on_close(klines)
             strong_trend_1h = (adx_value >= 28) and supertrend_ok_local
 
@@ -2414,19 +2415,23 @@ async def process_symbol(symbol):
                 allow_fast = False
 
             if allow_fast:
-                vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
+                vol5_loc = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
                 vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
                 bits = []
-                if fx.get("rsi_drop") and fx["rsi_drop"] > 5: bits.append(f"RSI(5m) -{fx['rsi_drop']:.1f} pts")
-                if fx.get("macd_cross_down"): bits.append("MACD(5m) croisement baissier")
-                if fx.get("bearish_engulfing_5m"): bits.append("Bearish engulfing 5m")
-                if fx.get("close_below_ema20_5m"): bits.append("Close<EMA20(5m)")
+                if fx.get("rsi_drop") and fx["rsi_drop"] > 5:
+                    bits.append(f"RSI(5m) -{fx['rsi_drop']:.1f} pts")
+                if fx.get("macd_cross_down"):
+                    bits.append("MACD(5m) croisement baissier")
+                if fx.get("bearish_engulfing_5m"):
+                    bits.append("Bearish engulfing 5m")
+                if fx.get("close_below_ema20_5m"):
+                    bits.append("Close<EMA20(5m)")
                 raison = "Sortie dynamique 5m: " + " + ".join(bits) if bits else "Sortie dynamique 5m"
                 ctx = {
                     "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
                     "atr": atr, "st_on": supertrend_ok_local, "ema25": ema25, "ema200": ema200,
-                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,
-                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
                     "vol5": vol5_loc, "vol20": vol20_loc,
                     "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
                     "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
@@ -2450,16 +2455,19 @@ async def process_symbol(symbol):
                     k1m = get_cached(symbol, '1m', limit=8) or []
                     if len(k1m) >= 6:
                         # On regarde la DERNIERE bougie close (k1m[-2])
-                        o = float(k1m[-2][1]); h = float(k1m[-2][2]); l = float(k1m[-2][3]); c = float(k1m[-2][4])
+                        o = float(k1m[-2][1])
+                        h = float(k1m[-2][2])
+                        l = float(k1m[-2][3])
+                        c = float(k1m[-2][4])
                         rng = max(h - l, 1e-9)
-                        wick_up  = (h - c) / rng > 0.55          # mèche haute dominante
+                        wick_up = (h - c) / rng > 0.55          # mèche haute dominante
                         body_pct = abs(c - o) / max(o, 1e-9) * 100.0
                         spike_pct = (h - max(c, o)) / max(o, 1e-9) * 100.0
                         if wick_up and spike_pct >= 0.60 and body_pct < 0.35:
                             # Prendre ce que le marché donne: on resserre agressivement le stop
                             trades[symbol]["stop"] = max(trades[symbol].get("stop", entry), price * 0.995)
                             save_trades()
-  
+
             # [F2] ====== 4) Momentum cassé (gated & multi-confirmations) ======
             # On n'autorise la vente "momentum cassé" que :
             # - AVANT TP1,
@@ -2484,13 +2492,13 @@ async def process_symbol(symbol):
                 c5 = [float(x[4]) for x in k5_loc[:-1]]
                 rsi5_series = rsi_tv_series(c5, 14)
                 rsi5_prev = rsi5_series[~np.isnan(rsi5_series)][-2] if np.isfinite(rsi5_series).sum() >= 2 else np.nan
-                rsi5_now  = rsi5_series[~np.isnan(rsi5_series)][-1] if np.isfinite(rsi5_series).sum() >= 1 else np.nan
+                rsi5_now = rsi5_series[~np.isnan(rsi5_series)][-1] if np.isfinite(rsi5_series).sum() >= 1 else np.nan
                 rsi5_drop = (rsi5_prev - rsi5_now) if (np.isfinite(rsi5_prev) and np.isfinite(rsi5_now)) else 0.0
             else:
                 rsi5_drop = 0.0
 
             # histogramme MACD décroissant
-            hist_now_std  = macd - signal
+            hist_now_std = macd - signal
             macd_prev_std, signal_prev_std = compute_macd(closes[:-1]) if len(closes) >= 2 else (macd, signal)
             hist_prev_std = macd_prev_std - signal_prev_std
             hist_falling = (hist_now_std < hist_prev_std)
@@ -2520,13 +2528,13 @@ async def process_symbol(symbol):
                         or (bearish_5m and (rsi5_drop > 8.0))
                     )
                 )):
-                vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
+                vol5_loc = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
                 vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
                 ctx = {
                     "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
                     "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,
-                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,
-                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
                     "vol5": vol5_loc, "vol20": vol20_loc,
                     "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
                     "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
@@ -2547,7 +2555,7 @@ async def process_symbol(symbol):
 
                     # Confirme en 15m/5m pour éviter les faux signaux
                     k15_loc = get_cached(symbol, '15m', limit=30) or []
-                    k5_loc  = get_cached(symbol, '5m',  limit=80) or []
+                    k5_loc = get_cached(symbol, '5m', limit=80) or []
 
                     # 15m: close < EMA20(15m) ?
                     close_below_ema20_15 = False
@@ -2562,14 +2570,14 @@ async def process_symbol(symbol):
 
                     # Déclenche si (1h faiblit) ET (15m faiblit OU pattern 5m)
                     if loss_dyn_1h and (close_below_ema20_15 or bearish_5m):
-                        vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
+                        vol5_loc = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
                         vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
                         ctx = {
                             "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
                             "atr": atr, "st_on": supertrend_like_on_close(klines),
                             "ema25": ema25, "ema200": ema200,
-                            "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,
-                            "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,
+                            "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                            "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
                             "vol5": vol5_loc, "vol20": vol20_loc,
                             "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
                             "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
@@ -2578,23 +2586,29 @@ async def process_symbol(symbol):
                         }
 
                         raisons = []
-                        if closes[-1] < ema20_1h:           raisons.append("Close(1h) < EMA20")
-                        if macd < signal:                   raisons.append("MACD(1h) < Signal")
-                        if close_below_ema20_15:            raisons.append("Close(15m) < EMA20(15m)")
-                        if bearish_5m:                      raisons.append("Bearish engulfing 5m")
+                        if closes[-1] < ema20_1h:
+                            raisons.append("Close(1h) < EMA20")
+                        if macd < signal:
+                            raisons.append("MACD(1h) < Signal")
+                        if close_below_ema20_15:
+                            raisons.append("Close(15m) < EMA20(15m)")
+                        if bearish_5m:
+                            raisons.append("Bearish engulfing 5m")
                         raison_txt = "Profit-lock après TP1: " + " + ".join(raisons) if raisons else "Profit-lock après TP1"
 
                         pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
                         _finalize_exit(symbol, price, pnl_pct, raison_txt, "SELL", ctx)
                         return
-                        
+
             # ====== 6) Stop touché / perte max ======#
             stop_hit = price <= trades[symbol]["stop"]
 
             # anti-mèche si tendance forte (ADX élevé + ST ON)
             if stop_hit and VSTOP_CONFIRM_1M and adx_value >= 28 and supertrend_like_on_close(klines):
-                stop_hit = confirm_stop_breach_1m(symbol, trades[symbol]["stop"],
-                                      n=VSTOP_CONFIRM_1M_N, tol_pct=VSTOP_TOLERANCE_PCT)
+                stop_hit = confirm_stop_breach_1m(
+                    symbol, trades[symbol]["stop"],
+                    n=VSTOP_CONFIRM_1M_N, tol_pct=VSTOP_TOLERANCE_PCT
+                )
 
             # --- Confirmation stop 1m (majors, anti-mèche) ---
             if stop_hit and (symbol in MAJORS):
@@ -2612,18 +2626,17 @@ async def process_symbol(symbol):
                 return
             # --- fin confirmation stop 1m (majors) ---
 
-
             if stop_hit or gain <= -2.5:
-                event  = "STOP" if stop_hit else "SELL"
+                event = "STOP" if stop_hit else "SELL"
                 reason = "Stop touché" if stop_hit else "Perte max (-1.5%)"
 
-                vol5_loc  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
+                vol5_loc = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
                 vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
                 ctx = {
                     "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
                     "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,
-                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 50) if get_cached(symbol,'4h') else 0.0,
-                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol,'4h')], 200) if get_cached(symbol,'4h') else 0.0,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
                     "vol5": vol5_loc, "vol20": vol20_loc,
                     "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
                     "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
@@ -2658,7 +2671,7 @@ async def process_symbol(symbol):
                 # SOFT : même esprit qu'avant (uniquement pour non-majors)
                 if (btc_rsi < 43) and (not btc_macd_ok) and (symbol not in MAJORS):
                     log_refusal(symbol, "BTC faible (soft): RSI<43 ET MACD<=Signal")
-                    
+
         # --- 4h ---
         klines_4h = get_cached(symbol, '4h')
         if not klines_4h or len(klines_4h) < 50:
@@ -2668,8 +2681,8 @@ async def process_symbol(symbol):
 
         closes_4h = [float(k[4]) for k in klines_4h]
         ema200_4h = ema_tv(closes_4h, 200)
-        ema50_4h  = ema_tv(closes_4h, 50)
-        rsi_4h    = rsi_tv(closes_4h, period=14)
+        ema50_4h = ema_tv(closes_4h, 50)
+        rsi_4h = rsi_tv(closes_4h, period=14)
 
         # Contexte marché via cache
         btc_up = is_uptrend([float(k[4]) for k in market_cache.get('BTCUSDT', [])]) if market_cache.get('BTCUSDT') else False
@@ -2689,7 +2702,6 @@ async def process_symbol(symbol):
             except NameError:
                 pass
 
-
         supertrend_signal = supertrend_like_on_close(klines)
 
         # --- [PATCH 16] Late entry plus contextuelle ---
@@ -2701,7 +2713,7 @@ async def process_symbol(symbol):
 
             # Non-majors : on ne bloque plus, on log seulement quand c'est vraiment tardif
             RSI_CEIL = 70.0
-            VOL_MIN  = 0.50
+            VOL_MIN = 0.50
 
             if (rsi >= RSI_CEIL) and (vol15 < VOL_MIN):
                 log_refusal(
@@ -2711,7 +2723,7 @@ async def process_symbol(symbol):
                 )
 
         reasons = []
-        # Filtres de tendance avec log    
+        # Filtres de tendance avec log
         # --- Tendance en 'soft' (on n'interdit plus)
         tendance_soft_notes = []
         if price < ema200:
@@ -2722,9 +2734,12 @@ async def process_symbol(symbol):
             tendance_soft_notes.append("Close4h < EMA50(4h)")
 
         # pénalité de score (au lieu d'un refus dur)
-        if price < ema200:          indicators_soft_penalty += 1
-        if closes_4h[-1] < ema50_4h: indicators_soft_penalty += 1
-        if closes_4h[-1] < ema200_4h: indicators_soft_penalty += 1
+        if price < ema200:
+            indicators_soft_penalty += 1
+        if closes_4h[-1] < ema50_4h:
+            indicators_soft_penalty += 1
+        if closes_4h[-1] < ema200_4h:
+            indicators_soft_penalty += 1
 
         # [PATCH 7] Gate 200/4h — "hard" seulement si vraiment défavorable
         is_major = (symbol in MAJORS)
@@ -2741,11 +2756,13 @@ async def process_symbol(symbol):
         ADX_FLOOR_HARD = 16.0 if is_major else 18.0
         DIST_HARD = 0.004 if is_major else 0.006  # 0,4% / 0,6%
 
-        if (ENABLE_GATE_200_4H
+        if (
+            ENABLE_GATE_200_4H
             and weak_1h
             and weak_4h
             and ((dist200_4h < DIST_HARD) or (adx_value < ADX_FLOOR_HARD))
-            and (not override_flow)):
+            and (not override_flow)
+        ):
             log_refusal(
                 symbol,
                 "Gate 200/4h: structure faible (hard)",
@@ -2763,10 +2780,13 @@ async def process_symbol(symbol):
             indicators_soft_penalty += 1
 
         if detect_rsi_divergence(closes, rsi_series):
-            log_refusal(symbol, "RSI divergence (soft)", trigger=f"price↑ & RSI↓ ({closes[-2]:.4f}->{closes[-1]:.4f} ; rsi {rsi_series[-2]:.1f}->{rsi_series[-1]:.1f})")
+            log_refusal(
+                symbol,
+                "RSI divergence (soft)",
+                trigger=f"price↑ & RSI↓ ({closes[-2]:.4f}->{closes[-1]:.4f} ; rsi {rsi_series[-2]:.1f}->{rsi_series[-1]:.1f})"
+            )
             reasons += ["⚠️ RSI divergence détectée (soft)"]
             # pas de return -> on continue
-
 
         # [PATCH 8] Volatilité faible — soft vs hard, majors et override de flux
         volatility = get_volatility(atr, price)
@@ -2799,13 +2819,12 @@ async def process_symbol(symbol):
                 )
                 return
 
-
         # --- ADX (standard) dynamique + gate 15m ---
         # petit pouls de volume 15m (indépendant du bloc "Confirmation volume 15m")
         k15q = get_cached(symbol, '15m', limit=25) or []
         vols15q = volumes_series(k15q, quote=True) if k15q else []
         if len(k15q) >= 2 and len(vols15q) >= 12:
-            vol_now_15  = float(k15q[-2][7])
+            vol_now_15 = float(k15q[-2][7])
             vol_ma10_15 = float(np.mean(vols15q[-11:-1]))
             vol_ratio_15m = (vol_now_15 / max(vol_ma10_15, 1e-9)) if vol_ma10_15 else 0.0
         else:
@@ -2859,15 +2878,15 @@ async def process_symbol(symbol):
                 vol20 = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
                 vol_ratio_1h = (vol5 / max(vol20, 1e-9)) if vol20 else 0.0
 
-                strong_adx   = adx_value >= (26 if symbol in MAJORS else 28)
-                trend_ok_1h  = (price >= ema25 >= ema200) and supertrend_signal
-                trend_ok_4h  = (closes_4h[-1] >= ema50_4h * 0.998)  # tolérance si 4h pas encore > EMA200
-                market_ok    = MARKET_STATE.get("btc", {}).get("up", False) or MARKET_STATE.get("eth", {}).get("up", False)
+                strong_adx = adx_value >= (26 if symbol in MAJORS else 28)
+                trend_ok_1h = (price >= ema25 >= ema200) and supertrend_signal
+                trend_ok_4h = (closes_4h[-1] >= ema50_4h * 0.998)  # tolérance si 4h pas encore > EMA200
+                market_ok = MARKET_STATE.get("btc", {}).get("up", False) or MARKET_STATE.get("eth", {}).get("up", False)
 
                 strong_flow = (
                     strong_adx and
                     vol_ratio_15m >= 0.75 and
-                    vol_ratio_1h  >= 1.10 and
+                    vol_ratio_1h >= 1.10 and
                     trend_ok_1h and trend_ok_4h and market_ok
                 )
 
@@ -2876,11 +2895,10 @@ async def process_symbol(symbol):
 
                 if pre_breakout and strong_flow and not hard_floor:
                     log_info(symbol, f"Cooldown override v2: pré-breakout + flux fort (reste {cooldown_left_h:.2f}h)")
-                     # pas de return -> on autorise l'entrée
+                    # pas de return -> on autorise l'entrée
                 else:
                     log_refusal(symbol, "Cooldown actif", cooldown_left_min=int(cooldown_left_h * 60))
                     return
-
 
         # aucune limite de positions simultanées (standard)
         pass
@@ -2919,7 +2937,7 @@ async def process_symbol(symbol):
         # ALT : drift dur seulement si low-liq + RS faible + momentum mou ; sinon soft
         if symbol != "BTCUSDT" and btc_market_drift():
             rs = rel_strength_vs_btc(symbol)  # edge ALT vs BTC (3 bougies 1h)
-            HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
+            HIGH_LIQ = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "LINKUSDT"}
             if (symbol not in HIGH_LIQ) and (rs <= 0.006) and (adx_value < 22) and (not ok_session):
                 log_refusal(symbol, "BTC drift (hard on low-liq)", trigger=f"RSvsBTC={rs:.3%}")
                 if not in_trade:
@@ -2934,7 +2952,7 @@ async def process_symbol(symbol):
         if EXCESS_HARD:
             st_on_now = supertrend_like_on_close(klines)
             STRONG_TREND = (adx_value >= 28 and st_on_now and closes_4h[-1] > ema50_4h and ema50_4h > ema200_4h)
-            HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
+            HIGH_LIQ = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "LINKUSDT"}
             if (symbol in MAJORS or symbol in HIGH_LIQ) and STRONG_TREND:
                 log_info(symbol, "Anti-excès 1h (hard) relâché (trend fort high-liq) → pénalité soft")
                 indicators_soft_penalty += 1
@@ -2951,7 +2969,7 @@ async def process_symbol(symbol):
         if dist > MAX_DIST:
             log_refusal(
                 symbol,
-                f"Prix éloigné EMA25 (soft > {int(MAX_DIST*100)}%)",
+                f"Prix éloigné EMA25 (soft > {int(MAX_DIST * 100)}%)",
                 trigger=f"dist_ema25={dist:.2%}"
             )
             indicators_soft_penalty += 1
@@ -2960,7 +2978,7 @@ async def process_symbol(symbol):
         if not check_spike_and_wick(symbol, klines, price, mode_label="std"):
             if not in_trade:
                 return
-      
+
         # [#volume-confirm-standard]
         k15 = get_cached(symbol, VOL_CONFIRM_TF, limit=max(25, VOL_CONFIRM_LOOKBACK + 5))
         vols15 = volumes_series(k15, quote=True)
@@ -2976,12 +2994,12 @@ async def process_symbol(symbol):
         vol_ratio_15m = vol_now / max(vol_ma10, 1e-9)
 
         # ---- VOLUME 15m MIN DUR (dynamique simplifiée) ---
-        IS_HIGH_LIQ = symbol in {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","LINKUSDT","DOGEUSDT"}
+        IS_HIGH_LIQ = symbol in {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "LINKUSDT", "DOGEUSDT"}
 
         # --- [PATCH 9] Vol15m floors dynamiques + marge si marché actif ---
         ATR_MARKET_ACTIVE = float(os.getenv("ATR_MARKET_ACTIVE", "0.00030"))
-        VOL15_FLOOR_ALT   = float(os.getenv("VOL15_FLOOR_ALT", "0.50"))
-        VOL15_FLOOR_MAJ   = float(os.getenv("VOL15_FLOOR_MAJ", "0.45"))
+        VOL15_FLOOR_ALT = float(os.getenv("VOL15_FLOOR_ALT", "0.50"))
+        VOL15_FLOOR_MAJ = float(os.getenv("VOL15_FLOOR_MAJ", "0.45"))
 
         # base par classe (majors/hi-liq vs alts)
         base_floor = VOL15_FLOOR_MAJ if (IS_HIGH_LIQ or IS_MAJOR) else VOL15_FLOOR_ALT
@@ -2996,7 +3014,6 @@ async def process_symbol(symbol):
         if vol_ratio_15m < min_ratio15:
             log_refusal(symbol, f"Vol 15m insuffisant (hard): {vol_ratio_15m:.2f} < {min_ratio15:.2f}")
             return
-
 
         # Soft floor basé sur ENV, plus tolérant si major/ADX fort/BTC fort
         min_ratio15 = VOL15M_MIN_RATIO
@@ -3079,53 +3096,52 @@ async def process_symbol(symbol):
 
         label_conf = label_confidence(confidence)
 
+        # --- Stop provisoire pour le sizing (même logique que l'entrée) ---
+        # --- Stop initial ATR (plus large, moins de faux stops) ---
+        ATR_INIT_MULT_STD = 1.2
+        sl_initial = price - ATR_INIT_MULT_STD * atr
 
-            # --- Stop provisoire pour le sizing (même logique que l'entrée) ---
-            # --- Stop initial ATR (plus large, moins de faux stops) ---
-            ATR_INIT_MULT_STD = 1.2
-            sl_initial = price - ATR_INIT_MULT_STD * atr
+        # sécurité: ne jamais dépasser le prix (et >= 0)
+        sl_initial = max(0.0, min(sl_initial, price * 0.999))
 
-            # sécurité: ne jamais dépasser le prix (et >= 0)
-            sl_initial = max(0.0, min(sl_initial, price * 0.999))
+        position_pct = position_pct_from_risk(price, sl_initial)
 
-            position_pct = position_pct_from_risk(price, sl_initial)
+        # [GATE-BTC-ETH] — Contexte marché pour les setups LONGS
+        # On évite les longs sur les alts quand BTC & ETH ne sont pas en uptrend
+        # et que le RSI 1h de l'alt est encore sous 50 (trend pas vraiment construit).
+        if symbol not in ("BTCUSDT", "ETHUSDT"):
+            try:
+                rsi_1h_value = float(rsi_1h) if rsi_1h is not None else None
+            except Exception:
+                rsi_1h_value = None
 
-            # [GATE-BTC-ETH] — Contexte marché pour les setups LONGS
-            # On évite les longs sur les alts quand BTC & ETH ne sont pas en uptrend
-            # et que le RSI 1h de l'alt est encore sous 50 (trend pas vraiment construit).
-            if symbol not in ("BTCUSDT", "ETHUSDT"):
-                try:
-                    rsi_1h_value = float(rsi_1h) if rsi_1h is not None else None
-                except Exception:
-                    rsi_1h_value = None
+            if (not btc_uptrend) and (not eth_uptrend):
+                # Si on a un RSI 1h mesurable et qu'il est < 50 → on SKIP le trade
+                if (rsi_1h_value is not None) and (rsi_1h_value < 50.0):
+                    note(
+                        symbol,
+                        f"refus: BTC/ETH pas en uptrend et RSI1h trop faible "
+                        f"({rsi_1h_value:.1f} < 50) pour un setup long"
+                    )
+                    return
 
-                if (not btc_uptrend) and (not eth_uptrend):
-                    # Si on a un RSI 1h mesurable et qu'il est < 50 → on SKIP le trade
-                    if (rsi_1h_value is not None) and (rsi_1h_value < 50.0):
-                        note(
-                            symbol,
-                            f"refus: BTC/ETH pas en uptrend et RSI1h trop faible "
-                            f"({rsi_1h_value:.1f} < 50) pour un setup long"
-                        )
-                        return
-
-            # --- Décision d'achat (standard) avec filtre 15m ---
-            # [#wicky-15m-filter]
-            # ---- Filtre wicky 15m ----
-            def candle_wickiness(ohlc):
-                o, h, l, c = ohlc
-                rng = max(h - l, 1e-9)
-                body = abs(c - o)
-                return max((rng - body) / rng, 0.0)
+        # --- Décision d'achat (standard) avec filtre 15m ---
+        # [#wicky-15m-filter]
+        # ---- Filtre wicky 15m ----
+        def candle_wickiness(ohlc):
+            o, h, l, c = ohlc
+            rng = max(h - l, 1e-9)
+            body = abs(c - o)
+            return max((rng - body) / rng, 0.0)
 
         # on récupère des bougies 15m *closes uniquement*
         _lookback_wicky = int(os.getenv("WICKY_15M_LOOKBACK", "20"))
         k15_all = get_cached(symbol, "15m", limit=max(_lookback_wicky + 5, 30)) or []
         k15_closed = k15_all[:-1] if len(k15_all) >= 2 else k15_all  # ignore la bougie en formation
 
-        opens_15m  = [float(x[1]) for x in k15_closed]
-        highs_15m  = [float(x[2]) for x in k15_closed]
-        lows_15m   = [float(x[3]) for x in k15_closed]
+        opens_15m = [float(x[1]) for x in k15_closed]
+        highs_15m = [float(x[2]) for x in k15_closed]
+        lows_15m = [float(x[3]) for x in k15_closed]
         closes_15m = [float(x[4]) for x in k15_closed]
 
         last_15m = list(zip(opens_15m, highs_15m, lows_15m, closes_15m))[-_lookback_wicky:]
@@ -3142,27 +3158,30 @@ async def process_symbol(symbol):
             log_refusal(symbol, f"wicky15m (>= max): {wicky:.2f} >= {WICK_MAX:.2f}")
 
         # ---- Cooldown 5m après flush/mèche ----
-        def wickiness(o,h,l,c):
-            rng = max(h-l, 1e-9); body = abs(c-o)
-            return max((rng-body)/rng, 0.0)
+        def wickiness(o, h, l, c):
+            rng = max(h - l, 1e-9)
+            body = abs(c - o)
+            return max((rng - body) / rng, 0.0)
 
         # -- Récup 5m fermées et ATR14 5m local --
         k5_all = get_cached(symbol, "5m", limit=60) or []
         k5_closed = k5_all[:-1] if len(k5_all) >= 2 else k5_all  # ignore la bougie en formation
 
         if len(k5_closed) >= 20:
-            o5 = float(k5_closed[-1][1]); h5 = float(k5_closed[-1][2])
-            l5 = float(k5_closed[-1][3]); c5 = float(k5_closed[-1][4])
+            o5 = float(k5_closed[-1][1])
+            h5 = float(k5_closed[-1][2])
+            l5 = float(k5_closed[-1][3])
+            c5 = float(k5_closed[-1][4])
             last_5m_ts = int(k5_closed[-1][0])
 
-            highs_5m  = [float(x[2]) for x in k5_closed]
-            lows_5m   = [float(x[3]) for x in k5_closed]
+            highs_5m = [float(x[2]) for x in k5_closed]
+            lows_5m = [float(x[3]) for x in k5_closed]
             closes_5m = [float(x[4]) for x in k5_closed]
 
             # ATR14 sur 5m (True Range)
             trs = []
             for i in range(1, len(k5_closed)):
-                hh, ll, pc = highs_5m[i], lows_5m[i], closes_5m[i-1]
+                hh, ll, pc = highs_5m[i], lows_5m[i], closes_5m[i - 1]
                 trs.append(max(hh - ll, abs(hh - pc), abs(ll - pc)))
             atr5 = float(np.mean(trs[-14:])) if len(trs) >= 14 else (float(np.mean(trs)) if trs else 0.0)
         else:
@@ -3173,22 +3192,21 @@ async def process_symbol(symbol):
 
         rng5 = abs(h5 - l5)
 
-
-        FLUSH_K = float(os.getenv("PREBRK_FLUSH_ATR5M","1.20"))
-        WICKY_MAX_5M = float(os.getenv("PREBRK_WICKY5M_MAX","0.70"))
-        COOLDOWN_MIN = int(os.getenv("PREBRK_COOLDOWN_5M","30"))
+        FLUSH_K = float(os.getenv("PREBRK_FLUSH_ATR5M", "1.20"))
+        WICKY_MAX_5M = float(os.getenv("PREBRK_WICKY5M_MAX", "0.70"))
+        COOLDOWN_MIN = int(os.getenv("PREBRK_COOLDOWN_5M", "30"))
 
         # -- Résolution robuste du flag "pré-breakout" --
         # 'is_prebreakout' peut ne pas exister ici → lecture sûre
         prebrk_flag = bool(is_prebreakout or locals().get("level_pb", False))
 
         if prebrk_flag and atr5 > 0.0:
-            if (rng5/atr5 >= FLUSH_K) or (wickiness(o5,h5,l5,c5) >= WICKY_MAX_5M):
+            if (rng5 / atr5 >= FLUSH_K) or (wickiness(o5, h5, l5, c5) >= WICKY_MAX_5M):
                 if minutes_since(last_5m_ts) < COOLDOWN_MIN:
                     log_refusal(
                         symbol,
                         "cooldown 5m après flush/mèche",
-                        trigger=f"rng5/atr5={rng5/atr5:.2f}, w5m={wickiness(o5,h5,l5,c5):.2f}"
+                        trigger=f"rng5/atr5={rng5 / atr5:.2f}, w5m={wickiness(o5, h5, l5, c5):.2f}"
                     )
                     return
 
@@ -3211,18 +3229,18 @@ async def process_symbol(symbol):
         # ---- Filtre liquidité simple (sans API) ----
         # Utilise les volumes 1h déjà chargés
         try:
-            vol5_1h  = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
+            vol5_1h = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
             vol20_1h = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
             vol_ratio_1h_local = (vol5_1h / max(vol20_1h, 1e-9)) if vol20_1h else 0.0
         except Exception:
             vol5_1h, vol20_1h, vol_ratio_1h_local = 0.0, 0.0, 0.0
 
         # Seuils simples : plus stricts pour les ALTS, plus tolérants sur majors
-        MAJORS_HI_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","LINKUSDT","DOGEUSDT"}
+        MAJORS_HI_LIQ = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "LINKUSDT", "DOGEUSDT"}
         # Planchers de liquidité 1h (tolère "3_000_000", "10 000 000", etc.)
         try:
-            LIQ_FLOOR_ALT = float(os.getenv("LIQ_FLOOR_ALT_USDT", "3000000").replace("_","").replace(" ",""))
-            LIQ_FLOOR_MAJ = float(os.getenv("LIQ_FLOOR_MAJ_USDT", "10000000").replace("_","").replace(" ",""))
+            LIQ_FLOOR_ALT = float(os.getenv("LIQ_FLOOR_ALT_USDT", "3000000").replace("_", "").replace(" ", ""))
+            LIQ_FLOOR_MAJ = float(os.getenv("LIQ_FLOOR_MAJ_USDT", "10000000").replace("_", "").replace(" ", ""))
         except Exception:
             LIQ_FLOOR_ALT = 3_000_000.0
             LIQ_FLOOR_MAJ = 10_000_000.0
@@ -3244,7 +3262,6 @@ async def process_symbol(symbol):
             )
             return
 
-
         brk_ok, br_level = detect_breakout_retest(closes, highs, lookback=10, tol=0.003)
 
         last3_change = (closes[-1] - closes[-4]) / max(closes[-4], 1e-9)
@@ -3253,13 +3270,13 @@ async def process_symbol(symbol):
         limit = max(base_limit, 2.3 * atr_pct)
 
         if last3_change > limit:
-            HIGH_LIQ = {"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","LINKUSDT"}
+            HIGH_LIQ = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "LINKUSDT"}
 
             # petit pouls de volume 15m pour juger l'excès
             k15q = get_cached(symbol, '15m', limit=25) or []
             vols15q = volumes_series(k15q, quote=True) if k15q else []
             if len(k15q) >= 2 and len(vols15q) >= 12:
-                vol_now_15  = float(k15q[-2][7])
+                vol_now_15 = float(k15q[-2][7])
                 vol_ma10_15 = float(np.mean(vols15q[-11:-1]))
                 vol_ratio_15m = vol_now_15 / max(vol_ma10_15, 1e-9)
             else:
@@ -3290,8 +3307,6 @@ async def process_symbol(symbol):
                     indicators_soft_penalty = 1
             # pas de return et pas de brk_ok = False  -> on continue vers le filtre 15m
 
-
-
         buy = False
 
         if brk_ok and trend_ok and momentum_ok_eff and volume_ok:
@@ -3299,9 +3314,9 @@ async def process_symbol(symbol):
             vol_ratio_1h = (float(np.mean(volumes[-5:])) / max(float(np.mean(volumes[-20:])), 1e-9)) if len(volumes) >= 20 else 0.0
             # Flux minimum renforcé si ALT et 4h<200
             # — Seuils pré-breakout (MAJORS vs ALTS)
-            PREBRK_MIN_FLOW_MAJ_1H  = float(os.getenv("PREBRK_MIN_FLOW_MAJ_1H",  "1.00"))  # 1h ≥ 1.00x
+            PREBRK_MIN_FLOW_MAJ_1H = float(os.getenv("PREBRK_MIN_FLOW_MAJ_1H", "1.00"))  # 1h ≥ 1.00x
             PREBRK_MIN_FLOW_MAJ_15M = float(os.getenv("PREBRK_MIN_FLOW_MAJ_15M", "0.60"))  # 15m ≥ 0.60x
-            PREBRK_MIN_FLOW_ALT_1H  = float(os.getenv("PREBRK_MIN_FLOW_ALT_1H",  "1.05"))
+            PREBRK_MIN_FLOW_ALT_1H = float(os.getenv("PREBRK_MIN_FLOW_ALT_1H", "1.05"))
             PREBRK_MIN_FLOW_ALT_15M = float(os.getenv("PREBRK_MIN_FLOW_ALT_15M", "0.75"))
 
             if (bool(ema200_4h) and closes_4h[-1] < ema200_4h) and (symbol not in MAJORS):
@@ -3311,8 +3326,8 @@ async def process_symbol(symbol):
 
             # ---- Stop buffer en flux 1h faible (PRÉ-BREAKOUT UNIQUEMENT) ----
             # ici vol_ratio_1h vient d'être calculé, et on est dans la branche pré-breakout
-            LOWFLOW_FLOW_1H = float(os.getenv("LOWFLOW_FLOW_1H","0.90"))
-            LOWFLOW_STOP_ATR_MULT = float(os.getenv("LOWFLOW_STOP_ATR_MULT","1.30"))
+            LOWFLOW_FLOW_1H = float(os.getenv("LOWFLOW_FLOW_1H", "0.90"))
+            LOWFLOW_STOP_ATR_MULT = float(os.getenv("LOWFLOW_STOP_ATR_MULT", "1.30"))
 
             if is_prebreakout and vol_ratio_1h < LOWFLOW_FLOW_1H:
                 # garde au moins l'ATR init standard
@@ -3320,7 +3335,6 @@ async def process_symbol(symbol):
                 sl_initial = price - atr_mult * atr          # utilise le même 'atr' que ton stop init
                 sl_initial = max(0.0, min(sl_initial, price * 0.999))  # sécurité
                 note(symbol, f"stop élargi pour flux 1h faible: x{atr_mult:.2f}")
-
 
             # --- HARD GATE dédié BTC sur pré-breakout ---
             if symbol == "BTCUSDT":
@@ -3346,7 +3360,7 @@ async def process_symbol(symbol):
 
             # Filtre 15m avec niveau de breakout
             tol_struct = 0.0022 if (symbol in MAJORS or adx_value >= 22) else 0.0017
-            n_struct   = 2 if (symbol in MAJORS or adx_value >= 22) else 3
+            n_struct = 2 if (symbol in MAJORS or adx_value >= 22) else 3
 
             ok15, det15 = check_15m_filter(
                 k15,
@@ -3366,14 +3380,14 @@ async def process_symbol(symbol):
                 log_refusal(symbol, "Anti-chasse: pas de double close 15m au-dessus du level/EMA25 1h")
                 if not in_trade:
                     return
-                    
+
             # --- [PATCH 13] EMA25 distance progressive (std) ---
             dist = abs(price - ema25) / max(ema25, 1e-9)
             ATR_R = float(locals().get("atr_ratio", locals().get("volatility", 0.0)))
             MAX_DIST = 0.12 if ATR_R < 0.00025 else 0.10
 
             if dist > MAX_DIST:
-                log_refusal(symbol, f"Prix éloigné EMA25 (soft > {int(MAX_DIST*100)}%)")
+                log_refusal(symbol, f"Prix éloigné EMA25 (soft > {int(MAX_DIST * 100)}%)")
                 reasons += [f"⚠️ Distance EMA25 {dist:.2%} (soft)"]
 
             # ➕ ajoute les avertissements tendance s’il y en a
@@ -3409,7 +3423,7 @@ async def process_symbol(symbol):
                 log_refusal(
                     symbol,
                     "liquidité 24h insuffisante",
-                    trigger=f"vol24h={symbol_24h_quote_volume_usdt/1e6:.0f}M < {min_vol_usdt/1e6:.0f}M"
+                    trigger=f"vol24h={symbol_24h_quote_volume_usdt / 1e6:.0f}M < {min_vol_usdt / 1e6:.0f}M"
                 )
 
                 return
@@ -3448,7 +3462,7 @@ async def process_symbol(symbol):
                 if near_ema25 and candle_ok:
                     # Filtre 15m sans niveau de breakout (tolérance dynamique)
                     tol_struct = 0.0022 if (symbol in MAJORS or adx_value >= 22) else 0.0017
-                    n_struct   = 2 if (symbol in MAJORS or adx_value >= 22) else 3
+                    n_struct = 2 if (symbol in MAJORS or adx_value >= 22) else 3
                     ok15, det15 = check_15m_filter(
                         k15,
                         breakout_level=None,
@@ -3471,7 +3485,7 @@ async def process_symbol(symbol):
                         MAX_DIST = 0.12 if ATR_R < 0.00025 else 0.10
 
                         if dist > MAX_DIST:
-                            log_refusal(symbol, f"Prix éloigné EMA25 (soft > {int(MAX_DIST*100)}%)")
+                            log_refusal(symbol, f"Prix éloigné EMA25 (soft > {int(MAX_DIST * 100)}%)")
                             reasons += [f"⚠️ Distance EMA25 {dist:.2%} (soft)"]
 
                         # avertissements tendance éventuels
@@ -3484,14 +3498,14 @@ async def process_symbol(symbol):
         # [#patch-prebreakout]
         if not buy:
             # niveau potentiel = plus-haut lookback (même base que breakout)
-            level_pb = max(highs[-(10+2):-2]) if len(highs) >= 12 else None
+            level_pb = max(highs[-(10 + 2):-2]) if len(highs) >= 12 else None
             if level_pb:
                 close_gap = (level_pb - closes[-1]) / max(level_pb, 1e-9)
                 strong_ctx = (trend_ok and momentum_ok_eff and vol_ratio_15m >= 0.70 and adx_value >= 22)
                 if 0.0 <= close_gap <= 0.0032 and strong_ctx:  # ≤0.32% sous le niveau
                     # filtre 15m avec le level pour éviter la chasse
                     tol_struct = 0.0022 if (symbol in MAJORS or adx_value >= 22) else 0.0017
-                    n_struct   = 2 if (symbol in MAJORS or adx_value >= 22) else 3
+                    n_struct = 2 if (symbol in MAJORS or adx_value >= 22) else 3
                     ok15, det15 = check_15m_filter(k15, breakout_level=level_pb, n_struct=n_struct, tol_struct=tol_struct)
                     if ok15 and confirm_15m_after_signal(symbol, breakout_level=level_pb, ema25_1h=ema25):
                         # [#prebrk-4h-resistance-guard]
@@ -3515,7 +3529,6 @@ async def process_symbol(symbol):
                             atr_gate = float(os.getenv("PREBRK_4H_RESIST_ATR_MIN", "0.80")) * max(atr_1h, 1e-9)
 
                             # Flag explicite : on est bien dans la branche pré-breakout
-                            # Flag explicite : on est bien dans la branche pré-breakout
                             is_prebreakout = True
                             if is_prebreakout and dist_to_res <= atr_gate:
                                 force_close = os.getenv("PREBRK_FORCE_CLOSE_OVER_4H", "1") == "1"
@@ -3524,7 +3537,7 @@ async def process_symbol(symbol):
                                     log_refusal(
                                         symbol,
                                         "pré-breakout trop proche de R4H",
-                                        trigger=f"distR4H={dist_to_res/max(atr_1h,1e-9):.2f}ATR, v1h={vol_ratio_1h:.2f}"
+                                        trigger=f"distR4H={dist_to_res / max(atr_1h, 1e-9):.2f}ATR, v1h={vol_ratio_1h:.2f}"
                                     )
 
                                     return
@@ -3541,7 +3554,7 @@ async def process_symbol(symbol):
                             atr_1h = 0.0
 
                         ema25_1h = float(ema25)
-                        rsi_1h   = float(rsi)
+                        rsi_1h = float(rsi)
 
                         ext = abs(price - ema25_1h) / max(atr_1h, 1e-9)
                         if (ext > float(os.getenv("EXT_GUARD_ATR", "2.0"))) or (rsi_1h > float(os.getenv("EXT_GUARD_RSI1H", "70"))):
@@ -3549,37 +3562,44 @@ async def process_symbol(symbol):
                             return
 
                         # ---- Guard : flux 1h minimal pour pré-breakout (évite les creux de carnet) ----
-                        PREBRK_MIN_FLOW_1H_MAJ = float(os.getenv("PREBRK_MIN_FLOW_1H_MAJ","0.80"))
-                        PREBRK_MIN_FLOW_1H_ALT = float(os.getenv("PREBRK_MIN_FLOW_1H_ALT","1.00"))
+                        PREBRK_MIN_FLOW_1H_MAJ = float(os.getenv("PREBRK_MIN_FLOW_1H_MAJ", "0.80"))
+                        PREBRK_MIN_FLOW_1H_ALT = float(os.getenv("PREBRK_MIN_FLOW_1H_ALT", "1.00"))
                         min_flow_1h = PREBRK_MIN_FLOW_1H_MAJ if symbol in MAJORS else PREBRK_MIN_FLOW_1H_ALT
 
                         if is_prebreakout and (vol_ratio_1h < min_flow_1h):
-                            log_refusal(symbol, "pré-breakout refusé: vol_ratio_1h trop faible",
-                                        trigger=f"v1h={vol_ratio_1h:.2f} < {min_flow_1h:.2f}, v15m={vol_ratio_15m:.2f}")
+                            log_refusal(
+                                symbol,
+                                "pré-breakout refusé: vol_ratio_1h trop faible",
+                                trigger=f"v1h={vol_ratio_1h:.2f} < {min_flow_1h:.2f}, v15m={vol_ratio_15m:.2f}"
+                            )
                             return
                         # ---- Guard : régime marché leader pour pré-breakout ----
-                        PASS_ADX = int(os.getenv("PREBRK_MARKET_PASS_ADX","30"))
-                        PASS_V1H = float(os.getenv("PREBRK_MARKET_PASS_V1H","1.00"))
+                        PASS_ADX = int(os.getenv("PREBRK_MARKET_PASS_ADX", "30"))
+                        PASS_V1H = float(os.getenv("PREBRK_MARKET_PASS_V1H", "1.00"))
 
                         leaders_ok = (btc_uptrend or eth_uptrend)
                         own_strong = (adx_value >= PASS_ADX and vol_ratio_1h >= PASS_V1H)
 
                         if is_prebreakout and not (leaders_ok or own_strong):
-                            log_refusal(symbol, "pré-breakout refusé: marché leader mou (BTC/ETH) et coin pas assez fort",
-                                        trigger=f"btc_up={btc_uptrend}, eth_up={eth_uptrend}, adx={adx_value:.1f}, v1h={vol_ratio_1h:.2f}")
+                            log_refusal(
+                                symbol,
+                                "pré-breakout refusé: marché leader mou (BTC/ETH) et coin pas assez fort",
+                                trigger=f"btc_up={btc_uptrend}, eth_up={eth_uptrend}, adx={adx_value:.1f}, v1h={vol_ratio_1h:.2f}"
+                            )
                             return
 
                         # ---- ADX floor spécifique pré-breakout (ALT un peu plus strict) ----
-                        PREBRK_ADX_FLOOR_MAJ = int(os.getenv("PREBRK_ADX_FLOOR_MAJ","24"))
-                        PREBRK_ADX_FLOOR_ALT = int(os.getenv("PREBRK_ADX_FLOOR_ALT","26"))
+                        PREBRK_ADX_FLOOR_MAJ = int(os.getenv("PREBRK_ADX_FLOOR_MAJ", "24"))
+                        PREBRK_ADX_FLOOR_ALT = int(os.getenv("PREBRK_ADX_FLOOR_ALT", "26"))
                         adx_floor_pre = PREBRK_ADX_FLOOR_MAJ if symbol in MAJORS else PREBRK_ADX_FLOOR_ALT
 
                         if is_prebreakout and adx_value < adx_floor_pre:
-                            log_refusal(symbol, "pré-breakout refusé: ADX trop bas",
-                                        trigger=f"adx={adx_value:.1f} < {adx_floor_pre}")
+                            log_refusal(
+                                symbol,
+                                "pré-breakout refusé: ADX trop bas",
+                                trigger=f"adx={adx_value:.1f} < {adx_floor_pre}"
+                            )
                             return
-
-
 
                         buy = True
                         reasons = ["🎯 Pré-breakout (≤0.3% du level) + flux 15m", f"ADX {adx_value:.1f}", "Confluence multi-TF"]
@@ -3645,15 +3665,15 @@ async def process_symbol(symbol):
 
             # (Re)calcule un vol_ratio_1h local si besoin
             try:
-                vol5_1h = float(np.mean(volumes[-5:]))  if len(volumes) >= 5  else 0.0
+                vol5_1h = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
                 vol20_1h = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
                 vol_ratio_1h = (vol5_1h / max(vol20_1h, 1e-9)) if vol20_1h else 0.0
             except Exception:
                 vol_ratio_1h = 0.0
 
             RISK_CUT_HIGH_VOLRATIO = float(os.getenv("RISK_CUT_HIGH_VOLRATIO", "2.0"))
-            RISK_CUT_HIGH_ADX      = float(os.getenv("RISK_CUT_HIGH_ADX", "35"))
-            RISK_CUT_FACTOR        = float(os.getenv("RISK_CUT_FACTOR", "0.50"))
+            RISK_CUT_HIGH_ADX = float(os.getenv("RISK_CUT_HIGH_ADX", "35"))
+            RISK_CUT_FACTOR = float(os.getenv("RISK_CUT_FACTOR", "0.50"))
 
             if (vol_ratio_1h > RISK_CUT_HIGH_VOLRATIO) or (adx_value > RISK_CUT_HIGH_ADX):
                 # Ex: 6.0% -> 3.0% si facteur 0.50
@@ -3689,14 +3709,13 @@ async def process_symbol(symbol):
                 float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0,
                 float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0,
                 (float(np.mean(volumes[-5:])) / max(float(np.mean(volumes[-20:])), 1e-9))
-                    if len(volumes) >= 20 else 0.0,
+                if len(volumes) >= 20 else 0.0,
                 btc_up, eth_up,
                 confidence, label_conf, reasons,
                 tp_prices=tp_prices
             )
             await tg_send(msg)
             log_trade(symbol, "BUY", price)
-
 
     except Exception as e:
         print(f"❌ Erreur {symbol}: {e}", flush=True)
