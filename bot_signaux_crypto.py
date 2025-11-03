@@ -2299,32 +2299,39 @@ async def process_symbol(symbol):
             max_gain_pct = ((max_price_1m - entry) / max(entry, 1e-9)) * 100.0
 
             atr_val_current = atr_tv_cached(symbol, klines)  # ATR 1h actuel (cache)
+
             for tp_idx, atr_mult in enumerate(TP_ATR_MULTS_STD, start=1):
                 threshold_pct = (atr_mult * atr_val_current / max(entry, 1e-9)) * 100.0
-                    if max_gain_pct >= threshold_pct and not trades[symbol].get(f"tp{tp_idx}", False):
+
+                # ✅ TP déclenché dès que le max (mèche 1m) atteint le seuil
+                if max_gain_pct >= threshold_pct and not trades[symbol].get(f"tp{tp_idx}", False):
                     last_tp_time = trades[symbol]["tp_times"].get(f"tp{tp_idx-1}") if tp_idx > 1 else None
+
                     if isinstance(last_tp_time, str):
                         try:
                             last_tp_time = datetime.fromisoformat(last_tp_time)
                         except Exception:
                             last_tp_time = None
-                    # anti-spam: 120s mini entre 2 TP
+
+                    # anti-spam : 120s mini entre 2 TP
                     if not last_tp_time or (datetime.now(timezone.utc) - last_tp_time).total_seconds() >= 120:
                         trades[symbol][f"tp{tp_idx}"] = True
                         trades[symbol]["tp_times"][f"tp{tp_idx}"] = datetime.now(timezone.utc)
 
                         # BE après TP1 ; après TP2/TP3 on pousse le stop progressivement
                         if tp_idx == 1:
-                            new_stop_level = entry
                             BE_EPS_AFTER_TP1 = float(os.getenv("BE_EPS_AFTER_TP1", "0.0005"))  # +0.05%
-                            new_stop_level = max(new_stop_level, entry * (1.0 + BE_EPS_AFTER_TP1))
-
+                            new_stop_level = max(entry, entry * (1.0 + BE_EPS_AFTER_TP1))
                         else:
                             # petit BE+ conditionné au seuil atteint
-                            new_stop_level = max(entry, entry * (1.0 + max(0.0, threshold_pct - 0.6) / 100.0))
+                            new_stop_level = max(
+                                entry,
+                                entry * (1.0 + max(0.0, threshold_pct - 0.6) / 100.0)
+                            )
 
                         trades[symbol]["stop"] = max(stop, new_stop_level)
                         save_trades()
+
 
                         # message TP
                         msg = format_tp_msg(
