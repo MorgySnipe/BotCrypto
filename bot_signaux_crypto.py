@@ -3075,10 +3075,10 @@ async def process_symbol(symbol):
         ATR_INIT_MULT_STD = 1.2
         sl_initial = price - ATR_INIT_MULT_STD * atr
 
-        # sécurité: ne jamais dépasser le prix (et >= 0)
-        sl_initial = max(0.0, min(sl_initial, price * 0.999))
+            # sécurité: ne jamais dépasser le prix (et >= 0)
+            sl_initial = max(0.0, min(sl_initial, price * 0.999))
 
-        position_pct = position_pct_from_risk(price, sl_initial)
+            position_pct = position_pct_from_risk(price, sl_initial)
 
             # [GATE-BTC-ETH] — Contexte marché pour les setups LONGS
             # On évite les longs sur les alts quand BTC & ETH ne sont pas en uptrend
