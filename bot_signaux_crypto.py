@@ -3080,10 +3080,10 @@ async def process_symbol(symbol):
 
         position_pct = position_pct_from_risk(price, sl_initial)
 
-        # [GATE-BTC-ETH] — Contexte marché pour les setups STANDARD
-        # On évite de longs standards sur les alts quand BTC & ETH ne sont pas en uptrend
+        # [GATE-BTC-ETH] — Contexte marché pour les setups LONGS
+        # On évite les longs sur les alts quand BTC & ETH ne sont pas en uptrend
         # et que le RSI 1h de l'alt est encore sous 50 (trend pas vraiment construit).
-        if strategy == "standard" and side == "long":
+        if side == "long":
             if symbol not in ("BTCUSDT", "ETHUSDT"):
                 try:
                     rsi_1h_value = float(rsi_1h) if rsi_1h is not None else None
@@ -3096,9 +3096,10 @@ async def process_symbol(symbol):
                         note(
                             symbol,
                             f"refus: BTC/ETH pas en uptrend et RSI1h trop faible "
-                            f"({rsi_1h_value:.1f} < 50) pour un setup standard"
+                            f"({rsi_1h_value:.1f} < 50) pour un setup long"
                         )
                         return
+
 
         # --- Décision d'achat (standard) avec filtre 15m ---
         # [#wicky-15m-filter]
