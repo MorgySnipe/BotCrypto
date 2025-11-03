@@ -3031,10 +3031,22 @@ async def process_symbol(symbol):
                     if symbol not in trades:
                         return
 
+                # Défauts de sécurité (au cas où un bloc en amont ne s'exécute pas)
+                trend_ok = False
+                momentum_ok_eff = False
+                volume_ok = False
+
             # === Confluence & scoring (final) ===
-            volume_ok   = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
+            # Defaults de sécurité au cas où un bloc avant lève une exception
+            trend_ok = False
+            momentum_ok_eff = False
+            volume_ok = False
+            vol_ratio_15m = float(locals().get("vol_ratio_15m", 0.0))  # si déjà calculé plus haut, on le réutilise
+
+            volume_ok = float(np.mean(volumes[-5:])) > float(np.mean(volumes[-20:]))
+
             trend_ok = (
-                (price >= ema200 * 0.99)                             # tolérance -1%
+                (price >= ema200 * 0.99)                                # tolérance -1%
                 or (closes_4h[-1] > ema50_4h and ema50_4h > ema200_4h)  # 4h propre
             ) and supertrend_signal
 
@@ -3047,6 +3059,7 @@ async def process_symbol(symbol):
                 ((hist_now > hist_prev) and (rsi >= 54)) or
                 ((macd > signal) and (adx_value >= 22) and (rs_vs_btc >= 0.003))  # +0.3% vs BTC sur ~3h
             )
+
             # on n’accepte le "loose" que s’il y a déjà du flux court-terme
             momentum_ok_eff = momentum_ok or (momentum_ok_loose and vol_ratio_15m >= 0.50)
 
@@ -3099,14 +3112,14 @@ async def process_symbol(symbol):
                         )
                         return
 
-        # --- Décision d'achat (standard) avec filtre 15m ---
-        # [#wicky-15m-filter]
-        # ---- Filtre wicky 15m ----
-        def candle_wickiness(ohlc):
-            o, h, l, c = ohlc
-            rng = max(h - l, 1e-9)
-            body = abs(c - o)
-            return max((rng - body) / rng, 0.0)
+            # --- Décision d'achat (standard) avec filtre 15m ---
+            # [#wicky-15m-filter]
+            # ---- Filtre wicky 15m ----
+            def candle_wickiness(ohlc):
+                o, h, l, c = ohlc
+                rng = max(h - l, 1e-9)
+                body = abs(c - o)
+                return max((rng - body) / rng, 0.0)
 
         # on récupère des bougies 15m *closes uniquement*
         _lookback_wicky = int(os.getenv("WICKY_15M_LOOKBACK", "20"))
