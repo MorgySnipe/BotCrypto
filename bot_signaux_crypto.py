@@ -2300,7 +2300,8 @@ async def process_symbol(symbol):
                 trades[symbol]["tp_times"] = {}
 
             # Prix max atteint depuis l'entrée, sur les mèches 1m
-            max_price_1m = max_price_since_entry_1m(symbol, entry_time, klines) or price
+            sym_cache = symbol_cache.get(symbol, {})
+            max_price_1m = max_price_since_entry_1m(symbol, entry_time, sym_cache) or price
             max_gain_pct = ((max_price_1m - entry) / max(entry, 1e-9)) * 100.0
 
             atr_val_current = atr_tv_cached(symbol, klines)  # ATR 1h actuel (cache)
