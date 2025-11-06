@@ -1601,6 +1601,107 @@ def fast_exit_5m_trigger(symbol: str, entry: float, current_price: float):
     except Exception:
         return False, {}
 
+# === Micro-timing 5m pour les ENTRÉES (évite d'acheter dans un mini-crash) ===
+def micro_filter_5m_entry(symbol: str):
+    """
+    Filtre d'entrée 'sniper' basé sur le 5m :
+    - refuse si dernière bougie 5m close sous EMA20(5m) ET EMA20 descend
+    - refuse si englobante baissière très propre
+    - tolérant sur les majors pour ne pas trop filtrer
+    Retourne (ok: bool, reason: str)
+    """
+    try:
+        k5 = get_klines_5m_closed(symbol, limit=80)
+        if not k5 or len(k5) < 25:
+            return True, "5m_insuffisant"
+
+        IS_MAJOR = symbol in MAJORS
+
+        closes5 = [float(k[4]) for k in k5]
+        ema20_5m_series = ema_tv_series(closes5, 20)
+        if len(ema20_5m_series) < 2:
+            return True, "ema20_5m_insuff"
+
+        close_last = closes5[-1]
+        ema_last = ema20_5m_series[-1]
+        ema_prev = ema20_5m_series[-2]
+
+        # 1) prix sous EMA20 + EMA20 qui baisse = pas le bon timing
+        if (close_last < ema_last) and (ema_last < ema_prev):
+            # On relax un peu pour les majors (BTC, ETH, BNB, SOL)
+            if not IS_MAJOR:
+                return False, "close<ema20_5m & ema20_down"
+
+        # 2) Englobante baissière très propre = on évite d'acheter juste après
+        bearish = is_bearish_engulfing_5m(k5)
+        if bearish and not IS_MAJOR:
+            return False, "bearish_engulfing_5m"
+
+        return True, "ok"
+    except Exception:
+        # En cas de doute, on laisse passer (fail-open)
+        return True, "error"
+
+# === Early scratch : couper vite un setup qui se dégrade juste après l'entrée ===
+def early_scratch_trigger(symbol: str, entry: float, current_price: float, elapsed_min: float):
+    """
+    Retourne (trigger: bool, infos: dict)
+    Idée:
+      - ne s'applique que dans les premières minutes du trade (<= EARLY_SCRATCH_MAX_MIN_STD)
+      - gain compris entre -1.2% et +0.3% (trade pas parti)
+      - 5m moche : close<EMA20(5m) + MACD5m sous signal OU englobante baissière
+    """
+    try:
+        if entry <= 0 or current_price is None:
+            return False, {}
+
+        if elapsed_min > EARLY_SCRATCH_MAX_MIN_STD:
+            return False, {}
+
+        gain_pct = ((current_price - entry) / max(entry, 1e-9)) * 100.0
+        if not (-1.2 <= gain_pct <= 0.3):
+            # soit déjà trop perdu (autant laisser le stop), soit déjà bien parti
+            return False, {"gain_pct": gain_pct}
+
+        k5 = get_klines_5m_closed(symbol, limit=80)
+        if not k5 or len(k5) < 30:
+            return False, {"gain_pct": gain_pct, "reason": "5m_insuffisant"}
+
+        closes5 = [float(k[4]) for k in k5]
+        ema20_5m_series = ema_tv_series(closes5, 20)
+        if len(ema20_5m_series) < 2:
+            return False, {"gain_pct": gain_pct, "reason": "ema20_5m_insuff"}
+
+        close_last = closes5[-1]
+        ema_last = ema20_5m_series[-1]
+
+        # MACD 5m
+        macd5_now, signal5_now = compute_macd(closes5)
+        macd5_prev, signal5_prev = compute_macd(closes5[:-1])
+        macd5_cross_down = (macd5_prev >= signal5_prev) and (macd5_now < signal5_now)
+
+        # Englobante baissière 5m
+        bearish_5m = is_bearish_engulfing_5m(k5)
+
+        # Condition de "setup mort-né"
+        cond_price = (close_last < ema_last)  # sous EMA20 5m
+        cond_momentum = macd5_cross_down or bearish_5m
+
+        if cond_price and cond_momentum:
+            return True, {
+                "gain_pct": gain_pct,
+                "macd5_cross_down": macd5_cross_down,
+                "bearish_5m": bearish_5m,
+                "close_below_ema20_5m": True,
+            }
+
+        return False, {"gain_pct": gain_pct}
+
+    except Exception:
+        return False, {}
+
+
+
 def detect_breakout_retest(closes, highs, lookback=10, tol=0.0015):
     """
     Détecte Breakout + Retest en 1h (version assouplie).
@@ -2295,6 +2396,28 @@ async def process_symbol(symbol):
             gain = ((price - entry) / max(entry, 1e-9)) * 100.0
             stop = trades[symbol].get("stop", trades[symbol].get("sl_initial", price * (1 - INIT_SL_PCT_STD_MIN)))
 
+                        # 🔪 Early scratch : si le setup se dégrade rapidement dans les premières minutes
+            elapsed_min = elapsed_time * 60.0
+            triggered_es, info_es = early_scratch_trigger(symbol, entry, price, elapsed_min)
+            if triggered_es:
+                vol5_loc = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                ctx = {
+                    "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
+                    "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
+                    "vol5": vol5_loc, "vol20": vol20_loc,
+                    "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
+                    "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
+                    "elapsed_h": elapsed_time
+                }
+                reason = "Early scratch: setup dégradé rapidement (5m)"
+                _finalize_exit(symbol, price, gain, reason, "EARLY_SCRATCH", ctx)
+                return
+
+
             # [F1] === TP dynamiques (STANDARD) — même logique que 'aggressive' ===
             if "tp_times" not in trades[symbol]:
                 trades[symbol]["tp_times"] = {}
@@ -2346,6 +2469,7 @@ async def process_symbol(symbol):
                             elapsed_time, "Stop ajusté (ATR)"
                         )
                         await tg_send(msg)
+
 
             # Trailing stop adaptatif (ADX) — version avancée (centralisée)
             trailing_stop_advanced(
@@ -3686,12 +3810,19 @@ async def process_symbol(symbol):
                 log_refusal(symbol, f"Daily loss limit hit (...)")
                 return
 
-        # --- Entrée (BUY) ---
-        if buy and symbol not in trades:
-            # Cap quotidien dur (garantie 1–2 trades/jour)
-            if _new_entries_today_utc() >= MAX_NEW_ENTRIES_PER_DAY:
-                log_refusal(symbol, f"Daily cap reached ({MAX_NEW_ENTRIES_PER_DAY} entries)")
-                return  # ⚠️ important: on sort pour ne PAS créer le trade
+            # --- Entrée (BUY) ---
+            if buy and symbol not in trades:
+                # Filtre micro-timing 5m (évite d'acheter dans un mini-crash local)
+                ok5, why5 = micro_filter_5m_entry(symbol)
+                if not ok5:
+                    log_refusal(symbol, f"Micro-timing 5m négatif (entrée): {why5}")
+                    buy = False
+
+            if buy and symbol not in trades:
+                # Cap quotidien dur (garantie 1–2 trades/jour)
+                if _new_entries_today_utc() >= MAX_NEW_ENTRIES_PER_DAY:
+                    log_refusal(symbol, f"Daily cap reached ({MAX_NEW_ENTRIES_PER_DAY} entries)")
+                    return  # ⚠️ important: on sort pour ne PAS créer le trade
 
             trade_id = make_trade_id(symbol)
 
