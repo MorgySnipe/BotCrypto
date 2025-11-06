@@ -2758,6 +2758,39 @@ async def process_symbol(symbol):
                 _finalize_exit(symbol, price, pnl_pct, raison, "PEAK_EXIT", ctx)
                 return
 
+                        # ====== Auto-close dur 24h (mode day trading) ======
+            if elapsed_time >= AUTO_CLOSE_HARD_H:
+                vol5_loc = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                ctx = {
+                    "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
+                    "atr": atr, "st_on": supertrend_signal,
+                    "ema25": ema25, "ema200": ema200,
+                    "ema50_4h": ema_tv(
+                        [float(x[4]) for x in get_cached(symbol, '4h')],
+                        50
+                    ) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv(
+                        [float(x[4]) for x in get_cached(symbol, '4h')],
+                        200
+                    ) if get_cached(symbol, '4h') else 0.0,
+                    "vol5": vol5_loc, "vol20": vol20_loc,
+                    "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
+                    "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
+                    "elapsed_h": elapsed_time,
+                }
+                _finalize_exit(
+                    symbol,
+                    price,
+                    gain,
+                    f"Auto-close {AUTO_CLOSE_HARD_H}h (mode day trading)",
+                    "AUTO_CLOSE_HARD",
+                    ctx
+                )
+                return
+
+
 
             # ====== 6) Stop touché / perte max ======#
             stop_hit = price <= trades[symbol]["stop"]
@@ -3170,9 +3203,23 @@ async def process_symbol(symbol):
         # seuil final hard
         min_ratio15 = max(0.35, base_floor - active_bonus)
 
+        # ---- Vol 15m minimum (hard → semi-hard) ----
         if vol_ratio_15m < min_ratio15:
-            log_refusal(symbol, f"Vol 15m insuffisant (hard): {vol_ratio_15m:.2f} < {min_ratio15:.2f}")
-            return
+            log_refusal(
+                symbol,
+                f"Vol 15m insuffisant (hard): {vol_ratio_15m:.2f} < {min_ratio15:.2f}"
+            )
+
+            # Si c'est vraiment désert (< 60% du seuil), on bloque quand même
+            if vol_ratio_15m < min_ratio15 * 0.60:
+                return
+
+            # Sinon on laisse passer, mais on pénalise légèrement le score
+            try:
+                indicators_soft_penalty += 1
+            except NameError:
+                indicators_soft_penalty = 1
+
 
         # Soft floor basé sur ENV, plus tolérant si major/ADX fort/BTC fort
         min_ratio15 = VOL15M_MIN_RATIO
