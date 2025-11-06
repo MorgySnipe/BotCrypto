@@ -2601,6 +2601,40 @@ async def process_symbol(symbol):
                         _finalize_exit(symbol, price, pnl_pct, raison_txt, "SELL", ctx)
                         return
 
+            # ====== 6) Peak-to-valley : ne pas rendre un gros gain ======
+            try:
+                peak_dd = max_gain_pct - gain   # max_gain_pct vient du calcul TP (F1)
+            except Exception:
+                peak_dd = 0.0
+
+            # Paramètres tunables via ENV si tu veux
+            PEAK_MIN_GAIN = float(os.getenv("PEAK_MIN_GAIN_PCT", "5.0"))   # gain max minimum (ex: 5%)
+            PEAK_MAX_DD   = float(os.getenv("PEAK_MAX_DRAWDOWN_PCT", "2.0"))  # retracement toléré (ex: 2%)
+
+            if (
+                max_gain_pct >= PEAK_MIN_GAIN   # le trade a déjà bien performé
+                and peak_dd >= PEAK_MAX_DD      # on a rendu au moins 2% depuis le top
+                and gain > 1.0                  # on reste quand même en gain
+            ):
+                vol5_loc = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                ctx = {
+                    "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
+                    "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,
+                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
+                    "vol5": vol5_loc, "vol20": vol20_loc,
+                    "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
+                    "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
+                    "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
+                    "elapsed_h": elapsed_time
+                }
+                raison = f"Peak-to-valley: max {max_gain_pct:.2f}% → drawdown {peak_dd:.2f}%"
+                pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
+                _finalize_exit(symbol, price, pnl_pct, raison, "PEAK_EXIT", ctx)
+                return
+
+
             # ====== 6) Stop touché / perte max ======#
             stop_hit = price <= trades[symbol]["stop"]
 
@@ -3098,14 +3132,31 @@ async def process_symbol(symbol):
         label_conf = label_confidence(confidence)
 
         # --- Stop provisoire pour le sizing (même logique que l'entrée) ---
-        # --- Stop initial ATR (plus large, moins de faux stops) ---
+        # Stop initial = max( stop ATR, stop sous swing low ) → plus "intelligent"
         ATR_INIT_MULT_STD = 1.2
-        sl_initial = price - ATR_INIT_MULT_STD * atr
 
-        # sécurité: ne jamais dépasser le prix (et >= 0)
+        # 1) Stop basé uniquement sur ATR
+        sl_atr = price - ATR_INIT_MULT_STD * atr
+
+        # 2) Stop basé sur le dernier "vrai creux" (swing low) 1h
+        try:
+            # on prend les 5 dernières bougies 1h pour éviter un creux trop ancien
+            recent_lows = lows[-5:] if len(lows) >= 5 else lows
+            swing_low = min(recent_lows) if recent_lows else price
+            # on se met un peu en dessous du swing : 0.3*ATR de marge
+            sl_struct = swing_low - 0.3 * atr
+        except Exception:
+            swing_low = None
+            sl_struct = sl_atr
+
+        # 3) Stop initial = plus éloigné des deux (donc plus protégé),
+        #    mais jamais au-dessus du prix et jamais < 0
+        sl_initial = min(sl_atr, sl_struct)
         sl_initial = max(0.0, min(sl_initial, price * 0.999))
 
+        # Taille de position calculée sur ce stop "structurel"
         position_pct = position_pct_from_risk(price, sl_initial)
+
 
         # [GATE-BTC-ETH] — Contexte marché pour les setups LONGS
         # On évite les longs sur les alts quand BTC & ETH ne sont pas en uptrend
@@ -3611,7 +3662,7 @@ async def process_symbol(symbol):
                             pass
 
         # ===== Patch 4 — score minimum (standard) assoupli & non bloquant =====
-        SCORE_MIN_STD = float(os.getenv("SCORE_MIN", "2.6"))
+        SCORE_MIN_STD = float(os.getenv("SCORE_MIN", "4.0"))
 
         if confidence < SCORE_MIN_STD:
             # On LOG pour suivi, mais on ne coupe plus le trade.
@@ -3647,14 +3698,24 @@ async def process_symbol(symbol):
             # ATR au moment de l'entrée
             atr_entry = float(atr) if atr else float(atr_tv_cached(symbol, klines))
 
-            # 🔧 NEW: si RSI très chaud, on prend TP1 plus vite
+            # 🔧 TP dynamiques selon le régime de marché
             rsi_hot = (rsi >= 70)
-            if rsi_hot:
-                tp_mults = [0.75, 1.75, 2.75]   # TP1 plus proche
+            strong_trend = (adx_value >= 28 and supertrend_signal)
+            weak_trend   = (adx_value <= 18)
+            btc_bull     = (btc_uptrend or eth_uptrend)
+
+            if strong_trend and btc_bull and not rsi_hot:
+                # Tendance propre, marché leader haussier → on vise plus loin
+                tp_mults = [1.4, 2.8, 4.2]   # winners plus gros
+            elif weak_trend or rsi_hot:
+                # Marché mou ou RSI déjà très tendu → on encaisse plus tôt
+                tp_mults = [0.8, 1.6, 2.4]
             else:
+                # Cas "normal" → TP standard
                 tp_mults = TP_ATR_MULTS_STD
 
             tp_prices = [float(price + m * atr_entry) for m in tp_mults]
+
 
             # 🔁 on réutilise le stop calculé plus haut pour le sizing
             sl_initial = sl_initial
