@@ -3925,7 +3925,7 @@ async def process_symbol(symbol):
                 "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
                 "confidence": confidence,
                 "stop": sl_initial,
-                "position_pct": position_pct,    # <- sizing au risque
+                "position_pct": position_pct,
                 "trade_id": trade_id,
                 "tp_times": {},
                 "sl_initial": sl_initial,
@@ -3933,8 +3933,10 @@ async def process_symbol(symbol):
                 "strategy": "standard",
                 "atr_at_entry": atr_entry,
                 "tp_multipliers": tp_mults,
-                "tp_prices": tp_prices,          # <-- stocke les niveaux réels
+                "tp_prices": tp_prices,
+                "adx_entry": adx_value,  # ⚠️ si ta variable s'appelle adx, mets "adx" ici
             }
+
             last_trade_time[symbol] = datetime.now(timezone.utc)
             save_trades()
 
