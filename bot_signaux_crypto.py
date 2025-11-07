@@ -2725,38 +2725,85 @@ async def process_symbol(symbol):
                         _finalize_exit(symbol, price, pnl_pct, raison_txt, "SELL", ctx)
                         return
 
-            # ====== 6) Peak-to-valley : ne pas rendre un gros gain ======
-            try:
-                peak_dd = max_gain_pct - gain   # max_gain_pct vient du calcul TP (F1)
-            except Exception:
-                peak_dd = 0.0
+                        # ====== 6) Peak-to-valley : ne pas rendre un gros gain ======
+            # ➜ Version améliorée : activé seulement après TP2 + temps minimum, et desserré si le trend est très fort
 
-            # Paramètres tunables via ENV si tu veux
-            PEAK_MIN_GAIN = float(os.getenv("PEAK_MIN_GAIN_PCT", "5.0"))   # gain max minimum (ex: 5%)
-            PEAK_MAX_DD   = float(os.getenv("PEAK_MAX_DRAWDOWN_PCT", "2.0"))  # retracement toléré (ex: 2%)
+            trade = trades.get(symbol, {})
 
-            if (
-                max_gain_pct >= PEAK_MIN_GAIN   # le trade a déjà bien performé
-                and peak_dd >= PEAK_MAX_DD      # on a rendu au moins 2% depuis le top
-                and gain > 1.0                  # on reste quand même en gain
-            ):
-                vol5_loc = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
-                vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
-                ctx = {
-                    "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
-                    "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,
-                    "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
-                    "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
-                    "vol5": vol5_loc, "vol20": vol20_loc,
-                    "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
-                    "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
-                    "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
-                    "elapsed_h": elapsed_time
-                }
-                raison = f"Peak-to-valley: max {max_gain_pct:.2f}% → drawdown {peak_dd:.2f}%"
-                pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
-                _finalize_exit(symbol, price, pnl_pct, raison, "PEAK_EXIT", ctx)
-                return
+            # 6.a) On n'arme le P2V qu'après TP2
+            if trade.get("tp2", False):
+
+                # 6.b) Temps minimum avant d'autoriser le P2V (en minutes)
+                MIN_MINUTES_BEFORE_P2V = float(os.getenv("MIN_MINUTES_BEFORE_P2V", "45"))
+
+                entry_time = trade.get("time")
+                elapsed_min = None
+                if entry_time:
+                    try:
+                        if isinstance(entry_time, str):
+                            # "YYYY-MM-DD HH:MM" ou ISO → on convertit en datetime
+                            entry_dt = datetime.fromisoformat(entry_time)
+                        else:
+                            entry_dt = entry_time
+                        if entry_dt.tzinfo is None:
+                            entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+                        elapsed_min = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
+                    except Exception:
+                        elapsed_min = None
+
+                # Si on n'a pas le temps ou que c'est trop tôt, on ne déclenche pas le P2V
+                if elapsed_min is not None and elapsed_min >= MIN_MINUTES_BEFORE_P2V:
+
+                    # 6.c) Calcul du drawdown peak-to-valley
+                    try:
+                        max_gain_pct_val = float(max_gain_pct)
+                        current_gain_pct = float(gain)
+                        drawdown_pct = max_gain_pct_val - current_gain_pct
+                    except Exception:
+                        max_gain_pct_val = max_gain_pct
+                        current_gain_pct = gain
+                        drawdown_pct = 0.0
+
+                    # ADX à l'entrée (stocké dans le trade)
+                    adx_entry = float(trade.get("adx_entry", 25.0))
+
+                    # Base : drawdown toléré
+                    base_dd = float(os.getenv("P2V_BASE_DD", "2.8"))  # ex: 2.8%
+
+                    # Si le trend est très fort, on laisse plus respirer
+                    if adx_entry >= 35:
+                        base_dd += 1.0      # → ~3.8%
+                    if adx_entry >= 45:
+                        base_dd += 1.0      # → ~4.8%
+
+                    # Gain minimum pour armer le P2V (sinon, on ne touche pas)
+                    MIN_GAIN_TO_ARM_P2V = float(os.getenv("P2V_MIN_GAIN_TO_ARM_P2V", "6.0"))
+
+                    if (
+                        max_gain_pct_val >= MIN_GAIN_TO_ARM_P2V    # le trade a déjà bien performé
+                        and drawdown_pct >= base_dd                 # drawdown depuis le top
+                        and current_gain_pct > 1.0                  # on reste en gain
+                    ):
+                        vol5_loc = float(np.mean(volumes[-5:])) if len(volumes) >= 5 else 0.0
+                        vol20_loc = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else 0.0
+                        ctx = {
+                            "rsi": rsi, "macd": macd, "signal": signal, "adx": adx_value,
+                            "atr": atr, "st_on": supertrend_signal, "ema25": ema25, "ema200": ema200,
+                            "ema50_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 50) if get_cached(symbol, '4h') else 0.0,
+                            "ema200_4h": ema_tv([float(x[4]) for x in get_cached(symbol, '4h')], 200) if get_cached(symbol, '4h') else 0.0,
+                            "vol5": vol5_loc, "vol20": vol20_loc,
+                            "vol_ratio": (vol5_loc / max(vol20_loc, 1e-9)) if vol20_loc else 0.0,
+                            "btc_up": MARKET_STATE.get("btc", {}).get("up", False),
+                            "eth_up": MARKET_STATE.get("eth", {}).get("up", False),
+                            "elapsed_h": elapsed_time
+                        }
+                        raison = (
+                            f"Peak-to-valley: max {max_gain_pct_val:.2f}% → "
+                            f"drawdown {drawdown_pct:.2f}% (ADX entrée={adx_entry:.1f})"
+                        )
+                        pnl_pct = compute_pnl_pct(trades[symbol]["entry"], price)
+                        _finalize_exit(symbol, price, pnl_pct, raison, "PEAK_EXIT", ctx)
+                        return 
 
                         # ====== Auto-close dur 24h (mode day trading) ======
             if elapsed_time >= AUTO_CLOSE_HARD_H:
