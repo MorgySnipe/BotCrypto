@@ -323,6 +323,21 @@ TRAIL_TIERS = [
     (6.0, 0.55),  # ← avant 0.45
 ]
 TRAIL_BE_AFTER = 1.2
+# === Stop respirant post-TP1 (BE + max(0.25%, 0.6×ATR/entry)) ===
+RESP_BE_MIN_PCT   = float(os.getenv("RESP_BE_MIN_PCT", "0.0025"))  # 0.25%
+RESP_BE_ATR_MULT  = float(os.getenv("RESP_BE_ATR_MULT", "0.6"))    # 0.6×ATR
+
+def _resp_stop_after_tp1(entry: float, atr: float) -> float:
+    """
+    BE + max(RESP_BE_MIN_PCT, RESP_BE_ATR_MULT*ATR/entry)
+    Retourne le niveau de stop recommandé.
+    """
+    try:
+        pad_pct = max(RESP_BE_MIN_PCT, (RESP_BE_ATR_MULT * atr) / max(entry, 1e-9))
+        return entry * (1.0 + pad_pct)
+    except Exception:
+        return entry  # fail-safe
+
 # --- Take-profits dynamiques (multiplicateurs d'ATR) ---
 TP_ATR_MULTS_STD = [1.0, 2.0, 3.0]      # standard : TP1=1×ATR, TP2=2×ATR, TP3=3×ATR
 # --- Stops init en % ---
@@ -341,7 +356,8 @@ except NameError:
     # si _env_float n'existe pas chez toi, fallback simple:
     ABS_MIN_PRICE_DIST_ATR_STRONG = float(os.getenv("ABS_MIN_PRICE_DIST_ATR_STRONG", "0.45"))
 
-TRAIL_BEFORE_TP1_MAX        = 0.0
+# [#patch-trail-noBeforeTp1]
+TRAIL_BEFORE_TP1_MAX        = 1.8   # % de gain mini avant de trailed si TP1 pas touché
 VSTOP_CONFIRM_1M            = True
 VSTOP_CONFIRM_1M_N          = 2
 VSTOP_TOLERANCE_PCT         = 0.0005
@@ -1974,6 +1990,38 @@ def _finalize_exit(symbol, exit_price, pnl_pct, reason, event_name, ctx):
     except Exception:
         traceback.print_exc()
 
+# [#tp1-stop-breathing] +f set_stop_after_tp1
+def set_stop_after_tp1(symbol: str, price_at_tp1: float):
+    """
+    Fixe le stop après TP1 de façon 'respirante':
+      stop >= BE + max(0.25%, 0.6×ATR/entry)
+    Marque tp1 comme fait et persiste.
+    """
+    if symbol not in trades:
+        return
+
+    k1h = get_cached(symbol, "1h")
+    if not k1h or len(k1h) < 30:
+        return
+
+    entry = float(trades[symbol].get("entry", price_at_tp1))
+    # ATR 1h (version cache TV-like)
+    atr_1h = float(atr_tv_cached(symbol, k1h, period=14))
+    # marge minimale en % du prix d'entrée
+    min_pad_pct = 0.25 / 100.0
+    # 0.6 × ATR rapporté à l'entrée (en %)
+    min_pad_atr = 0.6 * (atr_1h / max(entry, 1e-9))
+    pad_pct = max(min_pad_pct, min_pad_atr)
+
+    be_plus = entry * (1.0 + pad_pct)
+    prev_stop = float(trades[symbol].get("stop", entry))
+    new_stop = max(prev_stop, be_plus)
+
+    trades[symbol]["stop"] = float(new_stop)
+    trades[symbol]["tp1"] = True
+    save_trades()
+
+
 # ====== /CSV détaillé ======
 # [#patch-trailing-v2]
 def trailing_stop_advanced(symbol, current_price, atr_value=None, atr_period=14):
@@ -2086,9 +2134,14 @@ def trailing_stop_advanced(symbol, current_price, atr_value=None, atr_period=14)
     if (not tp1_done) and (gain_pct < TRAIL_BEFORE_TP1_MAX):
         return
     if gain_pct >= 3.0:
-        new_stop = max(new_stop, ema_guard + 0.60 * atr)   # ≥ +0.6×ATR au-dessus du guard
+        new_stop = max(new_stop, ema_guard + 0.60 * atr)
     if gain_pct >= 5.0:
         new_stop = max(new_stop, entry * 1.006)            # BE + 0.6%
+
+    # 🔒 Anti-whipsaw post-TP1 : ne jamais descendre sous (EMA20 - 0.40×ATR)
+    if tp1_done:
+        new_stop = max(new_stop, ema20_1h - 0.40 * atr)
+
 
     if new_stop > prev_stop:
         trades[symbol]["stop"] = float(new_stop)
@@ -2449,17 +2502,16 @@ async def process_symbol(symbol):
 
                         # BE après TP1 ; après TP2/TP3 on pousse le stop progressivement
                         if tp_idx == 1:
-                            BE_EPS_AFTER_TP1 = float(os.getenv("BE_EPS_AFTER_TP1", "0.0005"))  # +0.05%
-                            new_stop_level = max(entry, entry * (1.0 + BE_EPS_AFTER_TP1))
+                            # Stop “respirant” : BE + max(0.25%, 0.6×ATR/entry)
+                            set_stop_after_tp1(symbol, price_at_tp1=price)
                         else:
-                            # petit BE+ conditionné au seuil atteint
+                            # petit BE+ conditionné au seuil atteint, inchangé
                             new_stop_level = max(
                                 entry,
                                 entry * (1.0 + max(0.0, threshold_pct - 0.6) / 100.0)
                             )
-
-                        trades[symbol]["stop"] = max(stop, new_stop_level)
-                        save_trades()
+                            trades[symbol]["stop"] = max(trades[symbol].get("stop", entry), new_stop_level)
+                            save_trades()
 
                         # message TP
                         msg = format_tp_msg(
